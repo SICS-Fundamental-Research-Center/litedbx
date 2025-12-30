@@ -88,8 +88,8 @@ def main():
 
     # Evaluate on each query
     for query in [
-        # "q1", 
-        # "q3", 
+        "q1", 
+        "q3", 
         "q8"
     ]:
         try:

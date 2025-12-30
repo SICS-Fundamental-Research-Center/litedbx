@@ -61,10 +61,31 @@ class RuleCondition:
 
 
 class Rule:
-    """A rule with one or more conditions (AND logic)."""
+    """
+    A bidirectional rule with conditions and a predicted class.
 
-    def __init__(self, conditions: List[RuleCondition]):
+    Rules may predict either class 0 or class 1.
+    """
+
+    def __init__(self, conditions: List[RuleCondition], predicted_label: int = 1):
+        """
+        Initialize a rule.
+
+        Args:
+            conditions: List of conditions (AND logic)
+            predicted_label: The class this rule predicts (0 or 1)
+        """
         self.conditions = conditions
+        self.predicted_label = predicted_label
+
+        # Statistics tracking
+        self.stats = {
+            'coverage': 0,
+            'correct': 0,
+            'incorrect': 0,
+            'precision': 0.0,
+            'recall': 0.0
+        }
 
     def get_covered_indices(self, X: pd.DataFrame) -> pd.Series:
         """Return boolean mask of samples covered by this rule."""
@@ -75,12 +96,34 @@ class Rule:
 
         return covered
 
-    def __str__(self):
-        if len(self.conditions) == 1:
-            return f"IF {self.conditions[0]} THEN predict 1"
+    def update_stats(self, X: pd.DataFrame, y: pd.Series):
+        """Update rule statistics on given data."""
+        covered = self.get_covered_indices(X)
+        self.stats['coverage'] = covered.sum()
+
+        if self.stats['coverage'] == 0:
+            self.stats['precision'] = 0.0
+            self.stats['recall'] = 0.0
+            return
+
+        # For positive-predicting rules
+        if self.predicted_label == 1:
+            correct = ((y == 1) & covered).sum()
+            self.stats['correct'] = correct
+            self.stats['incorrect'] = ((y == 0) & covered).sum()
+            self.stats['precision'] = correct / self.stats['coverage'] if self.stats['coverage'] > 0 else 0.0
+            self.stats['recall'] = correct / (y == 1).sum() if (y == 1).sum() > 0 else 0.0
+        # For negative-predicting rules
         else:
-            conds = " AND ".join(str(c) for c in self.conditions)
-            return f"IF ({conds}) THEN predict 1"
+            correct = ((y == 0) & covered).sum()
+            self.stats['correct'] = correct
+            self.stats['incorrect'] = ((y == 1) & covered).sum()
+            self.stats['precision'] = correct / self.stats['coverage'] if self.stats['coverage'] > 0 else 0.0
+            self.stats['recall'] = correct / (y == 0).sum() if (y == 0).sum() > 0 else 0.0
+
+    def __str__(self):
+        cond_str = str(self.conditions[0]) if len(self.conditions) == 1 else " AND ".join(f"({c})" for c in self.conditions)
+        return f"IF ({cond_str}) THEN predict {self.predicted_label}"
 
     def __repr__(self):
         return self.__str__()
@@ -88,10 +131,10 @@ class Rule:
     def __eq__(self, other):
         if not isinstance(other, Rule):
             return False
-        return self.conditions == other.conditions
+        return self.conditions == other.conditions and self.predicted_label == other.predicted_label
 
     def __hash__(self):
-        return hash(tuple(self.conditions))
+        return hash((tuple(self.conditions), self.predicted_label))
 
 
 # =============================================================================
@@ -141,6 +184,8 @@ class RuleClassifier:
 
         self.rules: List[Rule] = []
         self.best_cv_f1: float = 0.0
+        self.default_class: int = 1  # Default class for tie/no-rule situations
+        self.llm_label_column: str = "LLM_label"  # Column name for LLM prior
 
     # -------------------------------------------------------------------------
     # Rule Generation
@@ -207,10 +252,18 @@ class RuleClassifier:
         def extract_path(node_id: int, current_conditions: List[RuleCondition]):
             """Recursively extract rules from tree paths."""
             if children_left[node_id] == children_right[node_id]:
-                # Leaf node - check if it predicts class 1
-                if tree.tree_.value[node_id][0][1] > tree.tree_.value[node_id][0][0]:
-                    if current_conditions:
-                        rules.append(Rule(current_conditions.copy()))
+                # Leaf node - extract rules for BOTH classes
+                class_0_count = tree.tree_.value[node_id][0][0]
+                class_1_count = tree.tree_.value[node_id][0][1]
+
+                # Extract rule for whichever class is dominant in this leaf
+                if current_conditions:
+                    if class_1_count > class_0_count:
+                        # Leaf predicts class 1
+                        rules.append(Rule(current_conditions.copy(), predicted_label=1))
+                    elif class_0_count > class_1_count:
+                        # Leaf predicts class 0
+                        rules.append(Rule(current_conditions.copy(), predicted_label=0))
                 return
 
             # Internal node - continue traversing
@@ -264,17 +317,72 @@ class RuleClassifier:
 
         return f1, precision, recall, accuracy
 
-    def predict_with_rules(self, X: pd.DataFrame, rules: List[Rule]) -> np.ndarray:
-        """Predict using rule set: 1 if ANY rule fires, else 0."""
+    def _determine_default_class(self, X: pd.DataFrame, y: pd.Series) -> int:
+        """
+        Determine default class using LLM_label column.
+
+        Uses majority class of LLM_label over training data.
+        """
+        if self.llm_label_column in X.columns:
+            llm_labels = X[self.llm_label_column]
+            # Use majority LLM_label as default
+            default = int(llm_labels.mode()[0]) if len(llm_labels.mode()) > 0 else 1
+            return default
+        else:
+            # Fallback: majority of true labels
+            return int(y.mode()[0]) if len(y.mode()) > 0 else 1
+
+    def predict_with_rules(self, X: pd.DataFrame, rules: List[Rule],
+                           default_class: Optional[int] = None) -> np.ndarray:
+        """
+        Predict using voting-based rule system.
+
+        For each sample:
+        1. Collect all firing rules
+        2. Each rule votes for its predicted class
+        3. Decision: majority vote wins
+        4. Tie or no rules: use default_class
+        """
         if not rules:
-            return np.zeros(len(X), dtype=int)
+            # No rules, use default class
+            if default_class is None and self.llm_label_column in X.columns:
+                defaults = X[self.llm_label_column].values
+                return np.array(defaults, dtype=int)
+            else:
+                def_class = default_class if default_class is not None else self.default_class
+                return np.full(len(X), def_class, dtype=int)
 
-        covered = pd.Series([False] * len(X), index=X.index)
+        predictions = []
 
-        for rule in rules:
-            covered |= rule.get_covered_indices(X)
+        for idx in X.index:
+            sample = X.loc[[idx]]
 
-        return np.array(covered.astype(int))
+            # Collect votes from all firing rules
+            votes_pos = 0
+            votes_neg = 0
+
+            for rule in rules:
+                covered = rule.get_covered_indices(sample).iloc[0]
+                if covered:
+                    if rule.predicted_label == 1:
+                        votes_pos += 1
+                    else:
+                        votes_neg += 1
+
+            # Decision logic
+            if votes_pos > votes_neg:
+                predictions.append(1)
+            elif votes_neg > votes_pos:
+                predictions.append(0)
+            else:
+                # Tie or no rule fired
+                if self.llm_label_column in sample.columns:
+                    predictions.append(int(sample[self.llm_label_column].iloc[0]))
+                else:
+                    def_class = default_class if default_class is not None else self.default_class
+                    predictions.append(def_class)
+
+        return np.array(predictions)
 
     # -------------------------------------------------------------------------
     # Feedback-Driven Refinement
@@ -547,6 +655,12 @@ class RuleClassifier:
 
     def fit(self, X: pd.DataFrame, y: pd.Series):
         """Train the classifier using cross-validation."""
+        # Determine default class using LLM_label
+        self.default_class = self._determine_default_class(X, y)
+
+        if self.debug:
+            print(f"[DEBUG] Default class: {self.default_class}")
+
         # Generate candidate rules
         if self.use_tree_rules:
             if self.debug:
@@ -708,23 +822,33 @@ class RuleClassifier:
             print(f"{i}. {rule}")
 
     def print_dnf(self):
-        """Print rules in Disjunctive Normal Form (DNF)."""
+        """Print rules in bidirectional format with voting semantics."""
         if not self.rules:
-            print("\nDNF: FALSE (no rules)")
+            print("\nNo rules learned")
+            print(f"Default class: {self.default_class}")
             return
 
-        # Convert each rule (conjunction) to string
-        conjunctions = []
-        for rule in self.rules:
-            if len(rule.conditions) == 1:
-                conjunctions.append(f"({rule.conditions[0]})")
-            else:
-                conds = " AND ".join(f"({c})" for c in rule.conditions)
-                conjunctions.append(f"({conds})")
+        print(f"\nBidirectional Rules ({len(self.rules)} rules):")
+        print(f"Default class: {self.default_class}")
+        print("-" * 60)
 
-        # Join with OR
-        dnf = " OR ".join(conjunctions)
-        print(f"\nDNF Rule:\n{dnf}")
+        pos_rules = [r for r in self.rules if r.predicted_label == 1]
+        neg_rules = [r for r in self.rules if r.predicted_label == 0]
+
+        if pos_rules:
+            print(f"\nPositive-predicting rules ({len(pos_rules)}):")
+            for i, rule in enumerate(pos_rules, 1):
+                print(f"  P{i}. {rule}")
+
+        if neg_rules:
+            print(f"\nNegative-predicting rules ({len(neg_rules)}):")
+            for i, rule in enumerate(neg_rules, 1):
+                print(f"  N{i}. {rule}")
+
+        print("\nDecision Logic:")
+        print("  - Each firing rule votes for its predicted class")
+        print("  - Majority vote wins")
+        print("  - Tie or no rules: use default class")
 
 
 # =============================================================================
