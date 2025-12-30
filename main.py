@@ -8,6 +8,7 @@ Decoupled design:
 
 from data_fetcher import get_data
 from ldb_classifier import RuleClassifier
+import pandas as pd
 
 
 def evaluate(pred_ids, true_ids):
@@ -107,7 +108,11 @@ def main():
     results = {}
 
     # Evaluate on each query
-    for query in ["q1", "q3", "q8"]:
+    for query in [
+        "q1", 
+        # "q3", 
+        # "q8"
+    ]:
         try:
             # Step 1: Train classifier
             clf, X_train, y_train, X_test, y_test = train_rule_based_classifier(
@@ -164,5 +169,13 @@ def main():
     print("\n" + "="*80)
 
 
+def test():
+    df = pd.read_csv("data/medical_q1.csv").reset_index(drop=True)
+    pred_ids = df[(df["LLM_urgent_care_required"] == False) & (df["LLM_label"] == True)].index.tolist()
+    true_ids = df[df["label"] == 1].index.tolist()
+    print(evaluate(pred_ids, true_ids))
+
+
 if __name__ == "__main__":
     main()
+    # test()
