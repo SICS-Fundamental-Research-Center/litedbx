@@ -110,8 +110,8 @@ def main():
     # Evaluate on each query
     for query in [
         "q1", 
-        # "q3", 
-        # "q8"
+        "q3", 
+        "q8"
     ]:
         try:
             # Step 1: Train classifier
@@ -170,8 +170,12 @@ def main():
 
 
 def test():
-    df = pd.read_csv("data/medical_q1.csv").reset_index(drop=True)
-    pred_ids = df[(df["LLM_urgent_care_required"] == False) & (df["LLM_label"] == True)].index.tolist()
+    df = pd.read_csv("data/medical_q8.csv").reset_index(drop=True)
+    pred_ids = df[
+        ((df["gender"] == "Female") & (df["LLM_border_definition"] >= 0.325)) | 
+        ((df["LLM_label"] == False) & (df["LLM_shape_symmetry"] <= 0.375)) | 
+        (df["LLM_label"] == True)
+    ].index.tolist()
     true_ids = df[df["label"] == 1].index.tolist()
     print(evaluate(pred_ids, true_ids))
 
