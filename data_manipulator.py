@@ -35,7 +35,12 @@ class DataManipulator:
         else:
             return "TEXT"
 
-    def semantic_map(self, col_name: str, prompt: str, new_col_name: Optional[str] = None) -> None:
+    def semantic_map(
+            self, 
+            col_name: str, 
+            prompt: str, 
+            new_col_name: Optional[str] = None, 
+            use_proxy: bool = False) -> None:
         """Apply semantic mapping to a column and append the result as a new column.
 
         Args:
@@ -57,14 +62,26 @@ class DataManipulator:
         print(f"Processing {len(data_items)} items...")
 
         # Call invoke_parallel_with_proxy
-        results = asyncio.run(
-            self.llm_client.invoke_parallel_with_proxy(
-                modality=modality,
-                prompt=prompt,
-                data_items=data_items,
-                response_model=BooleanFeatureResponse,
+        results = None
+        if use_proxy:
+            results = asyncio.run(
+                self.llm_client.invoke_parallel_with_proxy(
+                    modality=modality,
+                    prompt=prompt,
+                    data_items=data_items,
+                    response_model=BooleanFeatureResponse,
+                )
             )
-        )
+        else:
+            results = asyncio.run(
+                self.llm_client.invoke_parallel(
+                    modality=modality,
+                    is_remote=True,
+                    prompt=prompt,
+                    data_items=data_items,
+                    response_model=BooleanFeatureResponse,
+                )
+            )
 
         # Append the mapped new column to the dataframe
         self.df[new_col_name] = results
@@ -152,17 +169,18 @@ class DataManipulator:
 
 if __name__ == "__main__":
     # Example usage
-    sem_map_prompt = f"""
+    semmap_symptom_prompt = f"""
     You are an allergy specialist analyzing patient symptoms to detect allergies. Please analyse the provided symptom. Return True if allergy is present, False otherwise. Do not return any explanations or additional text.
     """
 
     manipulator = DataManipulator("data/medical_q1_complete.csv")
     manipulator.semantic_map(
         col_name="symptoms",
-        prompt=sem_map_prompt,
-        new_col_name="LLM_label"
+        prompt=semmap_symptom_prompt,
+        new_col_name="LLM_label",
+        use_proxy=False,
     )
-    manipulator.store_dataframe("data/medical_q1_with_llm_labels.csv")
+    manipulator.store_dataframe("data/medical_q1_with_llm_labels_x.csv")
 
-    dm = DataManipulator("data/medical_q1_with_llm_labels.csv")
+    dm = DataManipulator("data/medical_q1_with_llm_labels_x.csv")
     dm.evaluate_binary_classification(pred_col="LLM_label", true_col="label")
