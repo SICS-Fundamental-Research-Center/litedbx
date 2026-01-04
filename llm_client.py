@@ -60,7 +60,7 @@ class LiteLLMWrapper:
         self.client_struct_async = instructor.from_litellm(litellm.acompletion)
 
         self.max_retries = 50
-        self.parallelism = 100
+        self.parallelism = 20
         self.sem = asyncio.Semaphore(self.parallelism)
 
         self.kwargs = {
