@@ -256,7 +256,7 @@ class LiteLLMWrapper:
                 f"Each data item should have results from all local {modality} models."
             resp_set = set([resp for _, resp in group])
             if len(resp_set) == 1:
-                sound_results.append(group)
+                sound_results.append(group[0])
             else:
                 # No consensus, need to invoke remote model
                 params = self._construct_prompt_params(
