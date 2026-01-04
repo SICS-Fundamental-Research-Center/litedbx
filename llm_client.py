@@ -1,5 +1,6 @@
 import litellm
 import instructor
+from instructor.mode import Mode
 import asyncio
 from tqdm.asyncio import tqdm_asyncio
 from typing import Optional, List, Dict, Any, Type
@@ -10,6 +11,15 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
+
+class BooleanFeatureResponse(BaseModel):
+    """Response model for boolean feature extraction."""
+    value: bool
+
+
+class NumericalFeatureResponse(BaseModel):
+    """Response model for numerical feature extraction."""
+    value: float
 
 
 class PromptParams:
@@ -56,8 +66,9 @@ class PromptParams:
 class LiteLLMWrapper:
     def __init__(self):
         self.client = litellm
-        self.client_struct = instructor.from_litellm(litellm.completion)
-        self.client_struct_async = instructor.from_litellm(litellm.acompletion)
+        # Use Mode.JSON when initializing instructor to avoid function calling with vLLM
+        self.client_struct = instructor.from_litellm(litellm.completion, mode=Mode.JSON)
+        self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.JSON)
 
         self.max_retries = 50
         self.parallelism = 20
@@ -72,20 +83,49 @@ class LiteLLMWrapper:
             "random_seed": 42,
         }
 
-        self.remote_text_kwargs = {
-            "model": "openai/Qwen3-235B-A22B",
-            "api_key": os.getenv("BLSC_API_KEY"),
-            "api_base": os.getenv("BLSC_ENDPOINT"),
-        }
-        self.remote_vision_kwargs = {
-            "model": "openai/Qwen3-VL-235B-A22B-Thinking",
-            "api_key": os.getenv("BLSC_API_KEY"),
-            "api_base": os.getenv("BLSC_ENDPOINT"),
-        }
-        self.local_text_kwargs = {
-            "model": "hosted_vllm//ssd_data/models/llama3-8b-instruct/",
-            "api_key": "*",
-            "api_base": "http://localhost:8000/v1",
+        self.lm_kwargs = {
+            "REMOTE": {
+                "TEXT": [
+                    {
+                        "model": "openai/Qwen3-235B-A22B",
+                        "api_key": os.getenv("BLSC_API_KEY"),
+                        "api_base": os.getenv("BLSC_ENDPOINT"),
+                    },
+                ],
+                "IMAGE": [
+                    {
+                        "model": "openai/Qwen3-VL-235B-A22B-Thinking",
+                        "api_key": os.getenv("BLSC_API_KEY"),
+                        "api_base": os.getenv("BLSC_ENDPOINT"),
+                    },
+                ]
+            },
+            "LOCAL": {
+                "TEXT": [
+                    {
+                        "model": "hosted_vllm//ssd_data/models/llama3-8b-instruct/",
+                        "api_key": "*",
+                        "api_base": "http://localhost:8000/v1",
+                    },
+                    {
+                        "model": "hosted_vllm//ssd_data/models/Qwen3-4B-Instruct-2507",
+                        "api_key": "*",
+                        "api_base": "http://localhost:8001/v1",
+                    }
+                ],
+                "IMAGE": [
+                    {
+                        "model": "hosted_vllm//ssd_data/models/Qwen3-VL-8B-Instruct",
+                        "api_key": "*",
+                        "api_base": "http://localhost:8002/v1",
+                    },
+                    {
+                        "model": "hosted_vllm//ssd_data/models/llava-v1___6-mistral-7b-hf",
+                        "api_key": "*",
+                        "api_base": "http://localhost:8003/v1",
+                    }
+                ]
+            }
         }
 
     def invoke(
@@ -93,20 +133,24 @@ class LiteLLMWrapper:
             is_remote: bool, 
             modality: str, 
             prompt: str, 
-            data_items: Optional[str] = None,
-            reponse_model: Optional[Type[BaseModel]] = None
+            data_item: Optional[str] = None,
+            response_model: Optional[Type[BaseModel]] = None,
+            enable_proxy: Optional[bool] = False,
+            model_id: Optional[int] = None,
     ):
-        params = PromptParams(
-            kwargs=self._get_model_kw(is_remote, modality)
+        params = self._construct_prompt_params(
+            is_remote=is_remote,
+            modality=modality,
+            prompt=prompt,
+            data_item=data_item,
+            response_model=response_model,
+            model_index=model_id,
         )
-        params.setup_prompt(prompt)
-        if data_items:
-            params.add_data_item(data_items)
-        if reponse_model:
-            params.structuring(reponse_model)
-            return self.client_struct.chat.completions.create(**params.kwargs)
+
+        if response_model:
+            return self._invoke_structured(params)
         else:
-            return self.client.completion(**params.kwargs)
+            return self._invoke(params)
 
     async def invoke_parallel(
         self,
@@ -115,70 +159,158 @@ class LiteLLMWrapper:
         prompt: str,
         data_items: List[str],
         response_model: Optional[Type[BaseModel]] = None,
+        enable_proxy: Optional[bool] = False,
+        model_id: Optional[int] = None,
     ):
-        async def exec(worker_id: int, prompt_params: PromptParams):
-            attempt = 0
-
-            while attempt <= self.max_retries:
-                try:
-                    async with self.sem:
-                        if response_model is not None:
-                            resp = (
-                                await self.client_struct_async.chat.completions.create(
-                                    **prompt_params.kwargs
-                                )
-                            )
-                        else:
-                            resp = await self.client.acompletion(**prompt_params.kwargs)
-                        return (worker_id, resp)
-                except Exception as e:
-                    attempt += 1
-
-                    if attempt > self.max_retries:
-                        raise e
-
-                    await asyncio.sleep(min(2**attempt, 30))
-
         tasks = []
         for idx, data_item in enumerate(data_items):
-            params = PromptParams(
-                kwargs=self._get_model_kw(is_remote=is_remote, modality=modality)
+            params = self._construct_prompt_params(
+                is_remote=is_remote,
+                modality=modality,
+                prompt=prompt,
+                data_item=data_item,
+                response_model=response_model,
+                model_index=model_id,
             )
-            params.setup_prompt(prompt)
-            params.add_data_item(data_item)
-            if response_model is not None:
-                params.structuring(response_model)
-
-            tasks.append(exec(idx, params))
+            if response_model:
+                tasks.append(self._ainvoke_structured(idx, params))
+            else:
+                tasks.append(self._ainvoke(idx, params))
 
         results = await tqdm_asyncio.gather(*tasks)
-
         results.sort(key=lambda x: x[0])
         return [resp for _, resp in results]
     
-    
-    def _get_model_kw(self, is_remote: bool, modality: str):
-        if is_remote and modality == "TEXT":
-            return dict(self.remote_text_kwargs, **self.kwargs)
-        elif is_remote and modality == "VISION":
-            return dict(self.remote_vision_kwargs, **self.kwargs)
-        elif not is_remote and modality == "TEXT":
-            return dict(self.local_text_kwargs, **self.kwargs)
+    def _chat_by_proxy(
+            self,
+            modality: str,
+            prompt: str,
+            data_item: Optional[str] = None,
+            response_model: Optional[Type[BaseModel]] = None,
+    ):
+        assert len(self.lm_kwargs.get("LOCAL", {}).get(modality, [])) >= 2, \
+            f"At least two local {modality} models are required for proxy chat."
+        
+        results = set()
+
+        for model_id in range(len(self.lm_kwargs.get("LOCAL", {}).get(modality, []))):
+            params = self._construct_prompt_params(
+                is_remote=False,
+                modality=modality,
+                prompt=prompt,
+                data_item=data_item,
+                response_model=response_model,
+                model_index=model_id,
+            )
+            if response_model:
+                result = self._invoke_structured(params=params)
+            else:
+                result = self._invoke(params=params)
+            results.add(result)
+
+        if len(results) == 1:
+            return results.pop(), True
         else:
-            raise ValueError(
-                f"Invalid model config for is_remote={is_remote}, modality={modality}")
+            return None, False
 
 
+    def _construct_prompt_params(
+            self, 
+            is_remote: bool,
+            modality: str,
+            prompt: str,
+            data_item: Optional[str] = None,
+            response_model: Optional[Type[BaseModel]] = None,
+            model_index: Optional[int] = None,
+    ) -> PromptParams:
+        if not model_index:
+            model_index = 0
+        params = PromptParams(
+            kwargs=self._get_model_kw(is_remote=is_remote, modality=modality, model_index=model_index)
+        )
+        params.setup_prompt(prompt)
+        if data_item:
+            params.add_data_item(data_item)
+        if response_model:
+            params.structuring(response_model)
+        return params
+    
+    def _invoke(self, params: PromptParams):
+        resp =  self.client.completion(**params.kwargs)
+        return resp
+
+    def _invoke_structured(self, params: PromptParams):
+        # Call instructor - mode is already set during initialization
+        resp = self.client_struct.chat.completions.create(
+            **params.kwargs
+        )
+        return resp.value
+
+    async def _ainvoke(self, worker_id, params: PromptParams):
+        attempt = 0
+
+        while attempt <= self.max_retries:
+            try:
+                async with self.sem:
+                    resp = await self.client.acompletion(**params.kwargs)
+                    return (worker_id, resp)
+            except Exception as e:
+                attempt += 1
+                if attempt > self.max_retries:
+                    raise e
+                await asyncio.sleep(min(2**attempt, 30))
+
+
+    async def _ainvoke_structured(self, worker_id, params: PromptParams):
+        attempt = 0
+
+        while attempt <= self.max_retries:
+            try:
+                async with self.sem:
+                    # Call instructor - mode is already set during initialization
+                    resp = (
+                        await self.client_struct_async.chat.completions.create(
+                            **params.kwargs
+                        )
+                    )
+                    return (worker_id, resp.value)
+            except Exception as e:
+                attempt += 1
+                if attempt > self.max_retries:
+                    raise e
+                await asyncio.sleep(min(2**attempt, 30))
+    
+    
+    def _get_model_kw(self, is_remote: bool, modality: str, model_index: Optional[int] = None):
+        if not model_index:
+            model_index = 0
+        lm_type = "REMOTE" if is_remote else "LOCAL"
+
+        lm_params = self.lm_kwargs.get(lm_type, {})\
+                                  .get(modality, [])
+        assert len(lm_params) > model_index, \
+            f"No model found for type {lm_type} and modality {modality} at index {model_index}"
+
+        return  dict(lm_params[model_index], **self.kwargs)
+
+
+
+        
+        
+
+        
 
 
 if __name__ == "__main__":
     llm_client = LiteLLMWrapper()
-    print(llm_client._get_model_kw(is_remote=False, modality="TEXT"))
-    result = llm_client.invoke(
-        is_remote=False,
+
+
+    result, success = llm_client._chat_by_proxy(
         modality="TEXT",
-        prompt="Hello, how are you?",
+        prompt="Analyze whether this patient has an allergy based on their symptoms. You must ONLY respond with a bool object (True if allergy is present, False otherwise).",
+        data_item="Along with recurrent headaches and blurred vision, I suffer acid reflux and trouble digesting my food.",
+        response_model=BooleanFeatureResponse,
     )
-    print("=" * 50)
-    print(result)
-    print("=" * 50)
+
+    print(result, success)
+
