@@ -6,6 +6,7 @@ from tqdm.asyncio import tqdm_asyncio
 from typing import Optional, List, Dict, Any, Type
 from pydantic import BaseModel
 from pathlib import Path
+from itertools import groupby
 import base64
 from dotenv import load_dotenv
 import os
@@ -135,7 +136,6 @@ class LiteLLMWrapper:
             prompt: str, 
             data_item: Optional[str] = None,
             response_model: Optional[Type[BaseModel]] = None,
-            enable_proxy: Optional[bool] = False,
             model_id: Optional[int] = None,
     ):
         params = self._construct_prompt_params(
@@ -152,6 +152,46 @@ class LiteLLMWrapper:
         else:
             return self._invoke(params)
 
+
+    def invoke_with_proxy(
+            self,
+            modality: str,
+            prompt: str,
+            data_item: Optional[str] = None,
+            response_model: Optional[Type[BaseModel]] = None,
+    ):
+        assert len(self.lm_kwargs.get("LOCAL", {}).get(modality, [])) >= 2, \
+            f"At least two local {modality} models are required for proxy chat."
+        
+        results = set()
+        for model_id in range(len(self.lm_kwargs.get("LOCAL", {}).get(modality, []))):
+            params = self._construct_prompt_params(
+                is_remote=False,
+                modality=modality,
+                prompt=prompt,
+                data_item=data_item,
+                response_model=response_model,
+                model_index=model_id,
+            )
+            if response_model:
+                result = self._invoke_structured(params=params)
+            else:
+                result = self._invoke(params=params)
+            results.add(result)
+
+        if len(results) == 1:
+            print("Consensus reached among local models. The result is accepted.")
+            return results.pop()
+        else:
+            print("No consensus among local models. Invoking remote model.")
+            return self.invoke(
+                is_remote=True,
+                modality=modality,
+                prompt=prompt,
+                data_item=data_item,
+                response_model=response_model,
+            )
+
     async def invoke_parallel(
         self,
         is_remote: bool,
@@ -159,7 +199,6 @@ class LiteLLMWrapper:
         prompt: str,
         data_items: List[str],
         response_model: Optional[Type[BaseModel]] = None,
-        enable_proxy: Optional[bool] = False,
         model_id: Optional[int] = None,
     ):
         tasks = []
@@ -180,38 +219,63 @@ class LiteLLMWrapper:
         results = await tqdm_asyncio.gather(*tasks)
         results.sort(key=lambda x: x[0])
         return [resp for _, resp in results]
-    
-    def _chat_by_proxy(
-            self,
-            modality: str,
-            prompt: str,
-            data_item: Optional[str] = None,
-            response_model: Optional[Type[BaseModel]] = None,
+
+    async def invoke_parallel_with_proxy(
+        self,
+        modality: str,
+        prompt: str,
+        data_items: List[str],
+        response_model: Optional[Type[BaseModel]] = None,
     ):
         assert len(self.lm_kwargs.get("LOCAL", {}).get(modality, [])) >= 2, \
             f"At least two local {modality} models are required for proxy chat."
         
-        results = set()
+        tasks = []
+        for idx, data_item in enumerate(data_items):
+            for model_id in range(len(self.lm_kwargs.get("LOCAL", {}).get(modality, []))):
+                params = self._construct_prompt_params(
+                    is_remote=False,
+                    modality=modality,
+                    prompt=prompt,
+                    data_item=data_item,
+                    response_model=response_model,
+                    model_index=model_id,
+                )
+                if response_model:
+                    tasks.append(self._ainvoke_structured(idx, params))
+                else:
+                    tasks.append(self._ainvoke(idx, params))
+        results = await tqdm_asyncio.gather(*tasks)
+        results.sort(key=lambda x: x[0])
 
-        for model_id in range(len(self.lm_kwargs.get("LOCAL", {}).get(modality, []))):
-            params = self._construct_prompt_params(
-                is_remote=False,
-                modality=modality,
-                prompt=prompt,
-                data_item=data_item,
-                response_model=response_model,
-                model_index=model_id,
-            )
-            if response_model:
-                result = self._invoke_structured(params=params)
+        # Filter results by consensus
+        sound_results, filtered_tasks = [], []
+        result_groups = [list(group) for key, group in groupby(results, key=lambda x: x[0])]
+        for group in result_groups:
+            assert len(group) == len(self.lm_kwargs.get("LOCAL", {}).get(modality, [])), \
+                f"Each data item should have results from all local {modality} models."
+            resp_set = set([resp for _, resp in group])
+            if len(resp_set) == 1:
+                sound_results.append(group)
             else:
-                result = self._invoke(params=params)
-            results.add(result)
-
-        if len(results) == 1:
-            return results.pop(), True
-        else:
-            return None, False
+                # No consensus, need to invoke remote model
+                params = self._construct_prompt_params(
+                    is_remote=True,
+                    modality=modality,
+                    prompt=prompt,
+                    data_item=data_items[group[0][0]],
+                    response_model=response_model,
+                )
+                if response_model:
+                    filtered_tasks.append(self._ainvoke_structured(group[0][0], params))
+                else:
+                    filtered_tasks.append(self._ainvoke(group[0][0], params))
+        print(f"# Consensus results: {len(sound_results)}, # Recomputing tasks: {len(filtered_tasks)}")
+        recomputed_results = await tqdm_asyncio.gather(*filtered_tasks)
+        recomputed_results.sort(key=lambda x: x[0])
+        sound_results.extend(recomputed_results)
+        sound_results.sort(key=lambda x: x[0])
+        return [resp for _, resp in sound_results]
 
 
     def _construct_prompt_params(
@@ -294,23 +358,17 @@ class LiteLLMWrapper:
         return  dict(lm_params[model_index], **self.kwargs)
 
 
-
         
-        
-
-        
-
-
 if __name__ == "__main__":
     llm_client = LiteLLMWrapper()
 
 
-    result, success = llm_client._chat_by_proxy(
+    result = llm_client.invoke_with_proxy(
         modality="TEXT",
         prompt="Analyze whether this patient has an allergy based on their symptoms. You must ONLY respond with a bool object (True if allergy is present, False otherwise).",
         data_item="Along with recurrent headaches and blurred vision, I suffer acid reflux and trouble digesting my food.",
         response_model=BooleanFeatureResponse,
     )
 
-    print(result, success)
+    print(result)
 
