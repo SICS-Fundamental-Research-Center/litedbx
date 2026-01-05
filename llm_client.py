@@ -72,7 +72,7 @@ class LiteLLMWrapper:
         self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.JSON)
 
         self.max_retries = 50
-        self.parallelism = 20
+        self.parallelism = 100
         self.sem = asyncio.Semaphore(self.parallelism)
 
         self.kwargs = {
@@ -95,7 +95,7 @@ class LiteLLMWrapper:
                 ],
                 "IMAGE": [
                     {
-                        "model": "openai/Qwen3-VL-235B-A22B-Thinking",
+                        "model": "openai/Qwen3-VL-235B-A22B-Instruct",
                         "api_key": os.getenv("BLSC_API_KEY"),
                         "api_base": os.getenv("BLSC_ENDPOINT"),
                     },
@@ -273,9 +273,13 @@ class LiteLLMWrapper:
         print(f"# Consensus results: {len(sound_results)}, # Recomputing tasks: {len(filtered_tasks)}")
         recomputed_results = await tqdm_asyncio.gather(*filtered_tasks)
         recomputed_results.sort(key=lambda x: x[0])
+        proxy_mask = [False for _ in range(len(data_items))]  # Track which items used proxy
+        for idx, _ in sound_results:
+            proxy_mask[idx] = True
         sound_results.extend(recomputed_results)
         sound_results.sort(key=lambda x: x[0])
-        return [resp for _, resp in sound_results]
+        llm_labels = [resp for _, resp in sound_results]
+        return proxy_mask, llm_labels
 
 
     def _construct_prompt_params(

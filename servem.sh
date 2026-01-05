@@ -98,15 +98,15 @@ MODEL_GPU_UTIL[qwen3-4b]=0.9
 MODEL_PATHS[qwen3-vl-8b]="/ssd_data/models/Qwen3-VL-8B-Instruct"
 MODEL_PORTS[qwen3-vl-8b]=8002
 MODEL_GPUS[qwen3-vl-8b]="2,3"
-MODEL_MAX_LEN[qwen3-vl-8b]=8192
+MODEL_MAX_LEN[qwen3-vl-8b]=32768
 MODEL_TP_SIZE[qwen3-vl-8b]=2
 MODEL_GPU_UTIL[qwen3-vl-8b]=0.9
 
 MODEL_PATHS[llava-v1.6-7b]="/ssd_data/models/llava-v1___6-mistral-7b-hf"
 MODEL_PORTS[llava-v1.6-7b]=8003
-MODEL_GPUS[llava-v1.6-7b]="2"
+MODEL_GPUS[llava-v1.6-7b]="0,1"
 MODEL_MAX_LEN[llava-v1.6-7b]=32768
-MODEL_TP_SIZE[llava-v1.6-7b]=1
+MODEL_TP_SIZE[llava-v1.6-7b]=2
 MODEL_GPU_UTIL[llava-v1.6-7b]=0.9
 
 # Function to list available models

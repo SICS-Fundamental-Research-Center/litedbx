@@ -18,7 +18,7 @@ class DataManipulator:
         self.df = self.df.reset_index(drop=True)
         self.llm_client = LiteLLMWrapper()
 
-    def detect_modality(self, data_item: str) -> str:
+    def _detect_modality(self, data_item: str) -> str:
         """Detect the modality of a data item.
 
         Args:
@@ -27,7 +27,6 @@ class DataManipulator:
         Returns:
             The modality type ('TEXT' or 'IMAGE').
         """
-        file_path = Path(data_item)
         if any(
             data_item.endswith(extension) for extension in [".png", ".jpg", ".jpeg"]
         ):
@@ -56,15 +55,15 @@ class DataManipulator:
 
         # Peek the first data item to detect modality
         first_item = data_items[0] if data_items else ""
-        modality = self.detect_modality(first_item)
+        modality = self._detect_modality(first_item)
 
         print(f"Detected modality: {modality}")
         print(f"Processing {len(data_items)} items...")
 
         # Call invoke_parallel_with_proxy
-        results = None
+        proxy_mask, llm_labels = None, None
         if use_proxy:
-            results = asyncio.run(
+            proxy_mask, llm_labels = asyncio.run(
                 self.llm_client.invoke_parallel_with_proxy(
                     modality=modality,
                     prompt=prompt,
@@ -72,8 +71,10 @@ class DataManipulator:
                     response_model=BooleanFeatureResponse,
                 )
             )
+            self.df["Proxy_mask"] = proxy_mask
+            print(f"Proxy mask column 'Proxy_mask' added.")
         else:
-            results = asyncio.run(
+            llm_labels = asyncio.run(
                 self.llm_client.invoke_parallel(
                     modality=modality,
                     is_remote=True,
@@ -84,10 +85,7 @@ class DataManipulator:
             )
 
         # Append the mapped new column to the dataframe
-        self.df[new_col_name] = results
-
-        # Store the updated dataframe
-
+        self.df[new_col_name] = llm_labels
         print(f"Semantic mapping completed. New column '{new_col_name}' added.")
 
     def store_dataframe(self, output_path: Optional[str] = None) -> None:
@@ -168,19 +166,55 @@ class DataManipulator:
 
 
 if __name__ == "__main__":
-    # Example usage
     semmap_symptom_prompt = f"""
     You are an allergy specialist analyzing patient symptoms to detect allergies. Please analyse the provided symptom. Return True if allergy is present, False otherwise. Do not return any explanations or additional text.
     """
 
-    manipulator = DataManipulator("data/medical_q1_complete.csv")
-    manipulator.semantic_map(
-        col_name="symptoms",
-        prompt=semmap_symptom_prompt,
+    semmap_xray_prompt = f"""
+    You are a radiologist analyzing chest X-ray images to detect pneumonia. Please analyze the provided X-ray image. Return True if the human lungs shows that there are lung problems (considered sick/disease), False otherwise. Do not return any explanations or additional text.
+    """
+
+    semmap_skin_prompt = f"""
+    You are a dermatologist analyzing skin images. Please analyse the image. Return True if the image shows a malignant human skin mole (considered abnormal/cancerous/sick), False otherwise. Do not return any explanations or additional text.
+    """
+
+    # --- Medical query 1 ---
+    #
+    # manipulator = DataManipulator("data/medical_q1_complete.csv")
+    # manipulator.semantic_map(
+    #     col_name="symptoms",
+    #     prompt=semmap_symptom_prompt,
+    #     new_col_name="LLM_label",
+    #     use_proxy=False,
+    # )
+    # manipulator.store_dataframe("data/medical_q1_with_llm_labels_x.csv")
+    # dm = DataManipulator("data/medical_q1_with_llm_labels_x.csv")
+    # dm.evaluate_binary_classification(pred_col="LLM_label", true_col="label")
+
+
+    # --- Medical query 3 ---
+    #
+    # dm = DataManipulator("data/medical_q3_complete.csv")
+    # dm.semantic_map(
+    #     col_name="image_path",
+    #     prompt=semmap_xray_prompt,
+    #     new_col_name="LLM_label",
+    #     use_proxy=True,
+    # )
+    # dm.store_dataframe("data/medical_q3_with_llm_labels_proxy.csv")
+    # dm = DataManipulator("data/medical_q3_with_llm_labels_proxy.csv")
+    # dm.evaluate_binary_classification(pred_col="LLM_label", true_col="label")
+
+
+    # --- Medical query 8 ---
+    #
+    dm = DataManipulator("data/medical_q8_complete.csv")
+    dm.semantic_map(
+        col_name="image_path",
+        prompt=semmap_skin_prompt,
         new_col_name="LLM_label",
         use_proxy=False,
     )
-    manipulator.store_dataframe("data/medical_q1_with_llm_labels_x.csv")
-
-    dm = DataManipulator("data/medical_q1_with_llm_labels_x.csv")
+    dm.store_dataframe("data/medical_q8_with_llm_labels.csv")
+    dm = DataManipulator("data/medical_q8_with_llm_labels.csv")
     dm.evaluate_binary_classification(pred_col="LLM_label", true_col="label")
