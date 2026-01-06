@@ -11,6 +11,5 @@ wheels/
 
 
 .env
-data
-data_bak
+data*
 files

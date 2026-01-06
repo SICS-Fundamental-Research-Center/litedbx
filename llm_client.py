@@ -104,7 +104,7 @@ class LiteLLMWrapper:
             "LOCAL": {
                 "TEXT": [
                     {
-                        "model": "hosted_vllm//ssd_data/models/llama3-8b-instruct/",
+                        "model": "hosted_vllm//ssd_data/models/llama3-8b-instruct",
                         "api_key": "*",
                         "api_base": "http://localhost:8000/v1",
                     },
@@ -280,6 +280,47 @@ class LiteLLMWrapper:
         sound_results.sort(key=lambda x: x[0])
         llm_labels = [resp for _, resp in sound_results]
         return proxy_mask, llm_labels
+
+    async def invoke_parallel_consensus(
+        self,
+        modality: str,
+        prompt: str,
+        data_items: List[str],
+        response_model: Optional[Type[BaseModel]] = None,
+    ):
+        assert len(self.lm_kwargs.get("LOCAL", {}).get(modality, [])) >= 2, \
+            f"At least two local {modality} models are required for proxy chat."
+        
+        tasks = []
+        for idx, data_item in enumerate(data_items):
+            for model_id in range(len(self.lm_kwargs.get("LOCAL", {}).get(modality, []))):
+                params = self._construct_prompt_params(
+                    is_remote=False,
+                    modality=modality,
+                    prompt=prompt,
+                    data_item=data_item,
+                    response_model=response_model,
+                    model_index=model_id,
+                )
+                if response_model:
+                    tasks.append(self._ainvoke_structured(idx, params))
+                else:
+                    tasks.append(self._ainvoke(idx, params))
+        results = await tqdm_asyncio.gather(*tasks)
+        results.sort(key=lambda x: x[0])
+
+        # Filter results by consensus
+        sound_results = []
+        result_groups = [list(group) for key, group in groupby(results, key=lambda x: x[0])]
+        for group in result_groups:
+            assert len(group) == len(self.lm_kwargs.get("LOCAL", {}).get(modality, [])), \
+                f"Each data item should have results from all local {modality} models."
+            resp_set = set([resp for _, resp in group])
+            if len(resp_set) == 1:
+                sound_results.append(group[0])
+        sound_results.sort(key=lambda x: x[0])
+        return sound_results
+
 
 
     def _construct_prompt_params(
