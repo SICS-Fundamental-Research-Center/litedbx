@@ -83,7 +83,7 @@ declare -A MODEL_GPU_UTIL
 MODEL_PATHS[llama3-8b]="/ssd_data/models/llama3-8b-instruct"
 MODEL_PORTS[llama3-8b]=8000
 MODEL_GPUS[llama3-8b]=0
-MODEL_MAX_LEN[llama3-8b]=32768
+MODEL_MAX_LEN[llama3-8b]=8192
 MODEL_TP_SIZE[llama3-8b]=1
 MODEL_GPU_UTIL[llama3-8b]=0.9
 
