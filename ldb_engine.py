@@ -1,9 +1,11 @@
 import pandas as pd
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Tuple, Union, Literal, Dict
+from typing import List, Tuple, Union, Literal, Dict, Type
 from llm_client import LiteLLMWrapper, BooleanFeatureResponse
 import asyncio
+from pydantic import BaseModel
+from time import time
 
 
 @dataclass
@@ -16,6 +18,13 @@ class CQ:
         ]
     ]
     sem_rules: List[Tuple[str, str]]
+    rewritten_rules: List[
+        Tuple[
+            str,
+            Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
+            Union[str, int, float, bool, List[Union[str, int, float, bool]]],
+        ]
+    ]
 
 
 @dataclass
@@ -54,38 +63,65 @@ class LDBEngine:
         print("Initialized LDBEngine.")
 
 
-    def apply(self, queries: List[str]) -> None:
+    async def apply(self, queries: List[str]) -> None:
 
         # Step 1: Prefilter easy samples using static and semantic rules.
-        retrieved_df, remaining_df = [], []
+        retrieved_dfs, remaining_dfs = [], []
         for query_name in queries:
 
             workload = self.workloads[query_name]
 
-            # Step 1: Filter the data based on static rules.
+            # Step 1.1: Filter the data based on static rules.
             static_view = self._prefilter_by_static_rules(self.database, workload)
             print(f"After static prefiltering: {len(static_view)}/{len(self.database)} rows remain.")
 
-            # Step 2: Filter the data based on semantic rules.
+            # Step 1.2: Filter the data based on semantic rules.
             early_positive_view, sem_view = \
-                self._prefilter_by_semantic_rules(static_view, workload, drop_neg=True)
+                await self._prefilter_by_semantic_rules(static_view, workload,
+                                                        early_positive=False, 
+                                                        drop_neg=True)
             early_positive_view = early_positive_view[workload.select_cols]
 
-            retrieved_df.append(early_positive_view.reset_index(drop=True))
-            remaining_df.append(sem_view.reset_index(drop=True))
+            retrieved_dfs.append(early_positive_view.reset_index(drop=True))
+            print(f"After semantic prefiltering: {len(early_positive_view)}/{len(static_view)} rows retrieved.")
+            remaining_dfs.append(sem_view.reset_index(drop=True))
             print(f"After semantic prefiltering: {len(sem_view)}/{len(static_view)} rows remain.")
 
+        # Step 2: Generate LLM-based pseudo-labels for the remaining samples.
+        for query_name, remaining_df in zip(queries, remaining_dfs):
+            workload = self.workloads[query_name]
+            for cq in workload.rules:
+                for col_name, semantic_desc in cq.sem_rules:
+                    new_col_name = f"{col_name}_sem_mapped"
+                    remaining_df = await self._sem_mapping(
+                        remaining_df,
+                        col_name,
+                        new_col_name,
+                        semantic_desc,
+                        BooleanFeatureResponse
+                    )
+                cq.rewritten_rules.append(
+                    (new_col_name, "Eq", True)
+                )
+        
+            
+        # Finally, apply the rewritten rules and evaluate against ground truth.
+        for query_name, retrieved_df, remaining_df in zip(queries, retrieved_dfs, remaining_dfs):
+            workload = self.workloads[query_name]
+            filtered_df = self._filter_by_rewritten_rules(remaining_df, workload)
+            print(f"After filtering by rewritten rules: {len(filtered_df)}/{len(remaining_df)} rows retrieved.")
+            final_df = pd.concat([retrieved_df, filtered_df], ignore_index=True).drop_duplicates()
+            print(f"After applying rewritten rules: {len(final_df)}/{len(self.database)} rows retrieved.")
 
-        # Finally, evaluate against ground truth.
-        for query_name, retrieved_df in zip(queries, retrieved_df):
-            retrieved_df.to_csv(self.dataset_path / f"retrieved_{query_name}.csv", index=False)
+            final_df.to_csv(self.dataset_path / f"retrieved_{query_name}.csv", index=False)
             assert self.ground_truth[query_name] is not None, f"Ground truth for {query_name} not found."
-            retrieved_set = set(
+
+            result_set = set(
                 tuple(row)
-                for row in retrieved_df[workload.select_cols].itertuples(index=False, name=None)
+                for row in final_df[workload.select_cols].itertuples(index=False, name=None)
             )
             gt_set = self.ground_truth[query_name]
-            eval_result = self._evaluate(retrieved_set, gt_set)
+            eval_result = self._evaluate(result_set, gt_set)
 
 
     def _init_ground_truth(self, query_names: List[str]) -> Dict[str, set]:
@@ -136,9 +172,10 @@ class LDBEngine:
             result = pd.concat([result, df_cp], ignore_index=True)
         return result.drop_duplicates()
 
-    def _prefilter_by_semantic_rules(self, 
+    async def _prefilter_by_semantic_rules(self, 
                                      df: pd.DataFrame, 
                                      query: UCQ,
+                                     early_positive: bool = True,
                                      drop_neg: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
         
         fired_df = df.copy()
@@ -148,7 +185,7 @@ class LDBEngine:
             fired_df["sem_flag"] = 0
 
             # Color using one collection of conjunctive rules.
-            colored_df = self._sem_coloring(fired_df, cq.sem_rules)
+            colored_df = await self._sem_coloring(fired_df, cq.sem_rules)
 
             # Collect the sem_flags.
             sem_flags.append(colored_df["sem_flag"].tolist())
@@ -165,13 +202,54 @@ class LDBEngine:
                 aggregated_flags.append(-1)
 
         fired_df["sem_flag"] = aggregated_flags
-        early_positive_df = fired_df[fired_df["sem_flag"] == 1]
-        result_df = fired_df[fired_df["sem_flag"] == 0] if drop_neg \
-            else fired_df[fired_df["sem_flag"] == 0 | (fired_df["sem_flag"] == -1)]
 
-        return early_positive_df.drop(columns=["sem_flag"]), result_df.drop(columns=["sem_flag"])
+        early_positive_df, result_df = pd.DataFrame(), pd.DataFrame()
 
-    def _sem_coloring(
+        if early_positive:
+            early_positive_df = fired_df[fired_df["sem_flag"] == 1].drop(columns=["sem_flag"])
+        else:
+            early_positive_df = pd.DataFrame(columns=fired_df.columns).drop(columns=["sem_flag"])
+
+        if drop_neg and early_positive:
+            early_positive_df = fired_df[fired_df["sem_flag"] == 1].drop(columns=["sem_flag"])
+            result_df = fired_df[fired_df["sem_flag"] == 0].drop(columns=["sem_flag"])
+        elif drop_neg and not early_positive:
+            early_positive_df = pd.DataFrame(columns=fired_df.columns).drop(columns=["sem_flag"])
+            result_df = fired_df[(fired_df["sem_flag"] == 0) | (fired_df["sem_flag"] == 1)].drop(columns=["sem_flag"])
+        elif early_positive and not drop_neg:
+            early_positive_df = fired_df[fired_df["sem_flag"] == 1].drop(columns=["sem_flag"])
+            result_df = fired_df[fired_df["sem_flag"] == 0 | (fired_df["sem_flag"] == -1)].drop(columns=["sem_flag"])
+        else:
+            early_positive_df = pd.DataFrame(columns=fired_df.columns).drop(columns=["sem_flag"])
+            result_df = fired_df.drop(columns=["sem_flag"])
+
+        return early_positive_df, result_df
+
+    def _filter_by_rewritten_rules(self, df: pd.DataFrame, query: UCQ) -> pd.DataFrame:
+        result = pd.DataFrame()
+
+        for cq in query.rules:
+            df_cp = df.copy()
+            for col, op, val in cq.rewritten_rules:
+                print(f"Applying rewritten rule: {col} {op} {val}")
+                if op == "Eq":
+                    df_cp = df_cp[df_cp[col] == val]
+                elif op == "Gt":
+                    df_cp = df_cp[df_cp[col] > val]
+                elif op == "Lt":
+                    df_cp = df_cp[df_cp[col] < val]
+                elif op == "Ge":
+                    df_cp = df_cp[df_cp[col] >= val]
+                elif op == "Le":
+                    df_cp = df_cp[df_cp[col] <= val]
+                elif op == "In":
+                    df_cp = df_cp[df[col].isin(val)]  # type: ignore
+                else:
+                    raise ValueError(f"Unsupported operation: {op}")
+            result = pd.concat([result, df_cp], ignore_index=True)
+        return result.drop_duplicates()
+
+    async def _sem_coloring(
             self,
             df: pd.DataFrame,
             sem_rules: List[Tuple[str, str]],) -> pd.DataFrame:
@@ -188,13 +266,11 @@ class LDBEngine:
         for col_name, semantic_desc in sem_rules:
 
             modality = self._detect_modality(df_cp[col_name].iloc[0])
-            consensus_results = asyncio.run(
-                self.llm_client.invoke_parallel_consensus(
-                    modality=modality,
-                    prompt=semantic_desc,
-                    data_items=df_cp[col_name].astype(str).tolist(),
-                    response_model=BooleanFeatureResponse,
-                )
+            consensus_results = await self.llm_client.invoke_parallel_consensus(
+                modality=modality,
+                prompt=semantic_desc,
+                data_items=df_cp[col_name].astype(str).tolist(),
+                response_model=BooleanFeatureResponse,
             )
             for result in consensus_results:
                 pos, is_match = result
@@ -226,6 +302,28 @@ class LDBEngine:
         print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
         return EvalResult(tp=tp, fp=fp, fn=fn, precision=precision, recall=recall, f1=f1)
 
+    async def _sem_mapping(
+            self,
+            df: pd.DataFrame,
+            col_name: str,
+            new_col_name: str,
+            prompt: str,
+            response_model: Type[BaseModel]) -> pd.DataFrame:
+        
+        data_items = df[col_name].astype(str).tolist()
+        modality = self._detect_modality(data_items[0] if data_items else "")
+        llm_labels = await self.llm_client.invoke_parallel(
+            modality=modality,
+            is_remote=True,
+            prompt=prompt,
+            data_items=data_items,
+                response_model=response_model,
+        )
+        df[new_col_name] = llm_labels
+        print(f"Semantic mapping column '{new_col_name}' added.")
+
+        return df
+
 
 if __name__ == "__main__":
     q1 = UCQ(
@@ -238,6 +336,7 @@ if __name__ == "__main__":
                     "Please determine if the following symptoms indicate an allergy."
                     "Please JUST answer \"True\" if they do, and \"False\" otherwise."
                     "Do NOT provide any explanations."))],
+                rewritten_rules=[]
             ),
         ],
     )
@@ -247,5 +346,9 @@ if __name__ == "__main__":
         workloads={"Q1": q1}
     )
 
-    ldb.apply(["Q1"])
+    start = time()
 
+    asyncio.run(ldb.apply(["Q1"]))
+
+    end = time()
+    print(f"Total execution time: {end - start} seconds")
