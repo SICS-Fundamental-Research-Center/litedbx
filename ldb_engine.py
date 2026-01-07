@@ -17,6 +17,7 @@ class CQ:
     ]
     sem_rules: List[Tuple[str, str]]
 
+
 @dataclass
 class UCQ:
     select_cols: List[str]
@@ -53,30 +54,38 @@ class LDBEngine:
         print("Initialized LDBEngine.")
 
 
-    def apply(self, query_name: str):
-        workload = self.workloads[query_name]
-        retrieved_df = pd.DataFrame()
+    def apply(self, queries: List[str]) -> None:
 
-        # Step 1: Filter the data based on static rules.
-        static_view = self._prefilter_by_static_rules(self.database, workload)
-        print(f"After static prefiltering: {len(static_view)}/{len(self.database)} rows remain.")
+        # Step 1: Prefilter easy samples using static and semantic rules.
+        retrieved_df, remaining_df = [], []
+        for query_name in queries:
 
-        # Step 2: Filter the data based on semantic rules.
-        early_positive_view, sem_view = \
-            self._prefilter_by_semantic_rules(static_view, workload, drop_neg=True)
-        early_positive_view = early_positive_view[workload.select_cols]
-        retrieved_df = pd.concat([retrieved_df, early_positive_view], ignore_index=True)
-        print(f"After semantic prefiltering: {len(sem_view)}/{len(static_view)} rows remain.")
+            workload = self.workloads[query_name]
 
-        # Evaluate against ground truth.
-        retrieved_df.to_csv(self.dataset_path / f"retrieved_{query_name}.csv", index=False)
-        assert self.ground_truth[query_name] is not None, f"Ground truth for {query_name} not found."
-        retrieved_set = set(
-            tuple(row)
-            for row in retrieved_df[workload.select_cols].itertuples(index=False, name=None)
-        )
-        gt_set = self.ground_truth[query_name]
-        eval_result = self._evaluate(retrieved_set, gt_set)
+            # Step 1: Filter the data based on static rules.
+            static_view = self._prefilter_by_static_rules(self.database, workload)
+            print(f"After static prefiltering: {len(static_view)}/{len(self.database)} rows remain.")
+
+            # Step 2: Filter the data based on semantic rules.
+            early_positive_view, sem_view = \
+                self._prefilter_by_semantic_rules(static_view, workload, drop_neg=True)
+            early_positive_view = early_positive_view[workload.select_cols]
+
+            retrieved_df.append(early_positive_view.reset_index(drop=True))
+            remaining_df.append(sem_view.reset_index(drop=True))
+            print(f"After semantic prefiltering: {len(sem_view)}/{len(static_view)} rows remain.")
+
+
+        # Finally, evaluate against ground truth.
+        for query_name, retrieved_df in zip(queries, retrieved_df):
+            retrieved_df.to_csv(self.dataset_path / f"retrieved_{query_name}.csv", index=False)
+            assert self.ground_truth[query_name] is not None, f"Ground truth for {query_name} not found."
+            retrieved_set = set(
+                tuple(row)
+                for row in retrieved_df[workload.select_cols].itertuples(index=False, name=None)
+            )
+            gt_set = self.ground_truth[query_name]
+            eval_result = self._evaluate(retrieved_set, gt_set)
 
 
     def _init_ground_truth(self, query_names: List[str]) -> Dict[str, set]:
@@ -238,5 +247,5 @@ if __name__ == "__main__":
         workloads={"Q1": q1}
     )
 
-    ldb.apply("Q1")
+    ldb.apply(["Q1"])
 
