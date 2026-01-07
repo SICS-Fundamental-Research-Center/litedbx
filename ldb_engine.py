@@ -43,6 +43,13 @@ class EvalResult:
     f1: float
 
 
+class PopulationSpec(BaseModel):
+    source_col: str
+    target_col: str
+    prompt: str
+    var_type: Literal["bool", "float", "int"]
+
+
 class LDBEngine:
     def __init__(self,
                  dataset_name: str, 
@@ -66,7 +73,7 @@ class LDBEngine:
     async def apply(self, queries: List[str]) -> None:
 
         # Step 1: Prefilter easy samples using static and semantic rules.
-        retrieved_dfs, remaining_dfs = [], []
+        retrieved_dfs, remaining_dfs = {}, {}
         for query_name in queries:
 
             workload = self.workloads[query_name]
@@ -82,13 +89,13 @@ class LDBEngine:
                                                         drop_neg=True)
             early_positive_view = early_positive_view[workload.select_cols]
 
-            retrieved_dfs.append(early_positive_view.reset_index(drop=True))
+            retrieved_dfs[query_name] = early_positive_view.reset_index(drop=True)
             print(f"After semantic prefiltering: {len(early_positive_view)}/{len(static_view)} rows retrieved.")
-            remaining_dfs.append(sem_view.reset_index(drop=True))
+            remaining_dfs[query_name] = sem_view.reset_index(drop=True)
             print(f"After semantic prefiltering: {len(sem_view)}/{len(static_view)} rows remain.")
 
         # Step 2: Generate LLM-based pseudo-labels for the remaining samples.
-        for query_name, remaining_df in zip(queries, remaining_dfs):
+        for query_name, remaining_df in remaining_dfs.items():
             workload = self.workloads[query_name]
             for cq in workload.rules:
                 for col_name, semantic_desc in cq.sem_rules:
@@ -104,9 +111,14 @@ class LDBEngine:
                     (new_col_name, "Eq", True)
                 )
         
+        # Step 3: Generate feature space for each queries.
+        #   TODO: Generate feature space JOINTLY for all queries.
+
             
         # Finally, apply the rewritten rules and evaluate against ground truth.
-        for query_name, retrieved_df, remaining_df in zip(queries, retrieved_dfs, remaining_dfs):
+        for query_name in queries:
+            retrieved_df = retrieved_dfs[query_name]
+            remaining_df = remaining_dfs[query_name]
             workload = self.workloads[query_name]
             filtered_df = self._filter_by_rewritten_rules(remaining_df, workload)
             print(f"After filtering by rewritten rules: {len(filtered_df)}/{len(remaining_df)} rows retrieved.")
@@ -323,6 +335,18 @@ class LDBEngine:
         print(f"Semantic mapping column '{new_col_name}' added.")
 
         return df
+
+
+    async def _generate_feature_space(
+            self,
+            workloads: Dict[str, UCQ],
+            data_views: Dict[str, pd.DataFrame],) -> Dict[str, PopulationSpec]:
+        
+        population_specs = {}
+        for query_name, workload in workloads.items():
+            pass
+
+        return population_specs
 
 
 if __name__ == "__main__":
