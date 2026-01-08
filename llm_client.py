@@ -72,7 +72,7 @@ class LiteLLMWrapper:
         self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.JSON)
 
         self.max_retries = 50
-        self.parallelism = 100
+        self.parallelism = 20
         self.sem = asyncio.Semaphore(self.parallelism)
 
         self.kwargs = {
@@ -92,8 +92,18 @@ class LiteLLMWrapper:
                         "api_key": os.getenv("BLSC_API_KEY"),
                         "api_base": os.getenv("BLSC_ENDPOINT"),
                     },
+                    {
+                        "model": "dashscope/glm-4.7",
+                        "api_key": os.getenv("DASHSCOPE_API_KEY"),
+                        "api_base": os.getenv("DASHSCOPE_ENDPOINT"),
+                    },
                 ],
                 "IMAGE": [
+                    {
+                        "model": "openai/GLM-4V-Flash",
+                        "api_key": os.getenv("BLSC_API_KEY"),
+                        "api_base": os.getenv("BLSC_ENDPOINT"),
+                    },
                     {
                         "model": "openai/Qwen3-VL-235B-A22B-Instruct",
                         "api_key": os.getenv("BLSC_API_KEY"),
@@ -402,18 +412,22 @@ class LiteLLMWrapper:
 
         return  dict(lm_params[model_index], **self.kwargs)
 
+    def _test_invoke(self):
+        prompt = "Describe this xray image."
+
+        resp = self.invoke(
+            is_remote=True,
+            modality="IMAGE",
+            prompt=prompt,
+            data_item="files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg",
+        )
+        print(f"Response: {resp}")
+
 
         
 if __name__ == "__main__":
     llm_client = LiteLLMWrapper()
 
 
-    result = llm_client.invoke_with_proxy(
-        modality="TEXT",
-        prompt="Analyze whether this patient has an allergy based on their symptoms. You must ONLY respond with a bool object (True if allergy is present, False otherwise).",
-        data_item="Along with recurrent headaches and blurred vision, I suffer acid reflux and trouble digesting my food.",
-        response_model=BooleanFeatureResponse,
-    )
-
-    print(result)
+    llm_client._test_invoke()
 
