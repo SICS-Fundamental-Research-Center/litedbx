@@ -1,4 +1,4 @@
 .PHONY: clean
 
 clean:
-	rm -rf data/medical/ckpt/*
+	rm -rf data/medical/.ckpt/*

@@ -68,7 +68,7 @@ class LDBEngine:
         print("Initializing LDBEngine...")
         self.WD = Path(__file__).parent
         self.dataset_path = self.WD / "data" / dataset_name
-        self.ckpt_home = self.dataset_path / "ckpt"
+        self.ckpt_home = self.dataset_path / ".ckpt"
         self.ckpt_home.mkdir(parents=True, exist_ok=True)
         self.ground_truth_paths = self.dataset_path / "ground_truth"
         self.database = \
@@ -158,12 +158,6 @@ class LDBEngine:
 
                 # Step 4.3 UCQ learning.
                 # TODO
-                
-                
-
-
-
-        
 
             
         # Finally, apply the rewritten rules and evaluate against ground truth.
