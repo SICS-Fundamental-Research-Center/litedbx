@@ -17,9 +17,12 @@ class BooleanFeatureResponse(BaseModel):
     """Response model for boolean feature extraction."""
     value: bool
 
+class IntFeatureResponse(BaseModel):
+    """Response model for int feature extraction."""
+    value: int
 
-class NumericalFeatureResponse(BaseModel):
-    """Response model for numerical feature extraction."""
+class FloatFeatureResponse(BaseModel):
+    """Response model for float feature extraction."""
     value: float
 
 
@@ -100,12 +103,12 @@ class LiteLLMWrapper:
                 ],
                 "IMAGE": [
                     {
-                        "model": "openai/GLM-4V-Flash",
+                        "model": "openai/Qwen3-VL-235B-A22B-Instruct",
                         "api_key": os.getenv("BLSC_API_KEY"),
                         "api_base": os.getenv("BLSC_ENDPOINT"),
                     },
                     {
-                        "model": "openai/Qwen3-VL-235B-A22B-Instruct",
+                        "model": "openai/GLM-4V-Flash",
                         "api_key": os.getenv("BLSC_API_KEY"),
                         "api_base": os.getenv("BLSC_ENDPOINT"),
                     },
