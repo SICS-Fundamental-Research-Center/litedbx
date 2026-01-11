@@ -5,7 +5,7 @@ from time import time
 import pandas as pd
 import random
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple, Union, Literal, Dict, Type
 from llm_client import LiteLLMWrapper, BooleanFeatureResponse, IntFeatureResponse, FloatFeatureResponse
 from prompts import PROMPTS
@@ -20,29 +20,29 @@ class CQ:
             Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
             Union[str, int, float, List[Union[str, int, float]]],
         ]
-    ]
-    sem_rules: List[Tuple[str, str]]
+    ] = field(default_factory=list)
+    sem_rules: List[Tuple[str, str]] = field(default_factory=list)
     backup_rules: List[
         Tuple[
             str,
             Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
             Union[str, int, float, bool, List[Union[str, int, float, bool]]],
         ]
-    ]
+    ] = field(default_factory=list)
     rewritten_pos_rules: List[
         Tuple[
             str,
             Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
             Union[str, int, float, bool, List[Union[str, int, float, bool]]],
         ]
-    ]
+    ] = field(default_factory=list)
     rewritten_neg_rules: List[
         Tuple[
             str,
             Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
             Union[str, int, float, bool, List[Union[str, int, float, bool]]],
         ]
-    ]
+    ] = field(default_factory=list)
 
 
 @dataclass
@@ -724,39 +724,3 @@ class LDBEngine:
         return X_train, X_test, Y_train, Y_test
 
 
-
-
-
-if __name__ == "__main__":
-    q1 = UCQ(
-        select_cols=["patient_id"],
-        rules=[
-            CQ(
-                static_rules=[],
-                sem_rules=[("symptoms", (
-                    "You are a medical expert." 
-                    "Please determine if the following symptoms indicate an allergy."
-                    "Please JUST answer \"True\" if they do, and \"False\" otherwise."
-                    "Do NOT provide any explanations."))],
-                backup_rules=[],
-                rewritten_pos_rules=[],
-                rewritten_neg_rules=[],
-            ),
-        ],
-    )
-
-    ldb = LDBEngine(
-        dataset_name="medical",
-        workloads={"Q1": q1},
-        feature_enrich_budget=3,
-        query_rewrite_budget=3,
-        external_keys=["image_path","skin_image_id","image_path_xray",
-                       "xray_id","symptoms","symptom_id"]
-    )
-
-    start = time()
-
-    asyncio.run(ldb.apply(["Q1"]))
-
-    end = time()
-    print(f"Total execution time: {end - start} seconds")
