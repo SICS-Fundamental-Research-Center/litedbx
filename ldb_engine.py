@@ -3,11 +3,13 @@ import json
 from pydantic import BaseModel
 from time import time
 import pandas as pd
+import random
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple, Union, Literal, Dict, Type
 from llm_client import LiteLLMWrapper, BooleanFeatureResponse, IntFeatureResponse, FloatFeatureResponse
 from prompts import PROMPTS
+from ldb_classifier import RuleClassifier
 
 
 @dataclass
@@ -20,7 +22,21 @@ class CQ:
         ]
     ]
     sem_rules: List[Tuple[str, str]]
-    rewritten_rules: List[
+    backup_rules: List[
+        Tuple[
+            str,
+            Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
+            Union[str, int, float, bool, List[Union[str, int, float, bool]]],
+        ]
+    ]
+    rewritten_pos_rules: List[
+        Tuple[
+            str,
+            Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
+            Union[str, int, float, bool, List[Union[str, int, float, bool]]],
+        ]
+    ]
+    rewritten_neg_rules: List[
         Tuple[
             str,
             Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
@@ -60,10 +76,12 @@ class LDBEngine:
                  dataset_name: str, 
                  workloads: Dict[str, UCQ],
                  feature_enrich_budget: int = 3,
-                 query_rewrite_budget: int = 3) -> None:
+                 query_rewrite_budget: int = 3,
+                 external_keys: List[str] = []) -> None:
         
         self.feature_enrich_budget = feature_enrich_budget
         self.query_rewrite_budget = query_rewrite_budget
+        self.external_keys = external_keys
         
         print("Initializing LDBEngine...")
         self.WD = Path(__file__).parent
@@ -121,7 +139,7 @@ class LDBEngine:
                         semantic_desc,
                         BooleanFeatureResponse
                     )
-                cq.rewritten_rules.append(
+                cq.backup_rules.append(
                     (new_col_name, "Eq", True)
                 )
         
@@ -146,7 +164,7 @@ class LDBEngine:
                 pre_selected_specs = pop_specs.value[:self.feature_enrich_budget]
 
                 # Step 4.2 Feature population.
-                enriched_df = await self._sem_multi_mapping(
+                remaining_df = await self._sem_multi_mapping(
                     remaining_df,
                     PopulationSpecs(value=pre_selected_specs),
                     enable_cache=True
@@ -157,7 +175,27 @@ class LDBEngine:
                 num_selected_features += self.feature_enrich_budget
 
                 # Step 4.3 UCQ learning.
-                # TODO
+                ground_truth_set = self.ground_truth[query_name]
+                remaining_df["label"] = remaining_df.apply(
+                    lambda row: tuple(row[ucq.select_cols]) in ground_truth_set,
+                    axis=1
+                )
+                exclude_cols = self.external_keys + ucq.select_cols
+                for cq in ucq.rules:
+                    for col, _, _ in cq.backup_rules:
+                        exclude_cols.append(col)
+
+                # Generate classification rules and get pos/neg rules
+                pos_rules, neg_rules = self._generate_classification_rules(
+                    query_name, remaining_df.drop(columns=exclude_cols))
+
+                # Populate the rules into the CQ objects
+                for cq in ucq.rules:
+                    cq.rewritten_pos_rules = pos_rules
+                    cq.rewritten_neg_rules = neg_rules
+
+                # Update the remaining_dfs with new features.
+                remaining_dfs[query_name] = remaining_df.drop(columns=["label"])
 
             
         # Finally, apply the rewritten rules and evaluate against ground truth.
@@ -178,7 +216,7 @@ class LDBEngine:
                 for row in final_df[workload.select_cols].itertuples(index=False, name=None)
             )
             gt_set = self.ground_truth[query_name]
-            eval_result = self._evaluate(result_set, gt_set)
+            eval_result = self._evaluate_set(result_set, gt_set)
 
 
     def _init_ground_truth(self, query_names: List[str]) -> Dict[str, set]:
@@ -315,12 +353,13 @@ class LDBEngine:
         return early_positive_df, result_df
 
     def _filter_by_rewritten_rules(self, df: pd.DataFrame, query: UCQ) -> pd.DataFrame:
-        result = pd.DataFrame()
 
+        # Step 1: Use LLM-guided backup rules to recall relatively high-confidence samples.
+        backup_result = pd.DataFrame()
         for cq in query.rules:
             df_cp = df.copy()
-            for col, op, val in cq.rewritten_rules:
-                print(f"Applying rewritten rule: {col} {op} {val}")
+            for col, op, val in cq.backup_rules:
+                print(f"Applying backup rule: {col} {op} {val}")
                 if op == "Eq":
                     df_cp = df_cp[df_cp[col] == val]
                 elif op == "Gt":
@@ -332,11 +371,74 @@ class LDBEngine:
                 elif op == "Le":
                     df_cp = df_cp[df_cp[col] <= val]
                 elif op == "In":
-                    df_cp = df_cp[df[col].isin(val)]  # type: ignore
+                    df_cp = df_cp[df_cp[col].isin(val)]  # type: ignore
                 else:
                     raise ValueError(f"Unsupported operation: {op}")
-            result = pd.concat([result, df_cp], ignore_index=True)
-        return result.drop_duplicates()
+            backup_result = pd.concat([backup_result, df_cp], ignore_index=True)
+        backup_result = backup_result.drop_duplicates()
+
+        # Step 2: Use rewritten neg rules to reduce false positives.
+        # For each CQ, apply neg rules as POSITIVE conjunction to get samples to EXCLUDE,
+        # then remove them from backup_result (De Morgan's law)
+        for cq in query.rules:
+            if not cq.rewritten_neg_rules:
+                continue
+
+            # Apply all neg rules as positive conjunction to get the set to exclude
+            df_exclude = backup_result.copy()
+            for col, op, val in cq.rewritten_neg_rules:
+                print(f"Applying rewritten neg rule (to get exclusion set): {col} {op} {val}")
+                if op == "Eq":
+                    df_exclude = df_exclude[df_exclude[col] == val]
+                elif op == "Gt":
+                    df_exclude = df_exclude[df_exclude[col] > val]
+                elif op == "Lt":
+                    df_exclude = df_exclude[df_exclude[col] < val]
+                elif op == "Ge":
+                    df_exclude = df_exclude[df_exclude[col] >= val]
+                elif op == "Le":
+                    df_exclude = df_exclude[df_exclude[col] <= val]
+                elif op == "In":
+                    df_exclude = df_exclude[df_exclude[col].isin(val)]  # type: ignore
+                else:
+                    raise ValueError(f"Unsupported operation: {op}")
+
+            # Remove the excluded set from backup_result
+            exclude_indices = set(df_exclude.index)
+            backup_result = backup_result[~backup_result.index.isin(exclude_indices)]
+
+        # # Step 3: Use rewritten pos rules to reduce false negatives.
+        # # Apply pos rules as positive conjunction to get samples to INCLUDE
+        # pos_result = pd.DataFrame()
+        # for cq in query.rules:
+        #     if not cq.rewritten_pos_rules:
+        #         continue
+
+        #     df_pos = df.copy()
+        #     for col, op, val in cq.rewritten_pos_rules:
+        #         print(f"Applying rewritten pos rule: {col} {op} {val}")
+        #         if op == "Eq":
+        #             df_pos = df_pos[df_pos[col] == val]
+        #         elif op == "Gt":
+        #             df_pos = df_pos[df_pos[col] > val]
+        #         elif op == "Lt":
+        #             df_pos = df_pos[df_pos[col] < val]
+        #         elif op == "Ge":
+        #             df_pos = df_pos[df_pos[col] >= val]
+        #         elif op == "Le":
+        #             df_pos = df_pos[df_pos[col] <= val]
+        #         elif op == "In":
+        #             df_pos = df_pos[df_pos[col].isin(val)]  # type: ignore
+        #         else:
+        #             raise ValueError(f"Unsupported operation: {op}")
+
+        #     pos_result = pd.concat([pos_result, df_pos], ignore_index=True)
+
+        # Combine backup_result (after negation) with pos_result and deduplicate
+        # final_result = pd.concat([backup_result, pos_result], ignore_index=True).drop_duplicates()
+        final_result = backup_result.drop_duplicates()
+
+        return final_result
 
     async def _sem_coloring(
             self,
@@ -378,10 +480,25 @@ class LDBEngine:
         else:
             return "TEXT"
 
-    def _evaluate(self, retrieved_set: set, gt_set: set) -> EvalResult:
+    def _evaluate_set(self, retrieved_set: set, gt_set: set) -> EvalResult:
         tp = len(retrieved_set & gt_set)
         fp = len(retrieved_set - gt_set)
         fn = len(gt_set - retrieved_set)
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        print(f"TP: {tp}, FP: {fp}, FN: {fn}")
+        print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
+        return EvalResult(tp=tp, fp=fp, fn=fn, precision=precision, recall=recall, f1=f1)
+
+    def _evaluate_list(self, pred: List[int], label: List[int]) -> EvalResult:
+        assert len(pred) == len(label), "Prediction and label lists must have the same length."
+
+        tp = sum(1 for p, l in zip(pred, label) if p == 1 and l == 1)
+        fp = sum(1 for p, l in zip(pred, label) if p == 1 and l == 0)
+        fn = sum(1 for p, l in zip(pred, label) if p == 0 and l == 1)
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -429,7 +546,6 @@ class LDBEngine:
 
         return df
     
-
     async def _sem_mapping(
             self,
             df: pd.DataFrame,
@@ -529,6 +645,87 @@ class LDBEngine:
 
         return population_specs
 
+    def _generate_classification_rules(
+            self,
+            query_name: str,
+            df_full: pd.DataFrame,):
+        # Fetch the data.
+        X_train, X_test, Y_train, Y_test = self._data_split(
+            query_name,
+            df_full,
+            train_size=min(50, len(df_full)//2),
+        )
+
+        clf = RuleClassifier(
+            max_rules=10,
+            min_precision=0.5,
+            cv_folds=3,
+            use_precision_constraint=False,
+            use_tree_rules=True,
+            enable_feedback_loop=True,
+            max_feedback_iterations=5,
+            debug=True
+        )
+
+        clf.fit(X_train, Y_train)
+
+        print(f"\n{'='*80}")
+        print(f"Learned Rules ({len(clf.rules)} rules)")
+        print('='*80)
+        clf.print_dnf()
+
+        # Export and return rules
+        pos_rules, neg_rules = clf.export_rules()
+
+        print(f"\nExported {len(pos_rules)} positive rules to rewritten_pos_rules")
+        print(f"Exported {len(neg_rules)} negative rules to rewritten_neg_rules")
+
+        # Extract the indices of the positive predictions.
+        Y_test_pred = clf.predict(X_test)
+        predicted_labels = Y_train.tolist() + Y_test_pred.tolist()
+        true_labels = Y_train.tolist() + Y_test.tolist()
+        eval_result = self._evaluate_list(predicted_labels, true_labels)
+
+        return pos_rules, neg_rules
+
+
+    def _data_split(self, 
+                    query_name: str,
+                    df_full: pd.DataFrame, 
+                    train_size: int,) \
+    -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        random.seed(42)
+
+        # Split data and label.
+        ground_truth_set = self.ground_truth[query_name]
+        Y = df_full["label"]
+        X = df_full.drop(columns=["label"])
+
+        # TODO: Revise the data sampling strategy.
+        train_indices = X.sample(n=train_size, random_state=42).index
+        test_indices = X.index.difference(train_indices)
+
+        X_train = X.loc[train_indices]
+        X_test = X.loc[test_indices]
+        Y_train = Y.loc[train_indices]
+        Y_test = Y.loc[test_indices]
+
+
+        # Evaluate the label distribution in the training set.
+        pos_count = sum(Y_train)
+        neg_count = len(Y_train) - pos_count
+
+        print(f"Training set label distribution for {query_name}:")
+        print(f"Positive samples: {pos_count}")
+        print(f"Negative samples: {neg_count}")
+        print(f"Positive ratio: {pos_count / (pos_count + neg_count):.2%}")
+        print(f"Oracle positive ratio: {len(ground_truth_set) / len(self.database):.2%}")
+
+        return X_train, X_test, Y_train, Y_test
+
+
+
+
 
 if __name__ == "__main__":
     q1 = UCQ(
@@ -541,7 +738,9 @@ if __name__ == "__main__":
                     "Please determine if the following symptoms indicate an allergy."
                     "Please JUST answer \"True\" if they do, and \"False\" otherwise."
                     "Do NOT provide any explanations."))],
-                rewritten_rules=[]
+                backup_rules=[],
+                rewritten_pos_rules=[],
+                rewritten_neg_rules=[],
             ),
         ],
     )
@@ -551,6 +750,8 @@ if __name__ == "__main__":
         workloads={"Q1": q1},
         feature_enrich_budget=3,
         query_rewrite_budget=3,
+        external_keys=["image_path","skin_image_id","image_path_xray",
+                       "xray_id","symptoms","symptom_id"]
     )
 
     start = time()

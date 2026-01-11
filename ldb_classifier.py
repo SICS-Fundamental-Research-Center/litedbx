@@ -10,7 +10,7 @@ Key Features:
 
 import numpy as np
 import pandas as pd
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Union, Literal
 
 
 # =============================================================================
@@ -485,83 +485,86 @@ class RuleClassifier:
 
     def _evaluate_rule_acceptance(
         self, candidate_rule: Rule, X: pd.DataFrame, y: pd.Series,
-        current_f1: float, current_rule_set: List[Rule]
+        current_accuracy: float, current_rule_set: List[Rule]
     ) -> Tuple[bool, float, Dict]:
         """
         Evaluate if candidate rule should be accepted.
 
-        Enhanced to be more aggressive at reducing False Negatives.
-        Accepts rules that improve Recall significantly, even if Precision drops.
+        Uses accuracy-based evaluation to handle imbalanced datasets better.
+        Accepts rules that improve overall accuracy (considering both TP and TN).
         """
         test_rules = current_rule_set + [candidate_rule]
-        new_f1, new_prec, new_rec, _ = self.evaluate_rule_set(test_rules, X, y)
+        _, new_prec, new_rec, new_accuracy = self.evaluate_rule_set(test_rules, X, y)
 
-        # Get metrics
+        # Get detailed metrics
         predictions = self.predict_with_rules(X, test_rules)
         new_tp = ((predictions == 1) & (y == 1)).sum()
         new_fp = ((predictions == 1) & (y == 0)).sum()
+        new_tn = ((predictions == 0) & (y == 0)).sum()
+        new_fn = ((predictions == 0) & (y == 1)).sum()
 
         current_predictions = self.predict_with_rules(X, current_rule_set)
         current_tp = ((current_predictions == 1) & (y == 1)).sum()
+        current_tn = ((current_predictions == 0) & (y == 0)).sum()
 
         # Calculate current recall
         current_total_positives = (y == 1).sum()
         current_recall = current_tp / current_total_positives if current_total_positives > 0 else 0.0
         new_recall = new_tp / current_total_positives if current_total_positives > 0 else 0.0
 
-        # Enhanced acceptance criteria for reducing FN:
-        # 1. Significant recall improvement (reduces FN)
-        recall_improves = (new_recall - current_recall) >= 0.05  # 5% minimum recall improvement
+        # Main acceptance criteria: accuracy improvement
+        epsilon = 0.005
+        accuracy_improves = (new_accuracy - current_accuracy) >= epsilon
 
-        # 2. F1 improvement OR recall improvement with acceptable precision trade-off
-        epsilon = 0.005  # Reduced from 0.01 to be more permissive
-        f1_improves = (new_f1 - current_f1) >= epsilon
+        # Additional criteria to ensure balanced improvement
+        # 1. Never reduce TP (don't lose already covered positives)
+        tp_preserved = new_tp >= current_tp
+
+        # 2. Never reduce TN (don't lose already covered negatives)
+        tn_preserved = new_tn >= current_tn
 
         # 3. Allow more FP when Recall improves significantly
         alpha = self.fp_penalty_ratio
         fp_penalty_ok = new_fp <= (alpha * new_tp) if new_tp > 0 else True
 
-        # 4. Never reduce TP (don't lose already covered positives)
-        tp_preserved = new_tp >= current_tp
+        # 4. Significant recall improvement (reduces FN)
+        recall_improves = (new_recall - current_recall) >= 0.05  # 5% minimum recall improvement
 
-        # Accept if:
-        # - F1 improves AND all other criteria pass, OR
-        # - Recall significantly improves AND precision doesn't drop too much
-        precision_acceptable = new_prec >= 0.15  # Minimum precision threshold
-        recall_boost = recall_improves and precision_acceptable and tp_preserved
-
-        accepted = (f1_improves and fp_penalty_ok and tp_preserved) or recall_boost
+        # Accept if accuracy improves AND both TP and TN are preserved
+        # This ensures we don't trade off one class for another
+        accepted = accuracy_improves and tp_preserved and tn_preserved
 
         metrics = {
-            'new_f1': new_f1,
+            'new_accuracy': new_accuracy,
             'new_tp': new_tp,
+            'new_tn': new_tn,
             'new_fp': new_fp,
+            'new_fn': new_fn,
             'new_recall': new_recall,
             'new_precision': new_prec,
             'current_recall': current_recall,
+            'accuracy_improves': accuracy_improves,
             'recall_improves': recall_improves,
-            'f1_improves': f1_improves,
             'fp_penalty_ok': fp_penalty_ok,
             'tp_preserved': tp_preserved,
-            'precision_acceptable': precision_acceptable,
-            'recall_boost': recall_boost
+            'tn_preserved': tn_preserved
         }
 
-        return accepted, new_f1, metrics
+        return accepted, new_accuracy, metrics
 
     def _feedback_driven_refinement(
         self, X: pd.DataFrame, y: pd.Series,
         X_val: pd.DataFrame, y_val: pd.Series
     ) -> List[Rule]:
-        """Iteratively refine rules using feedback from residuals."""
+        """Iteratively refine rules using feedback from residuals based on accuracy."""
         if not self.enable_feedback_loop:
             return self.rules.copy()
 
         refined_rules = self.rules.copy()
-        current_f1, _, _, _ = self.evaluate_rule_set(refined_rules, X_val, y_val)
+        _, _, _, current_accuracy = self.evaluate_rule_set(refined_rules, X_val, y_val)
 
         if self.debug:
-            print(f"\n[FEEDBACK] Starting refinement. Initial F1: {current_f1:.4f}")
+            print(f"\n[FEEDBACK] Starting refinement. Initial Accuracy: {current_accuracy:.4f}")
             print(f"[FEEDBACK] Max iterations: {self.max_feedback_iterations}")
 
         for iteration in range(self.max_feedback_iterations):
@@ -596,55 +599,51 @@ class RuleClassifier:
 
             # Try to find best corrective rule
             best_rule = None
-            best_f1 = current_f1
+            best_accuracy = current_accuracy
             best_metrics = None
 
             for rule in corrective_rules:
-                accepted, new_f1, metrics = self._evaluate_rule_acceptance(
-                    rule, X_val, y_val, current_f1, refined_rules
+                accepted, new_accuracy, metrics = self._evaluate_rule_acceptance(
+                    rule, X_val, y_val, current_accuracy, refined_rules
                 )
 
                 if self.debug:
                     print(f"[FEEDBACK]   Evaluating: {rule}")
-                    print(f"[FEEDBACK]     F1: {current_f1:.4f} -> {new_f1:.4f}")
-                    print(f"[FEEDBACK]     Recall: {metrics['current_recall']:.4f} -> {metrics['new_recall']:.4f}")
-                    print(f"[FEEDBACK]     Precision: {metrics['new_precision']:.4f}")
+                    print(f"[FEEDBACK]     Accuracy: {current_accuracy:.4f} -> {new_accuracy:.4f}")
+                    print(f"[FEEDBACK]     TP: {metrics['new_tp']}, TN: {metrics['new_tn']}, FP: {metrics['new_fp']}, FN: {metrics['new_fn']}")
                     print(f"[FEEDBACK]     Accepted: {accepted}")
                     if not accepted:
                         reasons = []
-                        if not metrics['f1_improves']:
-                            reasons.append("F1 doesn't improve")
-                        if not metrics.get('recall_boost'):
-                            reasons.append("No recall boost")
-                        if not metrics.get('tp_preserved'):
+                        if not metrics['accuracy_improves']:
+                            reasons.append("Accuracy doesn't improve")
+                        if not metrics['tp_preserved']:
                             reasons.append("TP not preserved")
+                        if not metrics['tn_preserved']:
+                            reasons.append("TN not preserved")
                         print(f"[FEEDBACK]     Rejected: {', '.join(reasons)}")
 
-                if accepted and new_f1 > best_f1:
+                if accepted and new_accuracy > best_accuracy:
                     best_rule = rule
-                    best_f1 = new_f1
+                    best_accuracy = new_accuracy
                     best_metrics = metrics
 
                     if self.debug:
                         print(f"[FEEDBACK]   >>> Best rule so far!")
-                        if metrics.get('recall_boost'):
-                            print(f"[FEEDBACK]     Accepted via Recall Boost!")
 
             # Add rule if improvement (use lower threshold for feedback loop)
             feedback_threshold = self.min_f1_improvement / 2  # More permissive for refinement
-            recall_boost = best_metrics.get('recall_boost') if best_metrics else False
 
-            if best_rule is not None and (best_f1 > current_f1 + feedback_threshold or recall_boost):
+            if best_rule is not None and best_accuracy > current_accuracy + feedback_threshold:
                 refined_rules.append(best_rule)
-                current_f1 = best_f1
+                current_accuracy = best_accuracy
 
                 if self.debug:
                     print(f"[FEEDBACK]   Added rule: {best_rule}")
                     if best_metrics:
-                        print(f"[FEEDBACK]   New F1: {current_f1:.4f}, Recall: {best_metrics['new_recall']:.4f}, Total rules: {len(refined_rules)}")
+                        print(f"[FEEDBACK]   New Accuracy: {current_accuracy:.4f}, Total rules: {len(refined_rules)}")
             else:
                 if self.debug:
-                    print(f"[FEEDBACK] No rule improves F1 sufficiently. Stopping.")
+                    print(f"[FEEDBACK] No rule improves accuracy sufficiently. Stopping.")
                 break
 
         return refined_rules
@@ -656,7 +655,8 @@ class RuleClassifier:
     def fit(self, X: pd.DataFrame, y: pd.Series):
         """Train the classifier using cross-validation."""
         # Determine default class using LLM_label
-        self.default_class = self._determine_default_class(X, y)
+        # self.default_class = self._determine_default_class(X, y)
+        self.default_class = 0
 
         if self.debug:
             print(f"[DEBUG] Default class: {self.default_class}")
@@ -690,12 +690,12 @@ class RuleClassifier:
             X_fold_val = X.iloc[val_idx]
             y_fold_val = y.iloc[val_idx]
 
-            fold_rules, fold_f1 = self._select_rules_on_fold(
+            fold_rules, fold_acc = self._select_rules_on_fold(
                 X_fold_train, y_fold_train, X_fold_val, y_fold_val, candidate_rules
             )
 
             all_selected_rules.extend(fold_rules)
-            fold_scores.append(fold_f1)
+            fold_scores.append(fold_acc)
 
         # Select final rules by frequency
         from collections import Counter
@@ -719,29 +719,28 @@ class RuleClassifier:
         top_rules = sorted_rules[:top_k]
 
         self.rules = []
-        best_f1 = 0.0
+        best_acc = 0.0
         remaining_rules = top_rules.copy()
 
         for _ in range(self.max_rules):
             best_rule = None
-            best_rule_f1 = 0.0
+            best_rule_acc = 0.0
 
             for rule in remaining_rules:
                 test_rules = self.rules + [rule]
-                f1, _, _, _ = self.evaluate_rule_set(test_rules, X, y)
-
-                if f1 > best_rule_f1:
-                    best_rule_f1 = f1
+                _, _, _, accuracy = self.evaluate_rule_set(test_rules, X, y)
+                if accuracy > best_rule_acc:
+                    best_rule_acc = accuracy
                     best_rule = rule
 
-            if best_rule is not None and best_rule_f1 > best_f1 + self.min_f1_improvement:
+            if best_rule is not None and best_rule_acc > best_acc + self.min_f1_improvement:
                 self.rules.append(best_rule)
-                best_f1 = best_rule_f1
+                best_acc = best_rule_acc
                 remaining_rules.remove(best_rule)
             else:
                 break
 
-        self.best_cv_f1 = best_f1
+        self.best_cv_acc = best_acc
 
         # Apply feedback-driven refinement
         if self.enable_feedback_loop and len(self.rules) > 0:
@@ -754,11 +753,11 @@ class RuleClassifier:
                 X, y, X, y
             )
 
-            final_f1, _, _, _ = self.evaluate_rule_set(self.rules, X, y)
-            self.best_cv_f1 = final_f1
+            _, _, _, final_accuracy = self.evaluate_rule_set(self.rules, X, y)
+            self.best_cv_acc = final_accuracy
 
             if self.debug:
-                print(f"[DEBUG] Refinement complete. Final F1: {final_f1:.4f}, Total rules: {len(self.rules)}")
+                print(f"[DEBUG] Refinement complete. Final Accuracy: {final_accuracy:.4f}, Total rules: {len(self.rules)}")
 
     def _select_rules_on_fold(
         self, X_train: pd.DataFrame, y_train: pd.Series,
@@ -783,29 +782,29 @@ class RuleClassifier:
 
         # Greedy forward selection
         rule_set = []
-        best_f1 = 0.0
+        best_acc = 0.0
         remaining_rules = candidate_rules.copy()
 
         for _ in range(self.max_rules):
             best_rule = None
-            best_rule_f1 = 0.0
+            best_rule_acc = 0.0
 
             for rule in remaining_rules:
                 test_rules = rule_set + [rule]
-                f1, _, _, _ = self.evaluate_rule_set(test_rules, X_val, y_val)
+                f1, precision, recall, accuracy = self.evaluate_rule_set(test_rules, X_val, y_val)
 
-                if f1 > best_rule_f1:
-                    best_rule_f1 = f1
+                if accuracy > best_rule_acc:
+                    best_rule_acc = accuracy
                     best_rule = rule
 
-            if best_rule is not None and best_rule_f1 > best_f1 + self.min_f1_improvement:
+            if best_rule is not None and best_rule_acc > best_acc + self.min_f1_improvement:
                 rule_set.append(best_rule)
-                best_f1 = best_rule_f1
+                best_acc = best_rule_acc
                 remaining_rules.remove(best_rule)
             else:
                 break
 
-        return rule_set, best_f1
+        return rule_set, best_acc
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Make predictions on new data."""
@@ -849,6 +848,42 @@ class RuleClassifier:
         print("  - Each firing rule votes for its predicted class")
         print("  - Majority vote wins")
         print("  - Tie or no rules: use default class")
+
+    def export_rules(self):
+        """
+        Export rules in the format compatible with CQ.rewritten_pos_rules and CQ.rewritten_neg_rules.
+
+        Returns:
+            Tuple of (pos_rules, neg_rules) where:
+            - pos_rules: Rules that predict class 1 (put into rewritten_pos_rules)
+            - neg_rules: Rules that predict class 0 (put into rewritten_neg_rules)
+
+        Format:
+            List[Tuple[feature_name, operator, value]]
+            where operator is one of: "Eq", "Gt", "Lt", "Ge", "Le", "In"
+        """
+        pos_rules = []
+        neg_rules = []
+
+        for rule in self.rules:
+            # Convert each rule condition to the tuple format
+            for condition in rule.conditions:
+                # Map operator names
+                op_map = {
+                    'eq': 'Eq',
+                    'ge': 'Ge',
+                    'le': 'Le'
+                }
+
+                operator = op_map.get(condition.operator, 'Eq')
+                rule_tuple = (condition.feature, operator, condition.value)
+
+                if rule.predicted_label == 1:
+                    pos_rules.append(rule_tuple)
+                else:
+                    neg_rules.append(rule_tuple)
+
+        return pos_rules, neg_rules
 
 
 # =============================================================================
