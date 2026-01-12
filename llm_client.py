@@ -13,18 +13,6 @@ import os
 
 load_dotenv()
 
-class BooleanFeatureResponse(BaseModel):
-    """Response model for boolean feature extraction."""
-    value: bool
-
-class IntFeatureResponse(BaseModel):
-    """Response model for int feature extraction."""
-    value: int
-
-class FloatFeatureResponse(BaseModel):
-    """Response model for float feature extraction."""
-    value: float
-
 
 class PromptParams:
     def __init__(self, kwargs: Dict[str, Any]) -> None:

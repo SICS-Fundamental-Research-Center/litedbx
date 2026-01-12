@@ -71,3 +71,18 @@ class PopulationSpec(BaseModel):
 class PopulationSpecs(BaseModel):
     """Collection of population specifications."""
     value: List[PopulationSpec]
+
+
+class BooleanFeatureResponse(BaseModel):
+    """Response model for boolean feature extraction."""
+    value: bool
+
+
+class IntFeatureResponse(BaseModel):
+    """Response model for int feature extraction."""
+    value: int
+
+
+class FloatFeatureResponse(BaseModel):
+    """Response model for float feature extraction."""
+    value: float

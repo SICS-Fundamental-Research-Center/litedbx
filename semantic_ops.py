@@ -4,12 +4,17 @@ Semantic operations for LDB Engine.
 Handles LLM-based semantic feature extraction and mapping.
 """
 from pathlib import Path
-from typing import List, Tuple, Type, Union
+from typing import List, Tuple, Type
 import pandas as pd
 from pydantic import BaseModel
 
-from llm_client import LiteLLMWrapper, BooleanFeatureResponse, IntFeatureResponse, FloatFeatureResponse
-from data_structures import PopulationSpecs
+from llm_client import LiteLLMWrapper
+from data_structures import (
+    PopulationSpecs, 
+    BooleanFeatureResponse, 
+    IntFeatureResponse, 
+    FloatFeatureResponse
+)
 import logging
 logger = logging.getLogger(__name__)
 

@@ -3,9 +3,13 @@ import random
 from pathlib import Path
 from typing import List, Tuple, Dict
 
-from llm_client import LiteLLMWrapper, BooleanFeatureResponse
+from llm_client import LiteLLMWrapper
 from ldb_classifier import RuleClassifier
-from data_structures import UCQ, PopulationSpecs
+from data_structures import (
+    UCQ, 
+    PopulationSpecs,
+    BooleanFeatureResponse,
+)
 from evaluation import evaluate_set, evaluate_list
 from semantic_ops import sem_mapping, sem_multi_mapping
 from feature_gen import generate_feature_space
