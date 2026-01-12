@@ -166,7 +166,7 @@ class LDBEngine:
             filtered_df = filter_by_rewritten_rules(remaining_df, workload)
             logger.info(f"After filtering by rewritten rules: {len(filtered_df)}/{len(remaining_df)} rows retrieved.")
 
-            filtered_df.to_csv(self.dataset_path / f"retrieved_{query_name}.csv", index=False)
+            filtered_df.to_csv(self.ckpt_home / f"{query_name}_retrieved.csv", index=False)
             assert self.ground_truth[query_name] is not None, f"Ground truth for {query_name} not found."
 
             result_set = set(

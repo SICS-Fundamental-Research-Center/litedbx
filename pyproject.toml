@@ -1,5 +1,5 @@
 [project]
-name = "tab-few-shot"
+name = "litedbx"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "instructor>=1.13.0",
     "litellm[proxy]>=1.80.11",
-    "tabpfn>=6.2.0",
-    "torchvision>=0.24.1",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.8.0",
 ]
+
+[[tool.uv.index]]
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
