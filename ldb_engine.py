@@ -74,7 +74,6 @@ class LDBEngine:
                 static_view, self.workloads, query_name, self.llm_client, 
                 self.ckpt_home, ckpt_prefix=ckpt_prefix, enable_cache=True
             )
-            sem_view = sem_view[workload.select_cols]
             remaining_dfs[query_name] = sem_view.reset_index(drop=True)
             logger.info(f"After semantic prefiltering: {len(sem_view)}/{len(static_view)} rows remain.")
 

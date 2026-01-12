@@ -9,7 +9,7 @@ if __name__ == "__main__":
     # Configure logging
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[logging.StreamHandler(sys.stdout)]
     )
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     asyncio.run(
         ldb_engine.apply(
             queries=workloads,
-            enable_proxies=False
+            enable_proxies=True
         )
     )
 
