@@ -1,9 +1,14 @@
 from time import time
 import asyncio
+import logging
 from workloads import medical_workloads
+from logger_config import setup_logger
 
 
 if __name__ == "__main__":
+
+    # Set up logging
+    logger = setup_logger(level=logging.INFO)
 
     workloads = ["Q1"]
 
@@ -20,7 +25,7 @@ if __name__ == "__main__":
     )
 
     end = time()
-    print(f"Total execution time: {end - start} seconds")
+    logger.info(f"Total execution time: {end - start} seconds")
 
 
 
