@@ -132,48 +132,117 @@ async def prefilter_by_proxies(
 
     return result_df
 
-def filter_by_rewritten_rules(df: pd.DataFrame, query: UCQ) -> pd.DataFrame:
+def filter_by_rewritten_rules(
+    df: pd.DataFrame,
+    query: UCQ,
+    backup_weight: float = 1.0,
+    pos_weight: float = 1.0,
+    neg_weight: float = -1.0
+) -> pd.DataFrame:
     """
-    Filter data based on rewritten rules (backup + positive + negative).
+    Filter data based on rewritten rules using a scoring system.
+
+    Each instance starts with a score of 0. Rules are applied and matching instances
+    have their score updated by the corresponding weight. Final result includes
+    instances with score > 0.
 
     Args:
         df: Input dataframe
         query: UCQ query with rewritten rules
+        backup_weight: Weight to add when backup rule matches (default: 1.0)
+        pos_weight: Weight to add when positive rule matches (default: 1.0)
+        neg_weight: Weight to add when negative rule matches (default: -1.0)
 
     Returns:
-        Filtered dataframe
+        Filtered dataframe with score > 0
     """
-    # Step 1: Use LLM-guided backup rules to recall relatively high-confidence samples.
-    backup_result = pd.DataFrame()
+    # Initialize score column with 0
+    df = df.copy()
+    df["score"] = 0
+
+    # Apply backup rules - add weight for each matching rule collection
     for cq in query.rules:
-        df_cp = df.copy()
+        if not cq.backup_rules:
+            continue
+
+        # Create a mask for this CQ's backup rules (conjunction)
+        mask = pd.Series([True] * len(df), index=df.index)
         for col, op, val in cq.backup_rules:
             logger.debug(f"Applying backup rule: {col} {op} {val}")
-            df_cp = _apply_rule_operator(df_cp, col, op, val)
-        backup_result = pd.concat([backup_result, df_cp], ignore_index=True)
-    backup_result = backup_result.drop_duplicates()
+            rule_mask = _get_rule_mask(df, col, op, val)
+            mask &= rule_mask
 
-    # Step 2: Use rewritten neg rules to reduce false positives.
-    # For each CQ, apply neg rules as POSITIVE conjunction to get samples to EXCLUDE,
-    # then remove them from backup_result (De Morgan's law)
+        # Add backup_weight to score for matching instances
+        df.loc[mask, "score"] += backup_weight
+
+    # Apply positive (pos) rules - add weight for each matching rule collection
+    for cq in query.rules:
+        if not cq.rewritten_pos_rules:
+            continue
+
+        # Create a mask for this CQ's pos rules (conjunction)
+        mask = pd.Series([True] * len(df), index=df.index)
+        for col, op, val in cq.rewritten_pos_rules:
+            logger.debug(f"Applying rewritten pos rule: {col} {op} {val}")
+            rule_mask = _get_rule_mask(df, col, op, val)
+            mask &= rule_mask
+
+        # Add pos_weight to score for matching instances
+        df.loc[mask, "score"] += pos_weight
+
+    # Apply negative (neg) rules - add weight for each matching rule collection
     for cq in query.rules:
         if not cq.rewritten_neg_rules:
             continue
 
-        # Apply all neg rules as positive conjunction to get the set to exclude
-        df_exclude = backup_result.copy()
+        # Create a mask for this CQ's neg rules (conjunction)
+        mask = pd.Series([True] * len(df), index=df.index)
         for col, op, val in cq.rewritten_neg_rules:
-            logger.debug(f"Applying rewritten neg rule (to get exclusion set): {col} {op} {val}")
-            df_exclude = _apply_rule_operator(df_exclude, col, op, val)
+            logger.debug(f"Applying rewritten neg rule: {col} {op} {val}")
+            rule_mask = _get_rule_mask(df, col, op, val)
+            mask &= rule_mask
 
-        # Remove the excluded set from backup_result
-        exclude_indices = set(df_exclude.index)
-        backup_result = backup_result[~backup_result.index.isin(exclude_indices)]
+        # Add neg_weight to score for matching instances
+        df.loc[mask, "score"] += neg_weight
 
-    # Combine backup_result (after negation) with pos_result and deduplicate
-    final_result = backup_result.drop_duplicates()
+    # Filter instances with score > 0
+    result_df = df[df["score"] > 0].drop(columns=["score"])
 
-    return final_result
+    return result_df
+
+
+def _get_rule_mask(
+    df: pd.DataFrame,
+    col: str,
+    op: Literal["Eq", "Gt", "Lt", "Ge", "Le", "In"],
+    val: Union[str, int, float, bool, List[Union[str, int, float, bool]]]
+) -> pd.Series:
+    """
+    Get a boolean mask for a single rule operator.
+
+    Args:
+        df: Input dataframe
+        col: Column name
+        op: Operator (Eq, Gt, Lt, Ge, Le, In)
+        val: Value(s) to compare against
+
+    Returns:
+        Boolean Series indicating which rows match the rule
+    """
+    if op == "Eq":
+        return df[col] == val
+    elif op == "Gt":
+        return df[col] > val
+    elif op == "Lt":
+        return df[col] < val
+    elif op == "Ge":
+        return df[col] >= val
+    elif op == "Le":
+        return df[col] <= val
+    elif op == "In":
+        return df[col].isin(val)  # type: ignore
+    else:
+        raise ValueError(f"Unsupported operation: {op}")
 
 
 def _apply_rule_operator(
@@ -194,17 +263,5 @@ def _apply_rule_operator(
     Returns:
         Filtered dataframe
     """
-    if op == "Eq":
-        return df[df[col] == val]
-    elif op == "Gt":
-        return df[df[col] > val]
-    elif op == "Lt":
-        return df[df[col] < val]
-    elif op == "Ge":
-        return df[df[col] >= val]
-    elif op == "Le":
-        return df[df[col] <= val]
-    elif op == "In":
-        return df[df[col].isin(val)]  # type: ignore
-    else:
-        raise ValueError(f"Unsupported operation: {op}")
+    mask = _get_rule_mask(df, col, op, val)
+    return df[mask]
