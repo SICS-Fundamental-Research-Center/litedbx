@@ -3,7 +3,6 @@ Semantic operations for LDB Engine.
 
 Handles LLM-based semantic feature extraction and mapping.
 """
-import asyncio
 from pathlib import Path
 from typing import List, Tuple, Type, Union
 import pandas as pd
@@ -65,6 +64,7 @@ async def sem_coloring(
             pos, is_match = result
             col_idx = df_cp.columns.get_loc("sem_flag")  # type: ignore
             if df_cp.iat[pos, col_idx] == -1:  # type: ignore
+                # Already failed by the consensus test for at least one rule.
                 continue
             df_cp.iat[pos, col_idx] = 1 if is_match else -1  # type: ignore
 
@@ -79,6 +79,7 @@ async def sem_mapping(
     response_model: Type[BaseModel],
     llm_client: LiteLLMWrapper,
     ckpt_home: Path,
+    ckpt_prefix: str = "",
     enable_cache: bool = True
 ) -> pd.DataFrame:
     """
@@ -97,9 +98,10 @@ async def sem_mapping(
     Returns:
         Dataframe with new column added
     """
-    if enable_cache and (ckpt_home / f"sem_mapping_{new_col_name}.csv").exists():
+    ckpt_path = ckpt_home / f"{ckpt_prefix}_sem_mapping_{new_col_name}.csv"
+    if enable_cache and ckpt_path.exists():
         logger.debug(f"Loading cached semantic mapping for column '{new_col_name}'...")
-        cached_df = pd.read_csv(ckpt_home / f"sem_mapping_{new_col_name}.csv").reset_index(drop=True)
+        cached_df = pd.read_csv(ckpt_path).reset_index(drop=True)
         assert len(cached_df) == len(df), \
             "Cached semantic mapping length does not match current dataframe length."
         df[new_col_name] = cached_df[new_col_name]
@@ -117,7 +119,7 @@ async def sem_mapping(
     df[new_col_name] = llm_labels
 
     if enable_cache:
-        df.to_csv(ckpt_home / f"sem_mapping_{new_col_name}.csv", index=False)
+        df.to_csv(ckpt_path, index=False)
         logger.debug(f"Stored semantic mapping for column '{new_col_name}' to checkpoint.")
 
     return df
@@ -128,6 +130,7 @@ async def sem_multi_mapping(
     mapping_specs: PopulationSpecs,
     llm_client: LiteLLMWrapper,
     ckpt_home: Path,
+    ckpt_prefix: str = "",
     enable_cache: bool = True
 ) -> pd.DataFrame:
     """
@@ -146,7 +149,7 @@ async def sem_multi_mapping(
     mapping_signature = "_".join(
         [spec.target_col for spec in mapping_specs.value]
     )
-    cache_path = ckpt_home / f"sem_multi_mapping_{mapping_signature}.csv"
+    cache_path = ckpt_home / f"{ckpt_prefix}_multimap_{mapping_signature}.csv"
 
     if enable_cache and cache_path.exists():
         logger.debug(f"Loading cached semantic multi-mapping for features: {mapping_signature}...")

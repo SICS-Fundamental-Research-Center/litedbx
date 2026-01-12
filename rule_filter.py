@@ -67,18 +67,17 @@ def prefilter_by_static_rules(
     return result
 
 
-async def prefilter_by_semantic_rules(
+async def prefilter_by_proxies(
     df: pd.DataFrame,
     workloads: Dict[str, UCQ],
     query_name: str,
     llm_client,
     ckpt_home: Path,
-    early_positive: bool = True,
-    drop_neg: bool = True,
-    enable_cache: bool = True
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ckpt_prefix: str = "",
+    enable_cache: bool = True,
+) -> pd.DataFrame:
     """
-    Filter data based on semantic rules using LLM.
+    Filter data based on semantic rules using proxy models.
 
     Args:
         df: Input dataframe
@@ -86,20 +85,17 @@ async def prefilter_by_semantic_rules(
         query_name: Name of the query to apply
         llm_client: LLM client
         ckpt_home: Checkpoint directory for caching
-        early_positive: Whether to return early positive samples
-        drop_neg: Whether to drop negative samples
         enable_cache: Whether to use cached results
 
     Returns:
-        Tuple of (early_positive_df, result_df)
+        Filtered dataframe
     """
     if enable_cache and \
-        (ckpt_home / f"{query_name}_sem_early_positive.csv").exists() and \
-                (ckpt_home / f"{query_name}_sem_prefilter_result.csv").exists():
+        (ckpt_home / f"{ckpt_prefix}_{query_name}_sem_prefilter_result.csv").exists():
         logger.debug(f"Loading cached semantic prefilter results for query {query_name}...")
-        early_positive_df = pd.read_csv(ckpt_home / f"{query_name}_sem_early_positive.csv").reset_index(drop=True)
-        result_df = pd.read_csv(ckpt_home / f"{query_name}_sem_prefilter_result.csv").reset_index(drop=True)
-        return early_positive_df, result_df
+        result_df = pd.read_csv(
+            ckpt_home / f"{ckpt_prefix}_{query_name}_sem_prefilter_result.csv").reset_index(drop=True)
+        return result_df
 
     query = workloads[query_name]
     fired_df = df.copy()
@@ -119,41 +115,22 @@ async def prefilter_by_semantic_rules(
     for i in range(len(sem_flags[0])):
         values_at_index = [flags[i] for flags in sem_flags]
         if 1 in values_at_index:
-            aggregated_flags.append(1)
+            aggregated_flags.append(1)  # At least one rule matched.
         elif all(v == 0 for v in values_at_index):
-            aggregated_flags.append(0)
+            aggregated_flags.append(0)  # No rule matched.
         else:
-            aggregated_flags.append(-1)
+            aggregated_flags.append(-1)  # All matched rules failed.
 
     fired_df["sem_flag"] = aggregated_flags
 
-    early_positive_df, result_df = pd.DataFrame(), pd.DataFrame()
-
-    if early_positive:
-        early_positive_df = fired_df[fired_df["sem_flag"] == 1].drop(columns=["sem_flag"])
-    else:
-        early_positive_df = pd.DataFrame(columns=fired_df.columns).drop(columns=["sem_flag"])
-
-    if drop_neg and early_positive:
-        early_positive_df = fired_df[fired_df["sem_flag"] == 1].drop(columns=["sem_flag"])
-        result_df = fired_df[fired_df["sem_flag"] == 0].drop(columns=["sem_flag"])
-    elif drop_neg and not early_positive:
-        early_positive_df = pd.DataFrame(columns=fired_df.columns).drop(columns=["sem_flag"])
-        result_df = fired_df[(fired_df["sem_flag"] == 0) | (fired_df["sem_flag"] == 1)].drop(columns=["sem_flag"])
-    elif early_positive and not drop_neg:
-        early_positive_df = fired_df[fired_df["sem_flag"] == 1].drop(columns=["sem_flag"])
-        result_df = fired_df[fired_df["sem_flag"] == 0 | (fired_df["sem_flag"] == -1)].drop(columns=["sem_flag"])
-    else:
-        early_positive_df = pd.DataFrame(columns=fired_df.columns).drop(columns=["sem_flag"])
-        result_df = fired_df.drop(columns=["sem_flag"])
+    result_df = fired_df[(fired_df["sem_flag"] != -1)].drop(columns=["sem_flag"])
 
     if enable_cache:
-        early_positive_df.to_csv(ckpt_home / f"{query_name}_sem_early_positive.csv", index=False)
-        result_df.to_csv(ckpt_home / f"{query_name}_sem_prefilter_result.csv", index=False)
+        result_df.to_csv(
+            ckpt_home / f"{ckpt_prefix}_{query_name}_sem_prefilter_result.csv", index=False)
         logger.debug(f"Stored semantic prefilter results of {query_name} to checkpoint.")
 
-    return early_positive_df, result_df
-
+    return result_df
 
 def filter_by_rewritten_rules(df: pd.DataFrame, query: UCQ) -> pd.DataFrame:
     """

@@ -26,7 +26,10 @@ if __name__ == "__main__":
     start = time()
 
     asyncio.run(
-        ldb_engine.apply(workloads)
+        ldb_engine.apply(
+            queries=workloads,
+            enable_proxies=False
+        )
     )
 
     end = time()

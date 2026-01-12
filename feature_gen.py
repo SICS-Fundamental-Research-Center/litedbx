@@ -41,7 +41,7 @@ async def generate_feature_space(
         Dictionary mapping query names to population specifications
     """
     feature_space_signature = "_".join(workloads.keys())
-    cache_path = ckpt_home / f"feature_space_{feature_space_signature}.json"
+    cache_path = ckpt_home / f"{feature_space_signature}_feature_space.json"
 
     if enable_cache and cache_path.exists():
         logger.debug("Loading cached feature space...")

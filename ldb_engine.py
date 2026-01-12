@@ -11,7 +11,7 @@ from semantic_ops import sem_mapping, sem_multi_mapping
 from feature_gen import generate_feature_space
 from rule_filter import (
     prefilter_by_static_rules,
-    prefilter_by_semantic_rules,
+    prefilter_by_proxies,
     filter_by_rewritten_rules
 )
 import logging
@@ -47,10 +47,15 @@ class LDBEngine:
         logger.info("Initialized LDBEngine.")
 
 
-    async def apply(self, queries: List[str]) -> None:
+    async def apply(
+            self, 
+            queries: List[str],
+            enable_proxies: bool = False) -> None:
+
+        ckpt_prefix = f"PROXY_" if enable_proxies else "NOPXY_"
 
         # Step 1: Prefilter easy samples using static and semantic rules.
-        retrieved_dfs, remaining_dfs = {}, {}
+        remaining_dfs = {}
         for query_name in queries:
 
             workload = self.workloads[query_name]
@@ -59,21 +64,17 @@ class LDBEngine:
             static_view = prefilter_by_static_rules(
                 self.database, self.workloads, query_name, self.ckpt_home, enable_cache=True
             )
-            retrieved_dfs[query_name] = pd.DataFrame(columns=static_view.columns)
             remaining_dfs[query_name] = static_view.reset_index(drop=True)
             logger.info(f"After static prefiltering: {len(static_view)}/{len(self.database)} rows remain.")
 
             # Step 1.2: Filter the data based on semantic rules.
-            early_positive_view, sem_view = \
-                await prefilter_by_semantic_rules(
-                    static_view, self.workloads, query_name, self.llm_client, self.ckpt_home,
-                    early_positive=False,
-                    drop_neg=True
-                )
-            early_positive_view = early_positive_view[workload.select_cols]
-
-            retrieved_dfs[query_name] = early_positive_view.reset_index(drop=True)
-            logger.info(f"After semantic prefiltering: {len(early_positive_view)}/{len(static_view)} rows retrieved.")
+            if not enable_proxies:
+                continue
+            sem_view = await prefilter_by_proxies(
+                static_view, self.workloads, query_name, self.llm_client, 
+                self.ckpt_home, ckpt_prefix=ckpt_prefix, enable_cache=True
+            )
+            sem_view = sem_view[workload.select_cols]
             remaining_dfs[query_name] = sem_view.reset_index(drop=True)
             logger.info(f"After semantic prefiltering: {len(sem_view)}/{len(static_view)} rows remain.")
 
@@ -82,7 +83,7 @@ class LDBEngine:
             workload = self.workloads[query_name]
             for cq in workload.rules:
                 for col_name, semantic_desc in cq.sem_rules:
-                    new_col_name = f"{col_name}_sem_mapped"
+                    new_col_name = f"{col_name}_pseudo_label"
                     remaining_df = await sem_mapping(
                         remaining_df,
                         col_name,
@@ -91,11 +92,12 @@ class LDBEngine:
                         BooleanFeatureResponse,
                         self.llm_client,
                         self.ckpt_home,
+                        ckpt_prefix=ckpt_prefix,
                         enable_cache=True
                     )
-                cq.backup_rules.append(
-                    (new_col_name, "Eq", True)
-                )
+                    cq.backup_rules.append(
+                        (new_col_name, "Eq", True)
+                    )
         
         # Step 3: Generate feature space for each queries.
         #   TODO: Generate feature space JOINTLY for all queries.
@@ -126,6 +128,7 @@ class LDBEngine:
                     PopulationSpecs(value=pre_selected_specs),
                     self.llm_client,
                     self.ckpt_home,
+                    ckpt_prefix=ckpt_prefix,
                     enable_cache=True
                 )
 
@@ -159,23 +162,20 @@ class LDBEngine:
             
         # Finally, apply the rewritten rules and evaluate against ground truth.
         for query_name in queries:
-            retrieved_df = retrieved_dfs[query_name]
             remaining_df = remaining_dfs[query_name]
             workload = self.workloads[query_name]
             filtered_df = filter_by_rewritten_rules(remaining_df, workload)
             logger.info(f"After filtering by rewritten rules: {len(filtered_df)}/{len(remaining_df)} rows retrieved.")
-            final_df = pd.concat([retrieved_df, filtered_df], ignore_index=True).drop_duplicates()
-            logger.info(f"After applying rewritten rules: {len(final_df)}/{len(self.database)} rows retrieved.")
 
-            final_df.to_csv(self.dataset_path / f"retrieved_{query_name}.csv", index=False)
+            filtered_df.to_csv(self.dataset_path / f"retrieved_{query_name}.csv", index=False)
             assert self.ground_truth[query_name] is not None, f"Ground truth for {query_name} not found."
 
             result_set = set(
                 tuple(row)
-                for row in final_df[workload.select_cols].itertuples(index=False, name=None)
+                for row in filtered_df[workload.select_cols].itertuples(index=False, name=None)
             )
             gt_set = self.ground_truth[query_name]
-            eval_result = evaluate_set(result_set, gt_set)
+            _ = evaluate_set(result_set, gt_set)
 
 
     def _init_ground_truth(self, query_names: List[str]) -> Dict[str, set]:
