@@ -27,6 +27,28 @@ uv sync
 source .venv/bin/activate
 ```
 
+### Environment Configuration
+
+Configure your API keys by setting up the `.env` file:
+
+```bash
+# Rename the env file
+mv .env.example .env
+
+# Edit .env with your actual API keys
+# Required variables:
+# - BLSC_API_KEY: Your BLSC API key
+# - DASHSCOPE_API_KEY: Your DashScope API key
+```
+
+Example `.env` file:
+```env
+BLSC_API_KEY=your_api_key_here
+BLSC_ENDPOINT=https://llmapi.blsc.cn/v1/
+DASHSCOPE_API_KEY=your_dashscope_key_here
+DASHSCOPE_ENDPOINT=thttps://dashscope.aliyuncs.com/compatible-mode/v1/
+```
+
 ### Data Setup
 
 This project uses datasets from [SemBench](https://github.com/SemBench/SemBench). To set up the data:
