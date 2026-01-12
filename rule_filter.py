@@ -11,7 +11,8 @@ import pandas as pd
 
 from data_structures import UCQ
 from semantic_ops import sem_coloring
-from logger_config import logger
+import logging
+logger = logging.getLogger(__name__)
 
 
 def prefilter_by_static_rules(

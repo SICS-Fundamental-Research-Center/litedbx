@@ -1,14 +1,19 @@
 from time import time
 import asyncio
 import logging
+import sys
 from workloads import medical_workloads
-from logger_config import setup_logger
 
 
 if __name__ == "__main__":
-
-    # Set up logging
-    logger = setup_logger(level=logging.INFO)
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger = logging.getLogger(__name__)
 
     workloads = ["Q1"]
 

@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from llm_client import LiteLLMWrapper, BooleanFeatureResponse, IntFeatureResponse, FloatFeatureResponse
 from data_structures import PopulationSpecs
-from logger_config import logger
+import logging
+logger = logging.getLogger(__name__)
 
 
 def detect_modality(data_item: str) -> str:

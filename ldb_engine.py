@@ -1,13 +1,11 @@
-import asyncio
-from time import time
 import pandas as pd
 import random
 from pathlib import Path
-from typing import List, Tuple, Dict, Type
+from typing import List, Tuple, Dict
 
-from llm_client import LiteLLMWrapper, BooleanFeatureResponse, IntFeatureResponse, FloatFeatureResponse
+from llm_client import LiteLLMWrapper, BooleanFeatureResponse
 from ldb_classifier import RuleClassifier
-from data_structures import CQ, UCQ, EvalResult, PopulationSpecs
+from data_structures import UCQ, PopulationSpecs
 from evaluation import evaluate_set, evaluate_list
 from semantic_ops import sem_mapping, sem_multi_mapping
 from feature_gen import generate_feature_space
@@ -16,7 +14,8 @@ from rule_filter import (
     prefilter_by_semantic_rules,
     filter_by_rewritten_rules
 )
-from logger_config import logger
+import logging
+logger = logging.getLogger(__name__)
 
 
 class LDBEngine:

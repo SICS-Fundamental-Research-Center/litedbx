@@ -6,7 +6,8 @@ Provides functions to evaluate query results against ground truth.
 from typing import List
 
 from data_structures import EvalResult
-from logger_config import logger
+import logging
+logger = logging.getLogger(__name__)
 
 
 def evaluate_set(retrieved_set: set, gt_set: set) -> EvalResult:

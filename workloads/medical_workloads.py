@@ -1,4 +1,5 @@
-from ldb_engine import LDBEngine, CQ, UCQ
+from ldb_engine import LDBEngine
+from data_structures import UCQ, CQ
 
 
 

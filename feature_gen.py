@@ -13,8 +13,10 @@ from data_structures import PopulationSpecs, UCQ
 from llm_client import LiteLLMWrapper
 from prompts import PROMPTS
 from semantic_ops import detect_modality
-from logger_config import logger
+import logging
 
+
+logger = logging.getLogger(__name__)
 
 async def generate_feature_space(
     workloads: Dict[str, UCQ],
