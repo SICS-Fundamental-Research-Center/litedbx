@@ -27,6 +27,39 @@ uv sync
 source .venv/bin/activate
 ```
 
+### Data Setup
+
+This project uses datasets from [SemBench](https://github.com/SemBench/SemBench). To set up the data:
+
+1. **Download the files directory**:
+   ```bash
+   # Download the files directory from SemBench
+   # Visit: https://github.com/SemBench/SemBench/tree/main/files
+   # Place the 'files' directory under ./litedbx/
+   #
+   # Your directory structure should look like:
+   # litedbx/
+   #   ├── files/
+   #   │   ├── medical/
+   #   │   └── ...
+   #   └── ...
+   ```
+
+2. **Download multi-modal data** (images, etc.):
+   - The raw multi-modal data is not included in the GitHub repository due to size
+   - Download from: [Google Drive](https://drive.google.com/drive/folders/1pqf8DKFai16MR80Z7pcls5FgBbom-IJt?dmr=1&ec=wgc-drive-globalnav-goto)
+   - Extract and place the multi-modal files in the corresponding `files/{dataset}/` directories
+
+3. **Verify data setup**:
+   ```bash
+   # Check that the files directory exists
+   ls -la files/
+
+   # You should see dataset directories like:
+   # medical/
+   # ...
+   ```
+
 ## Usage
 
 ### Basic Usage
