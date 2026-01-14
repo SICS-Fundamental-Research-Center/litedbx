@@ -59,12 +59,19 @@ class LiteLLMWrapper:
     def __init__(self):
         self.client = litellm
         # Use Mode.JSON when initializing instructor to avoid function calling with vLLM
-        self.client_struct = instructor.from_litellm(litellm.completion, mode=Mode.JSON)
-        self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.JSON)
+        self.client_struct = instructor.from_litellm(
+            litellm.completion, mode=Mode.TOOLS)
+        self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.TOOLS)
 
         self.max_retries = 50
         self.parallelism = 20
         self.sem = asyncio.Semaphore(self.parallelism)
+
+        self.token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
 
         self.kwargs = {
             "timeout": 30,
@@ -130,14 +137,18 @@ class LiteLLMWrapper:
             }
         }
 
+    def get_token_usage(self):
+        return self.token_usage
+
     def invoke(
-            self, 
-            is_remote: bool, 
-            modality: str, 
-            prompt: str, 
+            self,
+            is_remote: bool,
+            modality: str,
+            prompt: str,
             data_item: Optional[str] = None,
             response_model: Optional[Type[BaseModel]] = None,
             model_id: Optional[int] = None,
+            enable_token_usage: bool = True,
     ):
         params = self._construct_prompt_params(
             is_remote=is_remote,
@@ -149,9 +160,9 @@ class LiteLLMWrapper:
         )
 
         if response_model:
-            return self._invoke_structured(params)
+            return self._invoke_structured(params, enable_token_usage)
         else:
-            return self._invoke(params)
+            return self._invoke(params, enable_token_usage)
 
 
     def invoke_with_proxy(
@@ -175,9 +186,9 @@ class LiteLLMWrapper:
                 model_index=model_id,
             )
             if response_model:
-                result = self._invoke_structured(params=params)
+                result = self._invoke_structured(params, False)
             else:
-                result = self._invoke(params=params)
+                result = self._invoke(params, False)
             results.add(result)
 
         if len(results) == 1:
@@ -191,6 +202,7 @@ class LiteLLMWrapper:
                 prompt=prompt,
                 data_item=data_item,
                 response_model=response_model,
+                enable_token_usage=True,
             )
 
     async def invoke_parallel(
@@ -201,6 +213,7 @@ class LiteLLMWrapper:
         data_items: List[str],
         response_model: Optional[Type[BaseModel]] = None,
         model_id: Optional[int] = None,
+        enable_token_usage: bool = True,
     ):
         tasks = []
         for idx, data_item in enumerate(data_items):
@@ -213,9 +226,9 @@ class LiteLLMWrapper:
                 model_index=model_id,
             )
             if response_model:
-                tasks.append(self._ainvoke_structured(idx, params))
+                tasks.append(self._ainvoke_structured(idx, params, enable_token_usage))
             else:
-                tasks.append(self._ainvoke(idx, params))
+                tasks.append(self._ainvoke(idx, params, enable_token_usage))
 
         results = await tqdm_asyncio.gather(*tasks)
         results.sort(key=lambda x: x[0])
@@ -243,9 +256,9 @@ class LiteLLMWrapper:
                     model_index=model_id,
                 )
                 if response_model:
-                    tasks.append(self._ainvoke_structured(idx, params))
+                    tasks.append(self._ainvoke_structured(idx, params, False))
                 else:
-                    tasks.append(self._ainvoke(idx, params))
+                    tasks.append(self._ainvoke(idx, params, False))
         results = await tqdm_asyncio.gather(*tasks)
         results.sort(key=lambda x: x[0])
 
@@ -268,9 +281,9 @@ class LiteLLMWrapper:
                     response_model=response_model,
                 )
                 if response_model:
-                    filtered_tasks.append(self._ainvoke_structured(group[0][0], params))
+                    filtered_tasks.append(self._ainvoke_structured(group[0][0], params, True))
                 else:
-                    filtered_tasks.append(self._ainvoke(group[0][0], params))
+                    filtered_tasks.append(self._ainvoke(group[0][0], params, True))
         print(f"# Consensus results: {len(sound_results)}, # Recomputing tasks: {len(filtered_tasks)}")
         recomputed_results = await tqdm_asyncio.gather(*filtered_tasks)
         recomputed_results.sort(key=lambda x: x[0])
@@ -304,9 +317,9 @@ class LiteLLMWrapper:
                     model_index=model_id,
                 )
                 if response_model:
-                    tasks.append(self._ainvoke_structured(idx, params))
+                    tasks.append(self._ainvoke_structured(idx, params, False))
                 else:
-                    tasks.append(self._ainvoke(idx, params))
+                    tasks.append(self._ainvoke(idx, params, False))
         results = await tqdm_asyncio.gather(*tasks)
         results.sort(key=lambda x: x[0])
 
@@ -345,24 +358,39 @@ class LiteLLMWrapper:
             params.structuring(response_model)
         return params
     
-    def _invoke(self, params: PromptParams):
+    def _invoke(self, params: PromptParams, enable_token_usage: bool = True):
         resp =  self.client.completion(**params.kwargs)
+        if enable_token_usage:
+            usage = self._extract_usage(resp)
+            self.token_usage["prompt_tokens"] += usage["prompt_tokens"]
+            self.token_usage["completion_tokens"] += usage["completion_tokens"]
+            self.token_usage["total_tokens"] += usage["total_tokens"]
         return resp
 
-    def _invoke_structured(self, params: PromptParams):
+    def _invoke_structured(self, params: PromptParams, enable_token_usage: bool = True):
         # Call instructor - mode is already set during initialization
-        resp = self.client_struct.chat.completions.create(
+        resp, completion = self.client_struct.create_with_completion(
             **params.kwargs
         )
+        if enable_token_usage:
+            usage = self._extract_usage(completion)
+            self.token_usage["prompt_tokens"] += usage["prompt_tokens"]
+            self.token_usage["completion_tokens"] += usage["completion_tokens"]
+            self.token_usage["total_tokens"] += usage["total_tokens"]
         return resp.value
 
-    async def _ainvoke(self, worker_id, params: PromptParams):
+    async def _ainvoke(self, worker_id, params: PromptParams, enable_token_usage: bool = True):
         attempt = 0
 
         while attempt <= self.max_retries:
             try:
                 async with self.sem:
                     resp = await self.client.acompletion(**params.kwargs)
+                    if enable_token_usage:
+                        usage = self._extract_usage(resp)
+                        self.token_usage["prompt_tokens"] += usage["prompt_tokens"]
+                        self.token_usage["completion_tokens"] += usage["completion_tokens"]
+                        self.token_usage["total_tokens"] += usage["total_tokens"]
                     return (worker_id, resp)
             except Exception as e:
                 attempt += 1
@@ -371,18 +399,23 @@ class LiteLLMWrapper:
                 await asyncio.sleep(min(2**attempt, 30))
 
 
-    async def _ainvoke_structured(self, worker_id, params: PromptParams):
+    async def _ainvoke_structured(self, worker_id, params: PromptParams, enable_token_usage: bool = True):
         attempt = 0
 
         while attempt <= self.max_retries:
             try:
                 async with self.sem:
                     # Call instructor - mode is already set during initialization
-                    resp = (
-                        await self.client_struct_async.chat.completions.create(
+                    resp, completion = (
+                        await self.client_struct_async.create_with_completion(
                             **params.kwargs
                         )
                     )
+                    if enable_token_usage:
+                        usage = self._extract_usage(completion)
+                        self.token_usage["prompt_tokens"] += usage["prompt_tokens"]
+                        self.token_usage["completion_tokens"] += usage["completion_tokens"]
+                        self.token_usage["total_tokens"] += usage["total_tokens"]
                     return (worker_id, resp.value)
             except Exception as e:
                 attempt += 1
@@ -390,6 +423,17 @@ class LiteLLMWrapper:
                     raise e
                 await asyncio.sleep(min(2**attempt, 30))
     
+    def _extract_usage(self, resp):
+        assert resp is not None, "Response is None, cannot extract token usage."
+        usage = getattr(resp, "usage", None)
+        assert usage is not None, "Token usage information is missing in the response."
+
+        # normalize to a stable schema
+        return {
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+        }
     
     def _get_model_kw(self, is_remote: bool, modality: str, model_index: Optional[int] = None):
         if not model_index:
@@ -404,13 +448,30 @@ class LiteLLMWrapper:
         return  dict(lm_params[model_index], **self.kwargs)
 
     def _test_invoke(self):
-        prompt = "Describe this xray image."
+        from data_structures import BooleanFeatureResponse
+
+        prompt = "Does this X-Ray indicate pneumonia? Answer with True or False."
 
         resp = self.invoke(
             is_remote=True,
             modality="IMAGE",
             prompt=prompt,
             data_item="files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg",
+            response_model=BooleanFeatureResponse,
+        )
+        print(f"Response: {resp}")
+
+    async def _atest_invoke(self):
+        from data_structures import BooleanFeatureResponse
+
+        prompt = "Does this X-Ray indicate pneumonia? Answer with True or False."
+
+        resp = await self.invoke_parallel(
+            is_remote=True,
+            modality="IMAGE",
+            prompt=prompt,
+            data_items=["files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg"],
+            response_model=BooleanFeatureResponse,
         )
         print(f"Response: {resp}")
 
@@ -419,6 +480,7 @@ class LiteLLMWrapper:
 if __name__ == "__main__":
     llm_client = LiteLLMWrapper()
 
-
     llm_client._test_invoke()
+    # asyncio.run(llm_client._atest_invoke())
 
+    print(llm_client.token_usage)
