@@ -102,6 +102,9 @@ async def generate_feature_space(
             json.dump(cache_data, f, indent=2)
         logger.debug(f"Stored feature space to checkpoint: {cache_path}")
 
+    for query_name, specs in population_specs.items():
+        population_specs[query_name] = PopulationSpecs(value=specs)
+
     return population_specs
 
 
@@ -112,7 +115,19 @@ def suggest_specs(
     visible_features: List[str],
     query: UCQ,
     suggestion_budget: int,
+    ckpt_home: Path,
+    ckpt_prefix: str = "",
+    enable_cache: bool = True,
 ) -> Tuple[List[PopulationSpec], List[PopulationSpec]]:
+
+    ckpt_path = ckpt_home / f"{ckpt_prefix}_SUGGEST_{suggestion_budget}.json"
+    if enable_cache and ckpt_path.exists():
+        logger.debug(f"Loading cached suggested specs from: {ckpt_path}")
+        with open(ckpt_path, 'r') as f:
+            cached_data = json.load(f)
+        picked_specs = [PopulationSpec(**spec) for spec in cached_data["picked_specs"]]
+        remaining_specs = [PopulationSpec(**spec) for spec in cached_data["remaining_specs"]]
+        return picked_specs, remaining_specs
 
     semantic_desc_str = """
     You should process the following semantic queries:\n
@@ -162,5 +177,13 @@ def suggest_specs(
             picked_specs.append(cand)
         else:
             remaining_specs.append(cand)
+
+    if enable_cache:
+        with open(ckpt_path, 'w') as f:
+            json.dump({
+                "picked_specs": [spec.model_dump() for spec in picked_specs],
+                "remaining_specs": [spec.model_dump() for spec in remaining_specs],
+            }, f, indent=2)
+        logger.debug(f"Stored suggested specs to checkpoint: {ckpt_path}")
 
     return picked_specs, remaining_specs

@@ -104,7 +104,7 @@ async def sem_mapping(
     Returns:
         Dataframe with new column added
     """
-    ckpt_path = ckpt_home / f"{ckpt_prefix}_sem_mapping_{new_col_name}.csv"
+    ckpt_path = ckpt_home / f"{ckpt_prefix}_SEMMAP_{new_col_name}.csv"
     if enable_cache and ckpt_path.exists():
         logger.debug(f"Loading cached semantic mapping for column '{new_col_name}'...")
         cached_df = pd.read_csv(ckpt_path).reset_index(drop=True)
@@ -125,7 +125,9 @@ async def sem_mapping(
     df[new_col_name] = llm_labels
 
     if enable_cache:
-        df.to_csv(ckpt_path, index=False)
+        feature_col = df[[new_col_name]]
+        feature_col.reset_index(drop=True, inplace=True)
+        feature_col.to_csv(ckpt_path, index=False)
         logger.debug(f"Stored semantic mapping for column '{new_col_name}' to checkpoint.")
 
     return df
@@ -152,21 +154,17 @@ async def sem_multi_mapping(
     Returns:
         Dataframe with new columns added
     """
-    mapping_signature = "_".join(
-        [spec.target_col for spec in mapping_specs.value]
-    )
-    cache_path = ckpt_home / f"{ckpt_prefix}_multimap_{mapping_signature}.csv"
-
-    if enable_cache and cache_path.exists():
-        logger.debug(f"Loading cached semantic multi-mapping for features: {mapping_signature}...")
-        cached_df = pd.read_csv(cache_path).reset_index(drop=True)
-        assert len(cached_df) == len(df), (
-            f"Cached semantic multi-mapping length does not match current dataframe length. "
-            f"Expected {len(df)}, got {len(cached_df)}."
-        )
-        return cached_df
-
     for spec in mapping_specs.value:
+        cache_path = ckpt_home / f"{ckpt_prefix}_SEMMAP_{spec.target_col}.csv"
+        if enable_cache and cache_path.exists():
+            logger.debug(f"Loading cached semantic mapping for feature: {spec.target_col}...")
+            cached_df = pd.read_csv(cache_path).reset_index(drop=True)
+            assert len(cached_df) == len(df), (
+                f"Cached semantic mapping length does not match current dataframe length. "
+                f"Expected {len(df)}, got {len(cached_df)}."
+            )
+            df[spec.target_col] = cached_df[spec.target_col]
+            continue
         df = await sem_mapping(
             df,
             spec.source_col,
@@ -179,9 +177,8 @@ async def sem_multi_mapping(
             ckpt_home,
             enable_cache=False
         )
-
-    if enable_cache:
-        df.to_csv(cache_path, index=False)
-        logger.debug(f"Stored semantic multi-mapping for features: {mapping_signature} to checkpoint.")
-
+        if enable_cache:
+            feature_col = df[[spec.target_col]]
+            feature_col.to_csv(cache_path, index=False)
+            logger.debug(f"Stored semantic mapping for feature: {spec.target_col} to checkpoint.")
     return df

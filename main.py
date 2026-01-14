@@ -28,7 +28,7 @@ if __name__ == "__main__":
     asyncio.run(
         ldb_engine.apply(
             queries=workloads,
-            enable_proxies=True
+            enable_proxies=False
         )
     )
 

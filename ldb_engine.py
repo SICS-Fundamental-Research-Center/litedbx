@@ -118,9 +118,9 @@ class LDBEngine:
         selected_specs = {query: [] for query in self.workloads.keys()}
         candidate_specs = population_specs.copy()
         suggest_step_size = 3
-        feature_space_size = sum(
-            len(specs.value) for specs in candidate_specs.values()
-        )
+        feature_space_size = 0
+        for _, spec in candidate_specs.items():
+            feature_space_size += len(spec.value)
 
         acc_trace = {
             query_name: {"best": 0.0, "record": []} for query_name in queries
@@ -150,6 +150,9 @@ class LDBEngine:
                     visible_features=visible_features,
                     query=ucq,
                     suggestion_budget=self.feature_enrich_budget,
+                    ckpt_home=self.ckpt_home,
+                    enable_cache=True,
+                    ckpt_prefix=f"{ckpt_prefix}_ITER_{i}_{query_name}",
                 )
                 candidate_specs[query_name] = PopulationSpecs(value=remaining_specs)
                 selected_specs[query_name].extend(pre_selected_specs)
@@ -196,6 +199,13 @@ class LDBEngine:
                 # Update the remaining_dfs with new features.
                 remaining_dfs[query_name] = remaining_df.drop(columns=["label"])
 
+        # Persist the enriched database.
+        for query_name, remaining_df in remaining_dfs.items():
+            remaining_df.to_csv(
+                self.ckpt_home / f"{ckpt_prefix}_{query_name}_enriched.csv", index=False
+            )
+            logger.info(f"Persisted enriched database for {query_name} with {len(remaining_df)} rows.")
+
             
         # Finally, apply the rewritten rules and evaluate against ground truth.
         for query_name in queries:
@@ -220,6 +230,10 @@ class LDBEngine:
             logger.info(f"Best F1 for {query_name}: {f1_trace[query_name]['best']}")
             logger.info(f"Accuracy trace for {query_name}: {acc_trace[query_name]['record']}")
             logger.info(f"F1 trace for {query_name}: {f1_trace[query_name]['record']}")
+
+        # Print the llm token usage.
+        token_usage = self.llm_client.get_token_usage()
+        print(f"LLM Token Usage: {token_usage}")
 
 
     def _init_ground_truth(self, query_names: List[str]) -> Dict[str, set]:
