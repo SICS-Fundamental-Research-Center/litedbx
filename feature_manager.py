@@ -178,6 +178,10 @@ def suggest_specs(
         else:
             remaining_specs.append(cand)
 
+    # Fallback: Add features if not enough picked
+    while len(picked_specs) < suggestion_budget and len(remaining_specs) > 0:
+        picked_specs.append(remaining_specs.pop(0))
+
     if enable_cache:
         with open(ckpt_path, 'w') as f:
             json.dump({

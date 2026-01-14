@@ -129,7 +129,7 @@ class LDBEngine:
             query_name: {"best": 0.0, "record": []} for query_name in queries
         }
         num_iter = feature_space_size // suggest_step_size + 1
-        for i in range(feature_space_size // suggest_step_size + 1):
+        for i in range(num_iter):
             logger.info((
                 f"Iteration {i + 1} / {num_iter}: " 
                 f"{sum(len(specs.value) for specs in candidate_specs.values())} "

@@ -91,7 +91,10 @@ Here's the input for you:
 
 
 You should return a LIST of selected feature names. 
-MAKE SURE the returned feature name should be EXACTLY the same as the input feature name.
+MAKE SURE:
+- the returned feature name should be EXACTLY the same as the input feature name.
+- return exactly {selection_budget} features from the candidate list if candidates are sufficient, otherwise you should simply return all available candidates.
+- MAKE SURE NEVER return features that are already in the selected feature list.
 """
 
 
