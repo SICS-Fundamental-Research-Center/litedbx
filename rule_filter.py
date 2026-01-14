@@ -48,7 +48,7 @@ def prefilter_by_static_rules(
     for cq in query.rules:
         for col, _, _ in cq.static_rules:
             involved_cols.add(col)
-        for col, _ in cq.sem_rules:
+        for col, _, _ in cq.sem_rules:
             involved_cols.add(col)
     df = df.dropna(subset=list(involved_cols))
 

@@ -758,6 +758,8 @@ class RuleClassifier:
 
             if self.debug:
                 print(f"[DEBUG] Refinement complete. Final Accuracy: {final_accuracy:.4f}, Total rules: {len(self.rules)}")
+        
+        return self.best_cv_acc
 
     def _select_rules_on_fold(
         self, X_train: pd.DataFrame, y_train: pd.Series,

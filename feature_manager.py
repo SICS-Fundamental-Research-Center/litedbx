@@ -5,11 +5,16 @@ Handles LLM-based feature candidate generation.
 """
 import json
 from pathlib import Path
-from typing import Dict, Type
+from typing import Dict, Type, List, Tuple
 
 import pandas as pd
 
-from data_structures import PopulationSpecs, UCQ
+from data_structures import (
+    PopulationSpec,
+    PopulationSpecs, 
+    UCQ,
+    StringListFeatureResponse
+)
 from llm_client import LiteLLMWrapper
 from prompts import PROMPTS
 from semantic_ops import detect_modality
@@ -59,7 +64,7 @@ async def generate_feature_space(
     for query_name, workload in workloads.items():
         data_view = data_views[query_name]
         for rule in workload.rules:
-            for col_name, semantic_desc in rule.sem_rules:
+            for col_name, condition, prompt_template in rule.sem_rules:
                 # Determine the modality of the source column.
                 data_modality = detect_modality(
                     data_view.iloc[0][col_name]
@@ -69,6 +74,7 @@ async def generate_feature_space(
                 sample_data = data_view[col_name].astype(str).dropna().\
                     sample(n=min(10, len(data_view)), random_state=42).tolist()
 
+                semantic_desc = prompt_template.format(COL=col_name, CONDITION=condition)
                 prompt = PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"].format(
                     MODALITY=data_modality,
                     DESC=semantic_desc,
@@ -97,3 +103,64 @@ async def generate_feature_space(
         logger.debug(f"Stored feature space to checkpoint: {cache_path}")
 
     return population_specs
+
+
+def suggest_specs(
+    llm_client: LiteLLMWrapper,
+    candidate_specs: List[PopulationSpec],
+    selected_specs: List[PopulationSpec],
+    visible_features: List[str],
+    query: UCQ,
+    suggestion_budget: int,
+) -> Tuple[List[PopulationSpec], List[PopulationSpec]]:
+
+    semantic_desc_str = """
+    You should process the following semantic queries:\n
+    """
+    for cq in query.rules:
+        for col_name, condition, _ in cq.sem_rules:
+            semantic_desc_str += \
+                f"- Determine if the column '{col_name}' satisfies the condition: {condition}\n"
+
+    candidate_specs_str = json.dumps([
+        spec.model_dump() for spec in candidate_specs
+    ], indent=2)
+
+    selected_specs_cp = []
+    for vf in visible_features:
+        selected_specs_cp.append(
+            PopulationSpec(
+                source_col=vf,
+                target_col=vf,
+                prompt="",
+                feature_type="undefined",
+            )
+        )
+    selected_specs_cp.extend(selected_specs)
+    selected_specs_str = json.dumps([
+        spec.model_dump() for spec in selected_specs_cp
+    ], indent=2)
+
+    prompt = PROMPTS["SUGGEST_FEATURES_PROMPT"].format(
+        semantic_desc=semantic_desc_str,
+        candidate_specs=candidate_specs_str,
+        selected_specs=selected_specs_str,
+        selection_budget=suggestion_budget,
+    )
+
+    llm_response = llm_client.invoke(
+        modality="TEXT",
+        is_remote=True,
+        prompt=prompt,
+        response_model=StringListFeatureResponse,
+    )
+
+    assert isinstance(llm_response, list)
+    picked_specs, remaining_specs = [], []
+    for cand in candidate_specs:
+        if cand.target_col in llm_response:
+            picked_specs.append(cand)
+        else:
+            remaining_specs.append(cand)
+
+    return picked_specs, remaining_specs

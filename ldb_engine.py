@@ -12,7 +12,7 @@ from data_structures import (
 )
 from evaluation import evaluate_set, evaluate_list
 from semantic_ops import sem_mapping, sem_multi_mapping
-from feature_gen import generate_feature_space
+from feature_manager import generate_feature_space, suggest_specs
 from rule_filter import (
     prefilter_by_static_rules,
     prefilter_by_proxies,
@@ -85,8 +85,9 @@ class LDBEngine:
         for query_name, remaining_df in remaining_dfs.items():
             workload = self.workloads[query_name]
             for cq in workload.rules:
-                for col_name, semantic_desc in cq.sem_rules:
+                for col_name, condition, prompt_template in cq.sem_rules:
                     new_col_name = f"{col_name}_pseudo_label"
+                    semantic_desc = prompt_template.format(COL=col_name, CONDITION=condition)
                     remaining_df = await sem_mapping(
                         remaining_df,
                         col_name,
@@ -114,16 +115,44 @@ class LDBEngine:
         )
 
         # Step 4: Iteratively enrich the database and learn UCQs.
-        num_selected_features = 0
-        while num_selected_features < self.feature_enrich_budget:
+        selected_specs = {query: [] for query in self.workloads.keys()}
+        candidate_specs = population_specs.copy()
+        suggest_step_size = 3
+        feature_space_size = sum(
+            len(specs.value) for specs in candidate_specs.values()
+        )
 
+        acc_trace = {
+            query_name: {"best": 0.0, "record": []} for query_name in queries
+        }
+        f1_trace = {
+            query_name: {"best": 0.0, "record": []} for query_name in queries
+        }
+        num_iter = feature_space_size // suggest_step_size + 1
+        for i in range(feature_space_size // suggest_step_size + 1):
+            logger.info((
+                f"Iteration {i + 1} / {num_iter}: " 
+                f"{sum(len(specs.value) for specs in candidate_specs.values())} "
+                f"candidate features remaining."))
+            
             for query_name, ucq in self.workloads.items():
-                pop_specs = population_specs[query_name]
+                cand_specs = candidate_specs[query_name].value
                 remaining_df = remaining_dfs[query_name]
                 
                 # Step 4.1 Feature pre-selection.
-                # TODO: For testing, we only accept the first 3 features.
-                pre_selected_specs = pop_specs.value[:self.feature_enrich_budget]
+                visible_features = remaining_df.columns.tolist()
+                for ex in self.external_keys:
+                    visible_features.remove(ex)
+                pre_selected_specs, remaining_specs = suggest_specs(
+                    llm_client=self.llm_client,
+                    candidate_specs=cand_specs,
+                    selected_specs=selected_specs[query_name],
+                    visible_features=visible_features,
+                    query=ucq,
+                    suggestion_budget=self.feature_enrich_budget,
+                )
+                candidate_specs[query_name] = PopulationSpecs(value=remaining_specs)
+                selected_specs[query_name].extend(pre_selected_specs)
 
                 # Step 4.2 Feature population.
                 remaining_df = await sem_multi_mapping(
@@ -134,10 +163,6 @@ class LDBEngine:
                     ckpt_prefix=ckpt_prefix,
                     enable_cache=True
                 )
-
-                # Step 4.3 Feature selection.
-                # TODO: For testing, we directly accept all selected features.
-                num_selected_features += self.feature_enrich_budget
 
                 # Step 4.3 UCQ learning.
                 ground_truth_set = self.ground_truth[query_name]
@@ -151,14 +176,23 @@ class LDBEngine:
                         exclude_cols.append(col)
 
                 # Generate classification rules and get pos/neg rules
-                pos_rules, neg_rules = self._generate_classification_rules(
+                # WARN: The f1 is computed on the test data. It can only be used for debugging.
+                pos_rules, neg_rules, acc, _f1 = self._generate_classification_rules(
                     query_name, remaining_df.drop(columns=exclude_cols))
+                logger.info(f"Learned rewritten rules for query {query_name}: Accuracy={acc:.4f}, F1={_f1:.4f}")
+                acc_trace[query_name]["record"].append(acc)
+                f1_trace[query_name]["record"].append(_f1)
+                if acc > acc_trace[query_name]["best"]:
+                    acc_trace[query_name]["best"] = acc
+                    # Populate the rules into the CQ objects
+                    logger.info(f"Updating best accuracy to {acc_trace[query_name]['best']:.4f}, updating rewritten rules.")
+                    for cq in ucq.rules:
+                        cq.rewritten_pos_rules = pos_rules
+                        cq.rewritten_neg_rules = neg_rules
 
-                # Populate the rules into the CQ objects
-                for cq in ucq.rules:
-                    cq.rewritten_pos_rules = pos_rules
-                    cq.rewritten_neg_rules = neg_rules
-
+                if _f1 > f1_trace[query_name]["best"]:
+                    f1_trace[query_name]["best"] = _f1
+                
                 # Update the remaining_dfs with new features.
                 remaining_dfs[query_name] = remaining_df.drop(columns=["label"])
 
@@ -179,6 +213,13 @@ class LDBEngine:
             )
             gt_set = self.ground_truth[query_name]
             _ = evaluate_set(result_set, gt_set)
+
+        # Print the accuracy and f1 traces.
+        for query_name in queries:
+            logger.info(f"Best accuracy for {query_name}: {acc_trace[query_name]['best']}")
+            logger.info(f"Best F1 for {query_name}: {f1_trace[query_name]['best']}")
+            logger.info(f"Accuracy trace for {query_name}: {acc_trace[query_name]['record']}")
+            logger.info(f"F1 trace for {query_name}: {f1_trace[query_name]['record']}")
 
 
     def _init_ground_truth(self, query_names: List[str]) -> Dict[str, set]:
@@ -219,7 +260,7 @@ class LDBEngine:
             debug=True
         )
 
-        clf.fit(X_train, Y_train)
+        best_acc = clf.fit(X_train, Y_train)
 
         print(f"\n{'='*80}")
         print(f"Learned Rules ({len(clf.rules)} rules)")
@@ -238,7 +279,7 @@ class LDBEngine:
         true_labels = Y_train.tolist() + Y_test.tolist()
         eval_result = evaluate_list(predicted_labels, true_labels)
 
-        return pos_rules, neg_rules
+        return pos_rules, neg_rules, best_acc, eval_result.f1
 
 
     def _data_split(self, 

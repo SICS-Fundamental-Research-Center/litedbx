@@ -9,11 +9,18 @@ def q1():
         rules=[
             CQ(
                 static_rules=[],
-                sem_rules=[("symptoms", (
-                    "You are a medical expert." 
-                    "Please determine if the following symptoms indicate an allergy."
-                    "Please JUST answer \"True\" if they do, and \"False\" otherwise."
-                    "Do NOT provide any explanations."))],
+                sem_rules=[
+                    (
+                        "symptoms", 
+                        "The patient has an allergy",
+                        (
+                            "You are a medical expert. " 
+                            "Please determine if the given {COL} indicate: {CONDITION}. "
+                            "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                            "Do NOT provide any explanations."
+                        )
+                    )
+                ],
             ),
         ],
     )

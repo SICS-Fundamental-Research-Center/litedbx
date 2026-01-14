@@ -39,7 +39,7 @@ def detect_modality(data_item: str) -> str:
 
 async def sem_coloring(
     df: pd.DataFrame,
-    sem_rules: List[Tuple[str, str]],
+    sem_rules: List[Tuple[str, str, str]],
     llm_client: LiteLLMWrapper
 ) -> pd.DataFrame:
     """
@@ -57,8 +57,9 @@ async def sem_coloring(
     if "sem_flag" not in df_cp.columns:
         df_cp["sem_flag"] = 0
 
-    for col_name, semantic_desc in sem_rules:
+    for col_name, condition, prompt_ in sem_rules:
         modality = detect_modality(df_cp[col_name].iloc[0])
+        semantic_desc = prompt_.format(COL=col_name, CONDITION=condition)
         consensus_results = await llm_client.invoke_parallel_consensus(
             modality=modality,
             prompt=semantic_desc,

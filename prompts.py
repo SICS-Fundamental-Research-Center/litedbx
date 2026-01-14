@@ -52,6 +52,53 @@ Constraints:
 """
 
 
+
+SUGGEST_FEATURES_PROMPT = """
+You are an expert in feature engineering for information retrieval and query optimization.
+
+You will receive a list of candidate feature specifications that maybe helpful for improving query quality.
+
+Your task is to select a subset of these candidate feature specifications.
+
+Specifically, the input includes:
+=== Input ===
+
+1. Query Description: STRING
+A description of the semantic query. You should select features that are most helpful to answer the query.
+
+2. Candidate Feature Specifications: LIST 
+These are provided as a LIST, where each item includes (a) `source_col`: the source feature name where the target feature is extracted (b) `target_col`: the name of the new feature to be extracted from `source_col`,  (c) `prompt`: the prompt to extract the `target_col`, and (c) feature_type: the type of `target_col` (boolean or numerical).
+
+3. Selected Feature Specifications: LIST
+These are provided as a LIST of feature specifications that have already been selected. You are suggested to select features that are complementary to these already selected features to reduce redundancy.
+
+3. Selection Budget: INT
+You should select exactly this number of features from the candidate list if candidates are sufficient, otherwise you should simply return all available candidates.
+
+
+Here's the input for you:
+=== Query Description ===
+{semantic_desc}
+
+=== Candidate Feature Specifications ===
+{candidate_specs}
+
+=== Selected Feature Specifications ===
+{selected_specs}
+
+=== Selection Budget ===
+{selection_budget}
+
+
+You should return a LIST of selected feature names. 
+MAKE SURE the returned feature name should be EXACTLY the same as the input feature name.
+"""
+
+
+
+
+
 PROMPTS = {
     "GEN_FEAT_CANDIDATE_PROMPT": GEN_FEAT_CANDIDATE_PROMPT,
+    "SUGGEST_FEATURES_PROMPT": SUGGEST_FEATURES_PROMPT,
 }

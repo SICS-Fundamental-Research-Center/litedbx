@@ -18,7 +18,7 @@ class CQ:
             Union[str, int, float, List[Union[str, int, float]]],
         ]
     ] = field(default_factory=list)
-    sem_rules: List[Tuple[str, str]] = field(default_factory=list)
+    sem_rules: List[Tuple[str, str, str]] = field(default_factory=list)
     backup_rules: List[
         Tuple[
             str,
@@ -65,7 +65,7 @@ class PopulationSpec(BaseModel):
     source_col: str
     target_col: str
     prompt: str
-    feature_type: Literal["bool", "float", "int"]
+    feature_type: Literal["bool", "float", "int", "undefined"]
 
 
 class PopulationSpecs(BaseModel):
@@ -86,3 +86,7 @@ class IntFeatureResponse(BaseModel):
 class FloatFeatureResponse(BaseModel):
     """Response model for float feature extraction."""
     value: float
+
+class StringListFeatureResponse(BaseModel):
+    """Response model for list of strings feature extraction."""
+    value: List[str]
