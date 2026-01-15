@@ -33,12 +33,13 @@ WORKLOADS = {
 
 
 
-def build_query_engine(workloads, feature_enrich_budget=3, query_rewrite_budget=3):
+def build_query_engine(workloads, feature_enrich_budget=3, query_rewrite_budget=3, hitl_budget=50):
     return LDBEngine(
         dataset_name="medical",
         workloads=_retrieve_workloads(workloads),
         feature_enrich_budget=feature_enrich_budget,
         query_rewrite_budget=query_rewrite_budget,
+        hitl_budget=hitl_budget,
         external_keys=["image_path","skin_image_id","image_path_xray",
                        "xray_id","symptoms","symptom_id"]
     )

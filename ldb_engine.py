@@ -28,10 +28,12 @@ class LDBEngine:
                  workloads: Dict[str, UCQ],
                  feature_enrich_budget: int = 3,
                  query_rewrite_budget: int = 3,
+                 hitl_budget: int = 50,
                  external_keys: List[str] = []) -> None:
         
         self.feature_enrich_budget = feature_enrich_budget
         self.query_rewrite_budget = query_rewrite_budget
+        self.hitl_budget = hitl_budget
         self.external_keys = external_keys
 
         logger.info("Initializing LDBEngine...")
@@ -260,7 +262,7 @@ class LDBEngine:
         X_train, X_test, Y_train, Y_test = self._data_split(
             query_name,
             df_full,
-            train_size=min(50, len(df_full)//2),
+            train_size=min(self.hitl_budget, int(len(df_full) * 0.9)),
         )
 
         clf = RuleClassifier(

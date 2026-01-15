@@ -21,6 +21,7 @@ if __name__ == "__main__":
         workloads=workloads,
         feature_enrich_budget=3,
         query_rewrite_budget=3,
+        hitl_budget=50,
     )
 
     start = time()
