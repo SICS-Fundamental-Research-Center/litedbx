@@ -175,6 +175,11 @@ class LDBEngine:
                     lambda row: tuple(row[ucq.select_cols]) in ground_truth_set,
                     axis=1
                 )
+                # WARN: only for test
+                remaining_full_df = remaining_df.copy()
+                remaining_full_df.drop(columns=self.external_keys).to_csv(
+                    self.ckpt_home / f"{ckpt_prefix}_{query_name}_full.csv", index=False
+                )
                 exclude_cols = self.external_keys + ucq.select_cols
                 for cq in ucq.rules:
                     for col, _, _ in cq.backup_rules:
