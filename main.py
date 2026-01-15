@@ -15,7 +15,7 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    workloads = ["Q1"]
+    workloads = ["Q3"]
 
     ldb_engine = medical_workloads.build_query_engine(
         workloads=workloads,

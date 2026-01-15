@@ -43,6 +43,7 @@ Each feature configuration MUST include the following fields:
 
 Constraints:
 - Propose only features that are derivable from the source field alone (no external data).
+- Propose AT LEAST 10 but no more than 15 distinct features.
 - Prefer features that are:
     • interpretable
     • robust across data variations
