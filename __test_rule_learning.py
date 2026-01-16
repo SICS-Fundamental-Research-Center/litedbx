@@ -1,38 +1,66 @@
 """
 Few-Shot Binary Classification Framework
 
-A simple, modular framework for few-shot learning with LLM-extracted features.
+Simple, configurable framework with ablation study support.
 """
 
 import pandas as pd
 import numpy as np
+import logging
+import time
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Config (all parameters in one place)
+# =============================================================================
+class Config:
+    # Data
+    visible_samples = 50
+    random_seed = 42
+    data_path = "data/medical/.ckpt/NOPXY__Q1_full.csv"
+
+    # Feature selection
+    use_feature_selection = True
+    top_k = 10
+
+    # Self-training
+    use_self_training = True
+    n_rounds = 5
+    confidence_threshold = 0.95
+    max_samples_per_round = 10
+    balance_classes = True
+
+    # Classifier
+    n_estimators = 100
+    max_depth = 10
+
+
+# =============================================================================
+# Core Functions
+# =============================================================================
 def preprocess_features(X):
     """Encode categorical variables."""
     from sklearn.preprocessing import LabelEncoder
-
-    X_processed = X.copy()
-    categorical_cols = X_processed.select_dtypes(include=['object']).columns.tolist()
-
-    for col in categorical_cols:
-        le = LabelEncoder()
-        X_processed[col] = le.fit_transform(X_processed[col].astype(str))
-
-    if categorical_cols:
-        print(f"[PREPROCESS] Encoded: {categorical_cols}")
-
-    return X_processed
+    X_proc = X.copy()
+    for col in X_proc.select_dtypes(include=['object']).columns:
+        X_proc[col] = LabelEncoder().fit_transform(X_proc[col].astype(str))
+    return X_proc
 
 
 def train_classifier(vis_X, vis_Y):
-    """Train a Random Forest classifier."""
+    """Train Random Forest."""
     from sklearn.ensemble import RandomForestClassifier
-
     clf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=10,
-        random_state=42,
+        n_estimators=Config.n_estimators,
+        max_depth=Config.max_depth,
+        random_state=Config.random_seed,
         class_weight='balanced'
     )
     clf.fit(vis_X, vis_Y)
@@ -40,12 +68,10 @@ def train_classifier(vis_X, vis_Y):
 
 
 def evaluate_predictions(vis_Y, inv_Y, inv_Y_pred):
-    """Calculate F1, precision, and recall."""
+    """Calculate F1, precision, recall."""
     from sklearn.metrics import f1_score, precision_score, recall_score
-
     all_Y_pred = np.concatenate([vis_Y.values, inv_Y_pred])
     all_Y_true = np.concatenate([vis_Y.values, inv_Y.values])
-
     return {
         'f1': f1_score(all_Y_true, all_Y_pred),
         'precision': precision_score(all_Y_true, all_Y_pred),
@@ -53,246 +79,191 @@ def evaluate_predictions(vis_Y, inv_Y, inv_Y_pred):
     }
 
 
-def few_shot_classify(vis_X, vis_Y, inv_X, top_k=10):
-    """
-    Complete few-shot classification pipeline.
-
-    Args:
-        vis_X: Visible features (labeled)
-        vis_Y: Visible labels
-        inv_X: Invisible features (unlabeled)
-        top_k: Number of top features to use (default: 10)
-
-    Returns:
-        Dictionary with predictions, and selected features
-    """
-    # Preprocess
+def few_shot_classify(vis_X, vis_Y, inv_X, use_fs=True):
+    """Few-shot classification with optional feature selection."""
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
 
-    # Train classifier to get feature importance
-    clf_temp = train_classifier(vis_X_proc, vis_Y)
-    importances = pd.DataFrame({
-        'feature': vis_X_proc.columns,
-        'importance': clf_temp.feature_importances_
-    }).sort_values('importance', ascending=False)
+    if use_fs:
+        clf_temp = train_classifier(vis_X_proc, vis_Y)
+        importances = pd.DataFrame({
+            'feature': vis_X_proc.columns,
+            'importance': clf_temp.feature_importances_
+        }).sort_values('importance', ascending=False)
+        features = importances.head(Config.top_k)['feature'].tolist()
+        logger.info(f"[FEATURE SELECTION] Top-{Config.top_k}: {len(features)} features")
+    else:
+        features = vis_X_proc.columns.tolist()
+        logger.info(f"[NO FEATURE SELECTION] Using all {len(features)} features")
 
-    # Select top-k features
-    best_features = importances.head(top_k)['feature'].tolist()
+    clf = train_classifier(vis_X_proc[features], vis_Y)
+    predictions = clf.predict(inv_X_proc[features])
 
-    print(f"[FEATURE SELECTION] Using top-{top_k} features")
-    print(f"[FEATURE SELECTION] {best_features}\n")
-
-    # Train final model
-    vis_X_sel = vis_X_proc[best_features]
-    inv_X_sel = inv_X_proc[best_features]
-    clf = train_classifier(vis_X_sel, vis_Y)
-
-    # Predict
-    predictions = clf.predict(inv_X_sel)
-
-    result = {
-        'predictions': predictions,
-        'classifier': clf,
-        'top_k': top_k,
-        'features': best_features,
-        'importance': importances
-    }
-
-    return result
+    return {'predictions': predictions, 'features': features}
 
 
-def self_training(vis_X, vis_Y, inv_X, inv_Y, n_rounds=3, confidence_threshold=0.95,
-                  max_samples_per_round=10, balance_classes=True):
-    """
-    Self-training with safety rails.
-
-    Args:
-        vis_X: Initial visible features
-        vis_Y: Initial visible labels
-        inv_X: Invisible features
-        inv_Y: Invisible labels (for evaluation only)
-        n_rounds: Maximum iterations
-        confidence_threshold: Minimum confidence to add sample (default: 0.95)
-        max_samples_per_round: Max samples to add per round
-        balance_classes: Force equal selection from both classes
-
-    Returns:
-        Dictionary with predictions, metrics, and training history
-    """
-    # Preprocess once at the beginning
+def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
+    """Self-training with safety rails."""
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
 
-    # Get features using initial training
-    result_init = few_shot_classify(vis_X, vis_Y, inv_X, top_k=10)
-    best_features = result_init['features']
+    result_init = few_shot_classify(vis_X, vis_Y, inv_X, use_fs)
+    features = result_init['features']
 
-    # Check initial class distribution
-    print(f"[INIT] Visible class distribution: Positive={vis_Y.sum()}, Negative={len(vis_Y) - vis_Y.sum()}")
+    logger.info(f"[SELF-TRAINING] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
-    history = []
+    for round_idx in range(Config.n_rounds):
+        logger.info(f"\nRound {round_idx + 1}/{Config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
 
-    for round_idx in range(n_rounds):
-        print(f"\n{'='*60}")
-        print(f"SELF-TRAINING ROUND {round_idx + 1}/{n_rounds}")
-        print(f"Visible samples: {len(vis_X)} | Invisible samples: {len(inv_X)}")
-        print(f"{'='*60}\n")
+        clf = train_classifier(vis_X_proc[features], vis_Y)
+        probas = clf.predict_proba(inv_X_proc[features])[:, 1]
+        predictions = clf.predict(inv_X_proc[features])
 
-        # Train on processed data with selected features
-        vis_X_sel = vis_X_proc[best_features]
-        inv_X_sel = inv_X_proc[best_features]
-        clf = train_classifier(vis_X_sel, vis_Y)
-
-        # Predict
-        probas = clf.predict_proba(inv_X_sel)[:, 1]
-        predictions = clf.predict(inv_X_sel)
-
-        # Evaluate current performance
         metrics = evaluate_predictions(vis_Y, inv_Y, predictions)
-        print(f"[ROUND {round_idx + 1}] F1: {metrics['f1']:.4f}, P: {metrics['precision']:.4f}, R: {metrics['recall']:.4f}")
+        logger.info(f"[ROUND {round_idx + 1}] F1: {metrics['f1']:.4f}, P: {metrics['precision']:.4f}, R: {metrics['recall']:.4f}")
 
-        # Select high-confidence samples
-        conf_mask_pos = (probas >= confidence_threshold)
-        conf_mask_neg = (probas <= (1 - confidence_threshold))
+        conf_mask_pos = (probas >= Config.confidence_threshold)
+        conf_mask_neg = (probas <= (1 - Config.confidence_threshold))
         high_conf_mask = conf_mask_pos | conf_mask_neg
 
-        print(f"[ROUND {round_idx + 1}] High confidence samples: {high_conf_mask.sum()} (Pos={conf_mask_pos.sum()}, Neg={conf_mask_neg.sum()})")
+        logger.debug(f"High-conf: {high_conf_mask.sum()} (Pos={conf_mask_pos.sum()}, Neg={conf_mask_neg.sum()})")
 
         if high_conf_mask.sum() == 0:
-            print(f"[ROUND {round_idx + 1}] No samples above threshold. Stopping.")
+            logger.info("No samples above threshold. Stopping.")
             break
 
-        # Class balancing (soft - allow imbalance when necessary)
-        if balance_classes:
-            pos_indices = np.where(conf_mask_pos)[0]
-            neg_indices = np.where(conf_mask_neg)[0]
+        # Select samples
+        if Config.balance_classes:
+            pos_idx = np.where(conf_mask_pos)[0]
+            neg_idx = np.where(conf_mask_neg)[0]
 
-            # If one class has very few samples, take what we can get
-            if len(pos_indices) == 0 or len(neg_indices) == 0:
-                print(f"[ROUND {round_idx + 1}] Only one class available. Taking up to {max_samples_per_round} samples.")
-                n_samples = min(high_conf_mask.sum(), max_samples_per_round)
-                high_conf_indices = np.where(high_conf_mask)[0]
-                selected_indices = np.random.choice(high_conf_indices, n_samples, replace=False)
+            if len(pos_idx) == 0 or len(neg_idx) == 0:
+                n = min(high_conf_mask.sum(), Config.max_samples_per_round)
+                selected = np.random.choice(np.where(high_conf_mask)[0], n, replace=False)
+                logger.info(f"Selected: {n} samples (one class only)")
             else:
-                # Try to balance, but use minimum of available samples instead of strict cap
-                n_per_class = min(len(pos_indices), len(neg_indices), max_samples_per_round // 2)
-
+                n_per_class = min(len(pos_idx), len(neg_idx), Config.max_samples_per_round // 2)
                 if n_per_class == 0:
-                    # Fallback: take at least some samples from each available class
-                    n_per_class = min(len(pos_indices), len(neg_indices))
-
-                selected_pos = np.random.choice(pos_indices, n_per_class, replace=False)
-                selected_neg = np.random.choice(neg_indices, n_per_class, replace=False)
-                selected_indices = np.concatenate([selected_pos, selected_neg])
-
-            if len(pos_indices) > 0 and len(neg_indices) > 0:
-                print(f"[ROUND {round_idx + 1}] Selected: {len(np.where(conf_mask_pos[selected_indices])[0])} positive + {len(np.where(conf_mask_neg[selected_indices])[0])} negative")
-            else:
-                print(f"[ROUND {round_idx + 1}] Selected: {len(selected_indices)} samples")
+                    n_per_class = min(len(pos_idx), len(neg_idx))
+                selected_pos = np.random.choice(pos_idx, n_per_class, replace=False)
+                selected_neg = np.random.choice(neg_idx, n_per_class, replace=False)
+                selected = np.concatenate([selected_pos, selected_neg])
+                logger.info(f"Selected: {n_per_class} pos + {n_per_class} neg")
         else:
-            n_samples = min(high_conf_mask.sum(), max_samples_per_round)
-            high_conf_indices = np.where(high_conf_mask)[0]
-            selected_indices = np.random.choice(high_conf_indices, n_samples, replace=False)
-            print(f"[ROUND {round_idx + 1}] Selected: {n_samples} samples")
+            n = min(high_conf_mask.sum(), Config.max_samples_per_round)
+            selected = np.random.choice(np.where(high_conf_mask)[0], n, replace=False)
+            logger.info(f"Selected: {n} samples")
 
-        # Add to visible sets (both original and processed)
-        vis_X = pd.concat([vis_X, inv_X.iloc[selected_indices]], ignore_index=True)
-        vis_Y = pd.concat([vis_Y, pd.Series(predictions[selected_indices])], ignore_index=True)
-        vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected_indices]], ignore_index=True)
-
-        # Remove from invisible sets
-        inv_X = inv_X.drop(inv_X.index[selected_indices]).reset_index(drop=True)
-        inv_Y = inv_Y.drop(inv_Y.index[selected_indices]).reset_index(drop=True)
-        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected_indices]).reset_index(drop=True)
-
-        # Store history
-        history.append({
-            'round': round_idx + 1,
-            'n_visible': len(vis_X),
-            'n_invisible': len(inv_X),
-            'n_added': len(selected_indices),
-            'metrics': metrics
-        })
+        # Update datasets
+        vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
+        vis_Y = pd.concat([vis_Y, pd.Series(predictions[selected])], ignore_index=True)
+        vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
+        inv_X = inv_X.drop(inv_X.index[selected]).reset_index(drop=True)
+        inv_Y = inv_Y.drop(inv_Y.index[selected]).reset_index(drop=True)
+        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected]).reset_index(drop=True)
 
         if len(inv_X) == 0:
-            print(f"[ROUND {round_idx + 1}] No more invisible samples. Stopping.")
+            logger.info("No more invisible samples. Stopping.")
             break
 
     # Final prediction
-    print(f"\n{'='*60}")
-    print("FINAL PREDICTION")
-    print(f"{'='*60}\n")
-    vis_X_sel = vis_X_proc[best_features]
-    inv_X_sel = inv_X_proc[best_features]
-    clf_final = train_classifier(vis_X_sel, vis_Y)
-    final_predictions = clf_final.predict(inv_X_sel)
+    logger.info("\n[FINAL PREDICTION]")
+    clf_final = train_classifier(vis_X_proc[features], vis_Y)
+    final_predictions = clf_final.predict(inv_X_proc[features])
     final_metrics = evaluate_predictions(vis_Y, inv_Y, final_predictions)
 
-    return {
-        'predictions': final_predictions,
-        'metrics': final_metrics,
-        'history': history
-    }
+    return {'metrics': final_metrics, 'features': features}
 
 
 # =============================================================================
-# Example Usage
+# Ablation Study
 # =============================================================================
+def run_ablation(vis_X, vis_Y, inv_X, inv_Y):
+    """Run ablation study and print report."""
+    results = []
 
+    # Baseline
+    logger.info("\n" + "="*80)
+    logger.info("[ABLATION] BASELINE (no optimizations)")
+    logger.info("="*80)
+    start = time.time()
+    res = few_shot_classify(vis_X, vis_Y, inv_X, use_fs=False)
+    elapsed = time.time() - start
+    m = evaluate_predictions(vis_Y, inv_Y, res['predictions'])
+    results.append({'Method': 'Baseline', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
+    baseline_f1 = m['f1']
+    logger.info(f"BASELINE F1: {m['f1']:.4f} (Time: {elapsed:.2f}s)\n")
+
+    # + Feature Selection
+    if Config.use_feature_selection:
+        logger.info("="*80)
+        logger.info(f"[ABLATION] + FEATURE SELECTION (top-{Config.top_k})")
+        logger.info("="*80)
+        start = time.time()
+        res = few_shot_classify(vis_X, vis_Y, inv_X, use_fs=True)
+        elapsed = time.time() - start
+        m = evaluate_predictions(vis_Y, inv_Y, res['predictions'])
+        results.append({'Method': f'+ FS', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
+        logger.info(f"+FS F1: {m['f1']:.4f} (vs baseline: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
+
+    # + Self-Training (on top of feature selection)
+    if Config.use_self_training:
+        logger.info("="*80)
+        logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
+        logger.info("="*80)
+
+        # Use FS results as baseline for ST comparison
+        if Config.use_feature_selection:
+            prev_f1 = results[-1]['F1']
+            use_fs_for_st = True
+        else:
+            prev_f1 = baseline_f1
+            use_fs_for_st = False
+
+        start = time.time()
+        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=use_fs_for_st)
+        elapsed = time.time() - start
+        m = res['metrics']
+        results.append({'Method': '+ FS & ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
+        logger.info(f"+ST F1: {m['f1']:.4f} (vs previous: {(m['f1']-prev_f1)/prev_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
+
+    # Print report
+    logger.info("\n" + "="*90)
+    logger.info(" " * 35 + "ABLATION REPORT")
+    logger.info("="*90)
+
+    for r in results:
+        r['Improvement'] = (r['F1'] - baseline_f1) / baseline_f1 * 100
+
+    logger.info(f"\n{'Method':<20} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Improvement':>15} {'# Feats':>10} {'Time(s)':>8}")
+    logger.info("-" * 90)
+    for r in results:
+        logger.info(f"{r['Method']:<20} {r['F1']:>8.4f} {r['P']:>10.4f} {r['R']:>8.4f} {r['Improvement']:>12.2f}% {r['Feats']:>10} {r['Time']:>8.2f}")
+    logger.info("="*90 + "\n")
+
+
+# =============================================================================
+# Main
+# =============================================================================
 if __name__ == "__main__":
+    logger.info("="*80)
+    logger.info("FEW-SHOT CLASSIFICATION - ABLATION STUDY")
+    logger.info("="*80)
+
     # Load data
-    df = pd.read_csv("data/medical/.ckpt/NOPXY__Q1_full.csv")
+    df = pd.read_csv(Config.data_path)
     Y, X = df['label'], df.drop(columns=['label', 'patient_id'])
 
-    # Split into visible/invisible
-    np.random.seed(42)
-    vis_indices = X.sample(n=50).index
-    inv_indices = X.index.difference(vis_indices)
+    # Split
+    np.random.seed(Config.random_seed)
+    vis_idx = X.sample(n=Config.visible_samples).index
+    inv_idx = X.index.difference(vis_idx)
 
-    vis_X, inv_X = X.loc[vis_indices].reset_index(drop=True), X.loc[inv_indices].reset_index(drop=True)
-    vis_Y, inv_Y = Y.loc[vis_indices].reset_index(drop=True), Y.loc[inv_indices].reset_index(drop=True)
+    vis_X, inv_X = X.loc[vis_idx].reset_index(drop=True), X.loc[inv_idx].reset_index(drop=True)
+    vis_Y, inv_Y = Y.loc[vis_idx].reset_index(drop=True), Y.loc[inv_idx].reset_index(drop=True)
 
-    print("="*60)
-    print("FEW-SHOT CLASSIFICATION")
-    print("="*60)
-    print(f"Visible samples: {len(vis_X)}")
-    print(f"Invisible samples: {len(inv_X)}")
-    print(f"Available features: {list(X.columns)}\n")
+    logger.info(f"Data: {len(vis_X)} visible, {len(inv_X)} invisible")
+    logger.info(f"Features for training:\n{list(X.columns)}\n")
 
-    # Make predictions
-    result = few_shot_classify(vis_X, vis_Y, inv_X, top_k=10)
-
-    # Evaluate performance
-    metrics = evaluate_predictions(vis_Y, inv_Y, result['predictions'])
-
-    print("="*60)
-    print("RESULTS")
-    print("="*60)
-    print(f"Top-{result['top_k']} features: {result['features']}")
-    print(f"F1-score: {metrics['f1']:.4f}")
-    print(f"Precision: {metrics['precision']:.4f}")
-    print(f"Recall: {metrics['recall']:.4f}")
-
-    # Optional: Try self-training (commented out by default)
-    # Uncomment below to test self-training:
-    
-    print("\n" + "="*60)
-    print("SELF-TRAINING EXPERIMENT")
-    print("="*60)
-    
-    vis_X_st = vis_X.copy()
-    vis_Y_st = vis_Y.copy()
-    inv_X_st = inv_X.copy()
-    inv_Y_st = inv_Y.copy()
-    
-    result_st = self_training(
-        vis_X_st, vis_Y_st, inv_X_st, inv_Y_st,
-        n_rounds=5,
-        confidence_threshold=0.95,
-        max_samples_per_round=10,
-        balance_classes=True
-    )
-    
-    print(f"\nSelf-Training F1: {result_st['metrics']['f1']:.4f}")
-    print(f"Improvement: {(result_st['metrics']['f1'] - metrics['f1'])*100:+.2f}%")
+    # Run ablation
+    run_ablation(vis_X, vis_Y, inv_X, inv_Y)
