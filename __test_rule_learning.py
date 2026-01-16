@@ -212,20 +212,27 @@ def run_ablation(vis_X, vis_Y, inv_X, inv_Y):
         logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
         logger.info("="*80)
 
-        # Use FS results as baseline for ST comparison
-        if Config.use_feature_selection:
-            prev_f1 = results[-1]['F1']
-            use_fs_for_st = True
-        else:
-            prev_f1 = baseline_f1
-            use_fs_for_st = False
+        prev_f1 = results[1]['F1']
 
         start = time.time()
-        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=use_fs_for_st)
+        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=True)
         elapsed = time.time() - start
         m = res['metrics']
         results.append({'Method': '+ FS & ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
         logger.info(f"+ST F1: {m['f1']:.4f} (vs previous: {(m['f1']-prev_f1)/prev_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
+
+    # + Self-Training
+    if Config.use_self_training:
+        logger.info("="*80)
+        logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
+        logger.info("="*80)
+
+        start = time.time()
+        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=False)
+        elapsed = time.time() - start
+        m = res['metrics']
+        results.append({'Method': '+ ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
+        logger.info(f"+ST: {m['f1']:.4f} (vs previous: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
 
     # Print report
     logger.info("\n" + "="*90)
