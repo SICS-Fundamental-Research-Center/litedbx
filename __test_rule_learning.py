@@ -130,7 +130,6 @@ def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: 
 
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
-    rng = np.random.default_rng(config.random_seed)
 
     logger.info(f"  [Self-Training: Geometric] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -196,48 +195,47 @@ def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: 
         geo_weight = 0.6 * (1 - round_idx / config.n_rounds)
         combined_prob = geo_weight * geo_prob_pos + (1 - geo_weight) * probas
 
-        # Select samples with strong geometric + classifier agreement
-        conf_mask_pos = combined_prob >= config.confidence_threshold
-        conf_mask_neg = combined_prob <= (1 - config.confidence_threshold)
-        high_conf_mask = conf_mask_pos | conf_mask_neg
-
-        if high_conf_mask.sum() == 0:
-            logger.info("  No samples above threshold. Stopping.")
-            break
-
         # Get predictions based on combined probability
         predictions = (combined_prob >= 0.5).astype(int)
 
-        # Select samples
-        if config.balance_classes:
-            pos_indices = np.where(conf_mask_pos)[0]
-            neg_indices = np.where(conf_mask_neg)[0]
+        # Select samples with highest confidence (distance from 0.5)
+        # For geometric method, we select top-k instead of using strict threshold
+        conf_scores = np.abs(combined_prob - 0.5)
 
-            if len(pos_indices) == 0 or len(neg_indices) == 0:
-                n = min(high_conf_mask.sum(), config.max_samples_per_round)
-                selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
+        if config.balance_classes:
+            # Separate by predicted class
+            pos_pred_idx = np.where(predictions == 1)[0]
+            neg_pred_idx = np.where(predictions == 0)[0]
+
+            if len(pos_pred_idx) == 0 or len(neg_pred_idx) == 0:
+                # If only one class predicted, select from that class
+                available_idx = pos_pred_idx if len(pos_pred_idx) > 0 else neg_pred_idx
+                n = min(len(available_idx), config.max_samples_per_round)
+                if n == 0:
+                    logger.info("  No samples available. Stopping.")
+                    break
+                selected = available_idx[np.argsort(conf_scores[available_idx])[-n:]]
                 logger.info(f"  Selected: {n} samples (one class only)")
             else:
-                n_per_class = min(len(pos_indices), len(neg_indices), config.max_samples_per_round // 2)
+                # Balance classes: select equal number from each
+                n_per_class = min(len(pos_pred_idx), len(neg_pred_idx), config.max_samples_per_round // 2)
                 if n_per_class == 0:
-                    n_per_class = min(len(pos_indices), len(neg_indices))
+                    n_per_class = min(len(pos_pred_idx), len(neg_pred_idx))
                 # Select samples with highest confidence within each class
-                pos_scores = combined_prob[pos_indices]
-                neg_scores = 1 - combined_prob[neg_indices]
-                selected_pos = pos_indices[np.argsort(pos_scores)[-n_per_class:]]
-                selected_neg = neg_indices[np.argsort(neg_scores)[-n_per_class:]]
+                selected_pos = pos_pred_idx[np.argsort(conf_scores[pos_pred_idx])[-n_per_class:]]
+                selected_neg = neg_pred_idx[np.argsort(conf_scores[neg_pred_idx])[-n_per_class:]]
                 selected = np.concatenate([selected_pos, selected_neg])
                 logger.info(f"  Selected: {len(selected_pos)} pos + {len(selected_neg)} neg")
         else:
-            n = min(high_conf_mask.sum(), config.max_samples_per_round)
-            # Select samples with highest combined confidence
-            conf_scores = np.abs(combined_prob - 0.5)
+            n = min(len(inv_X), config.max_samples_per_round)
             selected = np.argsort(conf_scores)[-n:]
             logger.info(f"  Selected: {n} samples")
 
         # Update datasets
         vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
-        vis_Y = pd.concat([vis_Y, pd.Series(predictions[selected])], ignore_index=True)
+        new_labels = pd.Series(predictions[selected], dtype=vis_Y.dtype)
+        logger.info(f"  Adding {len(new_labels)} new labels: {new_labels.value_counts().to_dict()}")
+        vis_Y = pd.concat([vis_Y, new_labels], ignore_index=True).astype(vis_Y.dtype)
         vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
         inv_X = inv_X.drop(inv_X.index[selected]).reset_index(drop=True)
         inv_Y = inv_Y.drop(inv_Y.index[selected]).reset_index(drop=True)
