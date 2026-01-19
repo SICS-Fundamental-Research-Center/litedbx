@@ -593,6 +593,10 @@ def run_predefined_workloads():
             data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
             visible_samples=50,
             random_seed=42,
+            max_samples_per_round=40,
+            n_rounds=7,
+            geo_k_neighbors=10,
+            geo_initial_weight=0.3,
             methods=[
                 [],
                 ['FS'],
