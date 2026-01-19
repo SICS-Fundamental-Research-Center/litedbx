@@ -9,6 +9,7 @@ dependencies = [
     "litellm[proxy]>=1.80.11",
     "pandas>=2.3.3",
     "scikit-learn>=1.8.0",
+    "tqdm>=4.67.1",
 ]
 
 [[tool.uv.index]]

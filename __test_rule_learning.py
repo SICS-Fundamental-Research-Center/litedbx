@@ -10,7 +10,7 @@ import logging
 import time
 import argparse
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import sys
 
 # Setup logging
@@ -491,6 +491,9 @@ Examples:
   # Compare multiple methods
   python __test_rule_learning.py --workload medical.Q1 --methods Baseline FS ST_geometric "FS + ST_geometric"
 
+  # Run grid search to find best parameters for all workloads
+  python __test_rule_learning.py --grid-search
+
 Available methods:
   Baseline              : No optimization
   FS                    : Feature Selection
@@ -527,7 +530,9 @@ Available methods:
     parser.add_argument('--n-estimators', type=int, default=100, help='Random forest estimators (default: 100)')
     parser.add_argument('--max-depth', type=int, default=10, help='Random forest max depth (default: 10)')
 
-    # Dataset name for reporting
+    # Grid search
+    parser.add_argument('--grid-search', action='store_true', help='Run grid search to find best parameters for all workloads')
+    parser.add_argument('--n-jobs', type=int, default=-1, help='Number of parallel jobs for grid search (default: -1 for all cores, use 1 for sequential)')
 
     return parser.parse_args()
 
@@ -567,6 +572,319 @@ def create_config_from_args(args):
     ), args.workload
 
 
+# =============================================================================
+# Grid Search
+# =============================================================================
+def grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[Any]],
+                 base_methods: Optional[List[List[str]]] = None, metric: str = 'f1',
+                 n_jobs: int = -1) -> Dict[str, Any]:
+    """
+    Perform grid search to find best configuration for a workload.
+
+    Args:
+        workload_name: Name of the workload (e.g., 'medical.Q1')
+        data_path: Path to the data file
+        param_grid: Dictionary of parameters to search
+            {
+                'geo_k_neighbors': [5, 10, 15],
+                'geo_initial_weight': [0.3, 0.6, 0.8],
+                'geo_decision_boundary': [0.4, 0.5, 0.6],
+                'max_samples_per_round': [10, 20, 30],
+                'n_rounds': [3, 5, 7]
+            }
+        base_methods: List of method combinations to test (default: ST_geometric only)
+        metric: Metric to optimize ('f1', 'precision', 'recall')
+        n_jobs: Number of parallel jobs (default: -1 for all cores, use 1 for sequential)
+
+    Returns:
+        Dictionary with best_config, best_score, and all_results
+    """
+    from itertools import product
+    from tqdm import tqdm
+    from joblib import Parallel, delayed
+
+    if base_methods is None:
+        base_methods = [['ST_geometric']]
+
+    logger.info(f"\n{'='*80}")
+    logger.info(f"GRID SEARCH: {workload_name}")
+    logger.info(f"{'='*80}")
+    logger.info(f"Parameters to search: {list(param_grid.keys())}")
+    logger.info(f"Optimizing: {metric}")
+    logger.info(f"Total combinations: {np.prod([len(v) for v in param_grid.values()])}")
+    logger.info(f"Parallel jobs: {n_jobs if n_jobs > 0 else 'All available cores'}")
+    logger.info(f"{'='*80}\n")
+
+    # Load and split data
+    df = pd.read_csv(data_path)
+    Y, X = df['label'], df.drop(columns=['label', 'patient_id'])
+
+    # Use fixed seed for reproducibility
+    np.random.seed(42)
+    vis_idx = X.sample(n=50).index
+    inv_idx = X.index.difference(vis_idx)
+
+    vis_X, inv_X = X.loc[vis_idx].reset_index(drop=True), X.loc[inv_idx].reset_index(drop=True)
+    vis_Y, inv_Y = Y.loc[vis_idx].reset_index(drop=True), Y.loc[inv_idx].reset_index(drop=True)
+
+    # Get baseline F1
+    baseline_result = run_classification(
+        vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
+        Config(data_path=data_path, visible_samples=50, random_seed=42),
+        methods=[]
+    )
+    baseline_f1 = baseline_result['metrics']['f1']
+
+    # Generate all parameter combinations
+    param_names = list(param_grid.keys())
+    param_values = list(param_grid.values())
+    all_combinations = list(product(*param_values))
+
+    # Single combination evaluation function
+    def evaluate_combination(idx_combination):
+        idx, combination = idx_combination
+        # Create config for this combination
+        config = Config(
+            data_path=data_path,
+            visible_samples=50,
+            random_seed=42,
+            methods=base_methods,
+            **{param_names[i]: combination[i] for i in range(len(param_names))}
+        )
+
+        # Run experiment
+        result = run_classification(
+            vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
+            config, methods=base_methods[0]
+        )
+
+        score = result['metrics'][metric]
+        improvement = (score - baseline_f1) / baseline_f1 * 100
+
+        # Store result
+        result_dict = {
+            'iteration': idx,
+            'params': {param_names[i]: combination[i] for i in range(len(param_names))},
+            'f1': result['metrics']['f1'],
+            'precision': result['metrics']['precision'],
+            'recall': result['metrics']['recall'],
+            'train_size': result['train_size'],
+            'improvement': improvement
+        }
+
+        return result_dict, score
+
+    # Run grid search
+    logger.info(f"Testing {len(all_combinations)} combinations with n_jobs={n_jobs}...\n")
+
+    # Prepare all tasks
+    tasks = [(idx, combo) for idx, combo in enumerate(all_combinations, 1)]
+
+    # Execute with progress bar
+    from tqdm import tqdm
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(evaluate_combination)(task)
+        for task in tqdm(tasks, desc="Grid Search", unit="comb")
+    )
+
+    # Extract results (filter out any None values from failures)
+    all_results = [r[0] for r in results if r is not None]
+    scores = [r[1] for r in results if r is not None]
+
+    # Find best
+    best_idx = np.argmax(scores)
+    best_result = all_results[best_idx]
+    best_score = scores[best_idx]
+
+    # Print summary
+    logger.info(f"\n{'='*80}")
+    logger.info(f"GRID SEARCH COMPLETE: {workload_name}")
+    logger.info(f"{'='*80}")
+    logger.info(f"Best {metric}: {best_score:.4f}")
+    logger.info(f"Improvement over baseline: {best_result['improvement']:+.2f}%")
+    logger.info(f"Best parameters:")
+    for param, value in best_result['params'].items():
+        logger.info(f"  {param}: {value}")
+    logger.info(f"Train size: {best_result['train_size']}")
+    logger.info(f"{'='*80}\n")
+
+    return {
+        'workload': workload_name,
+        'baseline_f1': baseline_f1,
+        'best_score': best_score,
+        'best_improvement': best_result['improvement'],
+        'best_config': best_result['params'],
+        'best_train_size': best_result['train_size'],
+        'all_results': all_results
+    }
+
+
+def grid_search_workloads(n_jobs: int = -1):
+    """
+    Run grid search on multiple workloads with predefined parameter grids.
+
+    Args:
+        n_jobs: Number of parallel jobs (default: -1 for all cores)
+    """
+    workloads = [
+        ('medical.Q1', 'data/medical/.ckpt/NOPXY__Q1_full.csv'),
+        ('medical.Q3', 'data/medical/.ckpt/NOPXY__Q3_full.csv'),
+        ('medical.Q8', 'data/medical/.ckpt/NOPXY__Q8_full.csv'),
+    ]
+
+    # Define parameter grids for different scenarios
+    param_grids = {
+        # For severely imbalanced datasets (Q1: ~10% positive)
+        'severe_imbalance': {
+            'geo_k_neighbors': [5, 10, 15],
+            'geo_initial_weight': [0.5, 0.7, 0.9],
+            'geo_decision_boundary': [0.3, 0.4, 0.5],
+            'max_samples_per_round': [10, 15, 20],
+            'n_rounds': [3, 5]
+        },
+
+        # For balanced datasets (Q8: ~45% positive)
+        'balanced': {
+            'geo_k_neighbors': [5, 10, 15],
+            'geo_initial_weight': [0.3, 0.5, 0.7],
+            'geo_decision_boundary': [0.4, 0.5, 0.6],
+            'max_samples_per_round': [15, 25, 35],
+            'n_rounds': [3, 5, 7]
+        },
+
+        # For high baseline / reverse imbalance (Q3: ~79% positive)
+        'high_baseline': {
+            'geo_k_neighbors': [5, 10],
+            'geo_initial_weight': [0.3, 0.5],
+            'geo_decision_boundary': [0.5, 0.6],
+            'max_samples_per_round': [20, 30, 40],
+            'n_rounds': [5, 7]
+        },
+
+        # Quick search (fewer combinations)
+        'quick': {
+            'geo_k_neighbors': [5, 10],
+            'geo_initial_weight': [0.5, 0.8],
+            'geo_decision_boundary': [0.4, 0.5],
+            'max_samples_per_round': [10, 20],
+            'n_rounds': [3, 5]
+        },
+
+        # A comprehensive grid
+        'comprehensive': {
+            'geo_k_neighbors': [5, 10, 15],
+            'geo_initial_weight': [0.3, 0.5, 0.7, 0.9],
+            'geo_decision_boundary': [0.3, 0.4, 0.5, 0.6],
+            'max_samples_per_round': [10, 20, 30, 40],
+            'n_rounds': [3, 5, 7]
+        }
+
+    }
+
+    # Map workloads to appropriate parameter grids
+    workload_grids = {
+        'medical.Q1': 'comprehensive',
+        'medical.Q3': 'comprehensive',
+        'medical.Q8': 'comprehensive'
+    }
+    # workload_grids = {
+    #     'medical.Q1': 'severe_imbalance',
+    #     'medical.Q3': 'high_baseline',
+    #     'medical.Q8': 'balanced'
+    # }
+
+    all_search_results = {}
+
+    # Define methods to test
+    method_combinations = [
+        [],
+        ['FS'],
+        ['ST_confidence'],
+        ['ST_geometric'],
+        ['FS', 'ST_confidence'],
+        ['FS', 'ST_geometric']
+    ]
+
+    for workload_name, data_path in workloads:
+        grid_type = workload_grids[workload_name]
+        param_grid = param_grids[grid_type]
+
+        # Test each method combination separately
+        for methods in method_combinations:
+            method_name = '+'.join(methods) if methods else 'Baseline'
+            logger.info(f"\nTesting {workload_name} with method: {method_name}")
+
+            result = grid_search(
+                workload_name=f"{workload_name}_{method_name}",
+                data_path=data_path,
+                param_grid=param_grid,
+                base_methods=[methods],  # Wrap in list since grid_search expects list of method lists
+                metric='f1',
+                n_jobs=n_jobs
+            )
+
+            all_search_results[f"{workload_name}_{method_name}"] = result
+
+    # Print comparison table
+    print_grid_search_summary(all_search_results)
+
+
+def print_grid_search_summary(all_results: Dict[str, Dict[str, Any]]) -> None:
+    """Print summary of grid search results across all workloads."""
+    logger.info("\n" + "="*150)
+    logger.info("GRID SEARCH SUMMARY".center(150))
+    logger.info("="*150)
+
+    # Group by workload
+    workloads = {}
+    for key, result in all_results.items():
+        # Split key like "medical.Q1_Baseline" into workload and method
+        if '_' in key:
+            parts = key.split('_', 1)
+            workload = parts[0]
+            method = parts[1]
+        else:
+            workload = key
+            method = 'Unknown'
+
+        if workload not in workloads:
+            workloads[workload] = []
+        workloads[workload].append({
+            'method': method,
+            'baseline': result['baseline_f1'],
+            'best_f1': result['best_score'],
+            'improvement': result['best_improvement'],
+            'config': result['best_config'],
+            'train_size': result['best_train_size']
+        })
+
+    # Print each workload section
+    for workload_name in sorted(workloads.keys()):
+        results = workloads[workload_name]
+        baseline = results[0]['baseline']
+
+        # Sort by F1 score descending
+        results.sort(key=lambda x: x['best_f1'], reverse=True)
+
+        logger.info(f"\n{workload_name} (Baseline F1: {baseline:.4f})")
+        logger.info("-" * 150)
+        logger.info(f"{'Method':<25} {'F1':>8} {'Improvement':>12} {'K':>4} {'Weight':>6} {'Boundary':>8} {'Samples':>8} {'Rounds':>6} {'Train':>6}")
+        logger.info("-" * 150)
+
+        for r in results:
+            method = r['method']
+            f1 = r['best_f1']
+            imp = r['improvement']
+            config = r['config']
+            train_size = r['train_size']
+
+            logger.info(f"{method:<25} {f1:>8.4f} {imp:>+11.2f}% {config['geo_k_neighbors']:>4} "
+                       f"{config['geo_initial_weight']:>6.1f} {config['geo_decision_boundary']:>8.1f} "
+                       f"{config['max_samples_per_round']:>8} {config['n_rounds']:>6} {train_size:>6}")
+
+    logger.info("\n" + "="*150 + "\n")
+
+
 def run_predefined_workloads():
     """Run predefined workflow experiments."""
     # Define workloads with methods to run
@@ -583,6 +901,11 @@ def run_predefined_workloads():
             data_path="data/medical/.ckpt/NOPXY__Q1_full.csv",
             visible_samples=50,
             random_seed=42,
+            geo_k_neighbors=5,
+            geo_initial_weight=0.7,
+            geo_decision_boundary=0.3,
+            max_samples_per_round=40,
+            n_rounds=7,
             methods=[
                 [],
                 ['FS'],
@@ -596,10 +919,11 @@ def run_predefined_workloads():
             data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
             visible_samples=50,
             random_seed=42,
+            geo_k_neighbors=5,
+            geo_initial_weight=0.3,
+            geo_decision_boundary=0.3,
             max_samples_per_round=40,
             n_rounds=7,
-            geo_k_neighbors=10,
-            geo_initial_weight=0.3,
             methods=[
                 [],
                 ['FS'],
@@ -613,10 +937,11 @@ def run_predefined_workloads():
             data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
             visible_samples=50,
             random_seed=42,
-            geo_k_neighbors=10,
-            geo_initial_weight=0.8,
-            max_samples_per_round=25,
-            n_rounds=5,
+            geo_k_neighbors=15,
+            geo_initial_weight=0.9,
+            geo_decision_boundary=0.3,
+            max_samples_per_round=40,
+            n_rounds=7,
             methods=[
                 [],
                 ['FS'],
@@ -703,8 +1028,11 @@ if __name__ == "__main__":
     # Check if any command-line arguments are provided (excluding script name)
     args = parse_args()
 
-    # Check if --workload is provided (custom mode) or running default
-    if len(sys.argv) == 1 or (len(sys.argv) > 1 and '--workload' not in sys.argv):
+    # Check for --grid-search flag
+    if args.grid_search:
+        logger.info("Running grid search on all workloads...\n")
+        grid_search_workloads(n_jobs=args.n_jobs)
+    elif len(sys.argv) == 1 or (len(sys.argv) > 1 and '--workload' not in sys.argv):
         # No arguments or no --workload flag: run predefined workflows
         if len(sys.argv) > 1:
             logger.info("No --workload argument provided. Running predefined workflows.\n")
