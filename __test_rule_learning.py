@@ -913,10 +913,10 @@ def run_predefined_workloads():
             max_samples_per_round=70,
             n_rounds=15,
             methods=[
-                # [],
-                # ['FS'],
+                [],
+                ['FS'],
                 # ['ST_Conf'],
-                # ['ST_ConfGeo'],
+                ['ST_ConfGeo'],
                 # ['FS', 'ST_Conf'],
                 ['FS', 'ST_ConfGeo']
             ]
@@ -931,10 +931,10 @@ def run_predefined_workloads():
             max_samples_per_round=70,
             n_rounds=15,
             methods=[
-                # [],
-                # ['FS'],
+                [],
+                ['FS'],
                 # ['ST_Conf'],
-                # ['ST_ConfGeo'],
+                ['ST_ConfGeo'],
                 # ['FS', 'ST_Conf'],
                 ['FS', 'ST_ConfGeo']
             ]
@@ -949,10 +949,10 @@ def run_predefined_workloads():
             max_samples_per_round=60,
             n_rounds=15,
             methods=[
-                # [],
-                # ['FS'],
+                [],
+                ['FS'],
                 # ['ST_Conf'],
-                # ['ST_ConfGeo'],
+                ['ST_ConfGeo'],
                 # ['FS', 'ST_Conf'],
                 ['FS', 'ST_ConfGeo']
             ]
