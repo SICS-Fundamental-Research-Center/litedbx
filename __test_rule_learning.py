@@ -309,9 +309,6 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
     """Run classification with specified method combinations."""
     start_time = time.time()
 
-    # Track initial training size
-    initial_train_size = len(vis_X)
-
     # Preprocess
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
