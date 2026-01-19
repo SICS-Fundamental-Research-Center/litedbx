@@ -41,6 +41,10 @@ class Config:
     max_samples_per_round: int = 10
     balance_classes: bool = True
 
+    # Geometric self-training parameters
+    geo_k_neighbors: int = 5  # k for k-NN (max neighbors, will be capped by minority class size)
+    geo_initial_weight: float = 0.6  # Initial weight for geometric scoring (decreases over rounds)
+
     # Classifier
     n_estimators: int = 100
     max_depth: int = 10
@@ -173,8 +177,8 @@ def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: 
         pos_samples = vis_X_weighted[pos_idx]
         neg_samples = vis_X_weighted[neg_idx]
 
-        # Find k-nearest neighbors (k = min(5, number of samples in minority class))
-        n_neighbors = min(5, len(pos_idx), len(neg_idx))
+        # Find k-nearest neighbors (k = min(config.geo_k_neighbors, minority class size))
+        n_neighbors = min(config.geo_k_neighbors, len(pos_idx), len(neg_idx))
         knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
         knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
 
@@ -192,7 +196,7 @@ def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: 
 
         # Combine classifier probability with geometric probability
         # Geometric weight decreases over rounds (more reliance on classifier as it improves)
-        geo_weight = 0.6 * (1 - round_idx / config.n_rounds)
+        geo_weight = config.geo_initial_weight * (1 - round_idx / config.n_rounds)
         combined_prob = geo_weight * geo_prob_pos + (1 - geo_weight) * probas
 
         # Get predictions based on combined probability
