@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import logging
 import time
+from dataclasses import dataclass
 
 # Setup logging
 logging.basicConfig(
@@ -20,26 +21,29 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Config (all parameters in one place)
 # =============================================================================
+@dataclass
 class Config:
-    # Data
-    visible_samples = 50
-    random_seed = 42
-    data_path = "data/medical/.ckpt/NOPXY__Q1_full.csv"
+    # Data (required)
+    data_path: str
+
+    # Data (optional with defaults)
+    visible_samples: int = 50
+    random_seed: int = 42
 
     # Feature selection
-    use_feature_selection = True
-    top_k = 10
+    use_feature_selection: bool = True
+    top_k: int = 10
 
     # Self-training
-    use_self_training = True
-    n_rounds = 3
-    confidence_threshold = 0.95
-    max_samples_per_round = 10
-    balance_classes = True
+    use_self_training: bool = True
+    n_rounds: int = 3
+    confidence_threshold: float = 0.95
+    max_samples_per_round: int = 10
+    balance_classes: bool = True
 
     # Classifier
-    n_estimators = 100
-    max_depth = 10
+    n_estimators: int = 100
+    max_depth: int = 10
 
 
 # =============================================================================
@@ -255,18 +259,19 @@ def run_ablation(vis_X, vis_Y, inv_X, inv_Y):
 # =============================================================================
 # Main
 # =============================================================================
-if __name__ == "__main__":
+def run_experiment(config: Config):
+    """Run ablation study for a single configuration."""
     logger.info("="*80)
-    logger.info("FEW-SHOT CLASSIFICATION - ABLATION STUDY")
+    logger.info(f"DATASET: {config.data_path}")
     logger.info("="*80)
 
     # Load data
-    df = pd.read_csv(Config.data_path)
+    df = pd.read_csv(config.data_path)
     Y, X = df['label'], df.drop(columns=['label', 'patient_id'])
 
     # Split
-    np.random.seed(Config.random_seed)
-    vis_idx = X.sample(n=Config.visible_samples).index
+    np.random.seed(config.random_seed)
+    vis_idx = X.sample(n=config.visible_samples).index
     inv_idx = X.index.difference(vis_idx)
 
     vis_X, inv_X = X.loc[vis_idx].reset_index(drop=True), X.loc[inv_idx].reset_index(drop=True)
@@ -277,3 +282,27 @@ if __name__ == "__main__":
 
     # Run ablation
     run_ablation(vis_X, vis_Y, inv_X, inv_Y)
+
+
+if __name__ == "__main__":
+    # Define multiple workloads
+    configs = [
+        Config(
+            data_path="data/medical/.ckpt/NOPXY__Q1_full.csv",
+            visible_samples=50,
+            random_seed=42
+        ),
+        # Add more workloads here:
+        # Config(
+        #     data_path="data/medical/.ckpt/NOPXY__Q2_full.csv",
+        #     visible_samples=50,
+        #     random_seed=42
+        # ),
+    ]
+
+    # Run experiments for each workload
+    for i, config in enumerate(configs, 1):
+        logger.info(f"\n\n{'#'*80}")
+        logger.info(f"# WORKLOAD {i}/{len(configs)}")
+        logger.info(f"{'#'*80}\n")
+        run_experiment(config)
