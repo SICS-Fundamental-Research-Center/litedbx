@@ -46,6 +46,7 @@ class Config:
     # Geometric self-training parameters
     geo_k_neighbors: int = 5  # k for k-NN (max neighbors, will be capped by minority class size)
     geo_initial_weight: float = 0.6  # Initial weight for geometric scoring (decreases over rounds)
+    geo_decision_boundary: float = 0.5  # Decision boundary for classification (default: 0.5)
 
     # Classifier
     n_estimators: int = 100
@@ -202,11 +203,11 @@ def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: 
         combined_prob = geo_weight * geo_prob_pos + (1 - geo_weight) * probas
 
         # Get predictions based on combined probability
-        predictions = (combined_prob >= 0.5).astype(int)
+        predictions = (combined_prob >= config.geo_decision_boundary).astype(int)
 
-        # Select samples with highest confidence (distance from 0.5)
+        # Select samples with highest confidence (distance from decision boundary)
         # For geometric method, we select top-k instead of using strict threshold
-        conf_scores = np.abs(combined_prob - 0.5)
+        conf_scores = np.abs(combined_prob - config.geo_decision_boundary)
 
         if config.balance_classes:
             # Separate by predicted class
@@ -485,7 +486,7 @@ Examples:
   python __test_rule_learning.py --workload medical.Q1 --methods FS ST_geometric
 
   # Experiment with geometric ST parameters
-  python __test_rule_learning.py --workload medical.Q1 --methods ST_geometric --geo-k 10 --geo-weight 0.8
+  python __test_rule_learning.py --workload medical.Q1 --methods ST_geometric --geo-k 10 --geo-weight 0.8 --geo-boundary 0.5
 
   # Compare multiple methods
   python __test_rule_learning.py --workload medical.Q1 --methods Baseline FS ST_geometric "FS + ST_geometric"
@@ -520,6 +521,7 @@ Available methods:
     # Geometric ST parameters
     parser.add_argument('--geo-k', type=int, default=5, help='k for k-NN in geometric ST (default: 5)')
     parser.add_argument('--geo-weight', type=float, default=0.6, help='Initial geometric weight (default: 0.6)')
+    parser.add_argument('--geo-boundary', type=float, default=0.5, help='Decision boundary for geometric ST (default: 0.5)')
 
     # Classifier
     parser.add_argument('--n-estimators', type=int, default=100, help='Random forest estimators (default: 100)')
@@ -558,6 +560,7 @@ def create_config_from_args(args):
         balance_classes=args.balance_classes,
         geo_k_neighbors=args.geo_k,
         geo_initial_weight=args.geo_weight,
+        geo_decision_boundary=args.geo_boundary,
         n_estimators=args.n_estimators,
         max_depth=args.max_depth,
         methods=methods
