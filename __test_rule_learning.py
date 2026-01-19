@@ -643,36 +643,40 @@ def grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[A
     # Single combination evaluation function
     def evaluate_combination(idx_combination):
         idx, combination = idx_combination
-        # Create config for this combination
-        config = Config(
-            data_path=data_path,
-            visible_samples=50,
-            random_seed=42,
-            methods=base_methods,
-            **{param_names[i]: combination[i] for i in range(len(param_names))}
-        )
+        try:
+            # Create config for this combination
+            config = Config(
+                data_path=data_path,
+                visible_samples=50,
+                random_seed=42,
+                methods=base_methods,
+                **{param_names[i]: combination[i] for i in range(len(param_names))}
+            )
 
-        # Run experiment
-        result = run_classification(
-            vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
-            config, methods=base_methods[0]
-        )
+            # Run experiment
+            result = run_classification(
+                vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
+                config, methods=base_methods[0]
+            )
 
-        score = result['metrics'][metric]
-        improvement = (score - baseline_f1) / baseline_f1 * 100
+            score = result['metrics'][metric]
+            improvement = (score - baseline_f1) / baseline_f1 * 100
 
-        # Store result
-        result_dict = {
-            'iteration': idx,
-            'params': {param_names[i]: combination[i] for i in range(len(param_names))},
-            'f1': result['metrics']['f1'],
-            'precision': result['metrics']['precision'],
-            'recall': result['metrics']['recall'],
-            'train_size': result['train_size'],
-            'improvement': improvement
-        }
+            # Store result
+            result_dict = {
+                'iteration': idx,
+                'params': {param_names[i]: combination[i] for i in range(len(param_names))},
+                'f1': result['metrics']['f1'],
+                'precision': result['metrics']['precision'],
+                'recall': result['metrics']['recall'],
+                'train_size': result['train_size'],
+                'improvement': improvement
+            }
 
-        return result_dict, score
+            return result_dict, score
+        except Exception as e:
+            logger.warning(f"Combination {idx} failed: {e}")
+            return None
 
     # Run grid search
     logger.info(f"Testing {len(all_combinations)} combinations with n_jobs={n_jobs}...\n")
@@ -775,8 +779,10 @@ def grid_search_workloads(n_jobs: int = -1):
             'geo_k_neighbors': [5, 10, 15],
             'geo_initial_weight': [0.3, 0.5, 0.7, 0.9],
             'geo_decision_boundary': [0.3, 0.4, 0.5, 0.6],
-            'max_samples_per_round': [10, 20, 30, 40],
-            'n_rounds': [3, 5, 7]
+            'max_samples_per_round': [10, 30, 50, 70, 90],
+            'n_rounds': [9, 11, 13, 15]
+            # 'max_samples_per_round': [10, 20, 30, 40],
+            # 'n_rounds': [3, 5, 7]
         }
 
     }
@@ -902,16 +908,16 @@ def run_predefined_workloads():
             visible_samples=50,
             random_seed=42,
             geo_k_neighbors=5,
-            geo_initial_weight=0.7,
-            geo_decision_boundary=0.3,
-            max_samples_per_round=40,
-            n_rounds=7,
+            geo_initial_weight=0.3,
+            geo_decision_boundary=0.5,
+            max_samples_per_round=70,
+            n_rounds=15,
             methods=[
-                [],
-                ['FS'],
-                ['ST_confidence'],
-                ['ST_geometric'],
-                ['FS', 'ST_confidence'],
+                # [],
+                # ['FS'],
+                # ['ST_confidence'],
+                # ['ST_geometric'],
+                # ['FS', 'ST_confidence'],
                 ['FS', 'ST_geometric']
             ]
         )),
@@ -922,14 +928,14 @@ def run_predefined_workloads():
             geo_k_neighbors=5,
             geo_initial_weight=0.3,
             geo_decision_boundary=0.3,
-            max_samples_per_round=40,
-            n_rounds=7,
+            max_samples_per_round=70,
+            n_rounds=15,
             methods=[
-                [],
-                ['FS'],
-                ['ST_confidence'],
-                ['ST_geometric'],
-                ['FS', 'ST_confidence'],
+                # [],
+                # ['FS'],
+                # ['ST_confidence'],
+                # ['ST_geometric'],
+                # ['FS', 'ST_confidence'],
                 ['FS', 'ST_geometric']
             ]
         )),
@@ -940,14 +946,14 @@ def run_predefined_workloads():
             geo_k_neighbors=15,
             geo_initial_weight=0.9,
             geo_decision_boundary=0.3,
-            max_samples_per_round=40,
-            n_rounds=7,
+            max_samples_per_round=60,
+            n_rounds=15,
             methods=[
-                [],
-                ['FS'],
-                ['ST_confidence'],
-                ['ST_geometric'],
-                ['FS', 'ST_confidence'],
+                # [],
+                # ['FS'],
+                # ['ST_confidence'],
+                # ['ST_geometric'],
+                # ['FS', 'ST_confidence'],
                 ['FS', 'ST_geometric']
             ]
         )),
