@@ -258,13 +258,13 @@ def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: 
 def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
                         inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
     """Dispatch to appropriate self-training method based on config."""
-    if config.self_training_mode == 'confidence':
+    if config.self_training_mode == 'Conf':
         return apply_self_training_confidence(vis_X, vis_Y, inv_X, inv_Y, features, config)
-    elif config.self_training_mode == 'geometric':
+    elif config.self_training_mode == 'ConfGeo':
         return apply_self_training_geometric(vis_X, vis_Y, inv_X, inv_Y, features, config)
     else:
         raise ValueError(f"Unknown self_training_mode: {config.self_training_mode}. "
-                        f"Must be 'confidence' or 'geometric'")
+                        f"Must be 'Conf' or 'ConfGeo'")
 
 
 # =============================================================================
@@ -483,13 +483,13 @@ Examples:
   python __test_rule_learning.py
 
   # Run single dataset with custom parameters
-  python __test_rule_learning.py --workload medical.Q1 --methods FS ST_geometric
+  python __test_rule_learning.py --workload medical.Q1 --methods FS ST_ConfGeo
 
   # Experiment with geometric ST parameters
-  python __test_rule_learning.py --workload medical.Q1 --methods ST_geometric --geo-k 10 --geo-weight 0.8 --geo-boundary 0.5
+  python __test_rule_learning.py --workload medical.Q1 --methods ST_ConfGeo --geo-k 10 --geo-weight 0.8 --geo-boundary 0.5
 
   # Compare multiple methods
-  python __test_rule_learning.py --workload medical.Q1 --methods Baseline FS ST_geometric "FS + ST_geometric"
+  python __test_rule_learning.py --workload medical.Q1 --methods Baseline FS ST_ConfGeo "FS + ST_ConfGeo"
 
   # Run grid search to find best parameters for all workloads
   python __test_rule_learning.py --grid-search
@@ -497,10 +497,10 @@ Examples:
 Available methods:
   Baseline              : No optimization
   FS                    : Feature Selection
-  ST_confidence         : Self-Training (confidence-based)
-  ST_geometric          : Self-Training (geometric-based)
-  FS + ST_confidence    : Feature Selection + ST (confidence)
-  FS + ST_geometric     : Feature Selection + ST (geometric)
+  ST_Conf         : Self-Training (confidence-based)
+  ST_ConfGeo          : Self-Training (confidence&geometric-based)
+  FS + ST_Conf    : Feature Selection + ST (confidence)
+  FS + ST_ConfGeo     : Feature Selection + ST (geometric)
         """
     )
 
@@ -510,7 +510,7 @@ Available methods:
     parser.add_argument('--random-seed', type=int, default=42, help='Random seed (default: 42)')
 
     # Methods
-    parser.add_argument('--methods', type=str, nargs='+', default=['Baseline', 'FS', 'ST_confidence', 'ST_geometric', 'FS + ST_confidence', 'FS + ST_geometric'],
+    parser.add_argument('--methods', type=str, nargs='+', default=['Baseline', 'FS', 'ST_Conf', 'ST_ConfGeo', 'FS + ST_Conf', 'FS + ST_ConfGeo'],
                         help='Methods to compare (space-separated). Use quotes for methods with spaces.')
 
     # Feature selection
@@ -521,10 +521,10 @@ Available methods:
     parser.add_argument('--max-samples', type=int, default=10, help='Max samples per round (default: 10)')
     parser.add_argument('--balance-classes', action='store_true', default=True, help='Balance classes when selecting samples')
 
-    # Geometric ST parameters
-    parser.add_argument('--geo-k', type=int, default=5, help='k for k-NN in geometric ST (default: 5)')
-    parser.add_argument('--geo-weight', type=float, default=0.6, help='Initial geometric weight (default: 0.6)')
-    parser.add_argument('--geo-boundary', type=float, default=0.5, help='Decision boundary for geometric ST (default: 0.5)')
+    # ConfGeo ST parameters
+    parser.add_argument('--geo-k', type=int, default=5, help='k for k-NN in ConfGeo ST (default: 5)')
+    parser.add_argument('--geo-weight', type=float, default=0.6, help='Initial ConfGeo weight (default: 0.6)')
+    parser.add_argument('--geo-boundary', type=float, default=0.5, help='Decision boundary for ConfGeo ST (default: 0.5)')
 
     # Classifier
     parser.add_argument('--n-estimators', type=int, default=100, help='Random forest estimators (default: 100)')
@@ -543,10 +543,10 @@ def create_config_from_args(args):
     method_map = {
         'Baseline': [],
         'FS': ['FS'],
-        'ST_confidence': ['ST_confidence'],
-        'ST_geometric': ['ST_geometric'],
-        'FS + ST_confidence': ['FS', 'ST_confidence'],
-        'FS + ST_geometric': ['FS', 'ST_geometric'],
+        'ST_Conf': ['ST_Conf'],
+        'ST_ConfGeo': ['ST_ConfGeo'],
+        'FS + ST_Conf': ['FS', 'ST_Conf'],
+        'FS + ST_ConfGeo': ['FS', 'ST_ConfGeo'],
     }
 
     methods = [method_map[m] for m in args.methods]
@@ -592,7 +592,7 @@ def grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[A
                 'max_samples_per_round': [10, 20, 30],
                 'n_rounds': [3, 5, 7]
             }
-        base_methods: List of method combinations to test (default: ST_geometric only)
+        base_methods: List of method combinations to test (default: ST_ConfGeo only)
         metric: Metric to optimize ('f1', 'precision', 'recall')
         n_jobs: Number of parallel jobs (default: -1 for all cores, use 1 for sequential)
 
@@ -604,7 +604,7 @@ def grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[A
     from joblib import Parallel, delayed
 
     if base_methods is None:
-        base_methods = [['ST_geometric']]
+        base_methods = [['ST_ConfGeo']]
 
     logger.info(f"\n{'='*80}")
     logger.info(f"GRID SEARCH: {workload_name}")
@@ -805,10 +805,10 @@ def grid_search_workloads(n_jobs: int = -1):
     method_combinations = [
         [],
         ['FS'],
-        ['ST_confidence'],
-        ['ST_geometric'],
-        ['FS', 'ST_confidence'],
-        ['FS', 'ST_geometric']
+        ['ST_Conf'],
+        ['ST_ConfGeo'],
+        ['FS', 'ST_Conf'],
+        ['FS', 'ST_ConfGeo']
     ]
 
     for workload_name, data_path in workloads:
@@ -897,10 +897,10 @@ def run_predefined_workloads():
     # Methods:
     #   [] = Baseline
     #   ['FS'] = Feature Selection
-    #   ['ST_confidence'] = Self-Training (confidence-based)
-    #   ['ST_geometric'] = Self-Training (geometric-based)
-    #   ['FS', 'ST_confidence'] = FS + ST (confidence)
-    #   ['FS', 'ST_geometric'] = FS + ST (geometric)
+    #   ['ST_Conf'] = Self-Training (confidence-based)
+    #   ['ST_ConfGeo'] = Self-Training (geometric-based)
+    #   ['FS', 'ST_Conf'] = FS + ST (confidence)
+    #   ['FS', 'ST_ConfGeo'] = FS + ST (geometric)
     workloads = [
         # Compare all self-training methods on each dataset
         ("medical_Q1", Config(
@@ -915,10 +915,10 @@ def run_predefined_workloads():
             methods=[
                 # [],
                 # ['FS'],
-                # ['ST_confidence'],
-                # ['ST_geometric'],
-                # ['FS', 'ST_confidence'],
-                ['FS', 'ST_geometric']
+                # ['ST_Conf'],
+                # ['ST_ConfGeo'],
+                # ['FS', 'ST_Conf'],
+                ['FS', 'ST_ConfGeo']
             ]
         )),
         ("medical_Q3", Config(
@@ -933,10 +933,10 @@ def run_predefined_workloads():
             methods=[
                 # [],
                 # ['FS'],
-                # ['ST_confidence'],
-                # ['ST_geometric'],
-                # ['FS', 'ST_confidence'],
-                ['FS', 'ST_geometric']
+                # ['ST_Conf'],
+                # ['ST_ConfGeo'],
+                # ['FS', 'ST_Conf'],
+                ['FS', 'ST_ConfGeo']
             ]
         )),
         ("medical_Q8", Config(
@@ -951,10 +951,10 @@ def run_predefined_workloads():
             methods=[
                 # [],
                 # ['FS'],
-                # ['ST_confidence'],
-                # ['ST_geometric'],
-                # ['FS', 'ST_confidence'],
-                ['FS', 'ST_geometric']
+                # ['ST_Conf'],
+                # ['ST_ConfGeo'],
+                # ['FS', 'ST_Conf'],
+                ['FS', 'ST_ConfGeo']
             ]
         )),
     ]
