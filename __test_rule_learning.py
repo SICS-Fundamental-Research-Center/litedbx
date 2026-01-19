@@ -35,6 +35,7 @@ class Config:
     top_k: int = 10
 
     # Self-training
+    self_training_mode: str = 'confidence'  # Options: 'confidence', 'geometric'
     n_rounds: int = 3
     confidence_threshold: float = 0.95
     max_samples_per_round: int = 10
@@ -63,8 +64,8 @@ def apply_feature_selection(vis_X: pd.DataFrame, vis_Y: pd.Series, config: Confi
     return features
 
 
-def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                        inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
+def apply_self_training_confidence(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                                    inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
     """Apply self-training to augment training data."""
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
@@ -121,6 +122,146 @@ def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFra
     return vis_X, vis_Y, inv_X, inv_Y
 
 
+def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                                   inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
+    """Apply geometric self-training using k-NN and feature importance weighting."""
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.preprocessing import StandardScaler
+
+    vis_X_proc = preprocess_features(vis_X)
+    inv_X_proc = preprocess_features(inv_X)
+    rng = np.random.default_rng(config.random_seed)
+
+    logger.info(f"  [Self-Training: Geometric] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
+
+    for round_idx in range(config.n_rounds):
+        logger.info(f"  Round {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
+
+        # Get feature importances from classifier
+        clf_temp = train_classifier(vis_X_proc[features], vis_Y, config)
+        feature_importances = clf_temp.feature_importances_
+
+        # Create feature mapping (handle case where features might be subset)
+        feature_weights = np.ones(len(features))
+        for i, feat in enumerate(features):
+            if feat in vis_X_proc.columns:
+                idx = list(vis_X_proc.columns).index(feat)
+                if idx < len(feature_importances):
+                    feature_weights[i] = np.sqrt(feature_importances[idx])
+
+        # Normalize features
+        scaler = StandardScaler()
+        vis_X_norm = scaler.fit_transform(vis_X_proc[features])
+        inv_X_norm = scaler.transform(inv_X_proc[features])
+
+        # Apply feature importance weights
+        vis_X_weighted = vis_X_norm * feature_weights
+        inv_X_weighted = inv_X_norm * feature_weights
+
+        # Train classifier for predictions
+        clf = train_classifier(vis_X_proc[features], vis_Y, config)
+        probas = clf.predict_proba(inv_X_proc[features])[:, 1]
+
+        # Separate visible samples by class
+        pos_idx = vis_Y[vis_Y == 1].index
+        neg_idx = vis_Y[vis_Y == 0].index
+
+        if len(pos_idx) == 0 or len(neg_idx) == 0:
+            logger.info("  Not enough samples of both classes. Stopping.")
+            break
+
+        # Compute nearest neighbors for geometric consistency
+        pos_samples = vis_X_weighted[pos_idx]
+        neg_samples = vis_X_weighted[neg_idx]
+
+        # Find k-nearest neighbors (k = min(5, number of samples in minority class))
+        n_neighbors = min(5, len(pos_idx), len(neg_idx))
+        knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
+        knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
+
+        dist_pos, _ = knn_pos.kneighbors(inv_X_weighted)
+        dist_neg, _ = knn_neg.kneighbors(inv_X_weighted)
+
+        # Compute geometric scores: inverse of average distance
+        epsilon = 1e-6
+        geo_score_pos = 1.0 / (dist_pos.mean(axis=1) + epsilon)
+        geo_score_neg = 1.0 / (dist_neg.mean(axis=1) + epsilon)
+
+        # Normalize scores
+        total_score = geo_score_pos + geo_score_neg
+        geo_prob_pos = geo_score_pos / total_score
+
+        # Combine classifier probability with geometric probability
+        # Geometric weight decreases over rounds (more reliance on classifier as it improves)
+        geo_weight = 0.6 * (1 - round_idx / config.n_rounds)
+        combined_prob = geo_weight * geo_prob_pos + (1 - geo_weight) * probas
+
+        # Select samples with strong geometric + classifier agreement
+        conf_mask_pos = combined_prob >= config.confidence_threshold
+        conf_mask_neg = combined_prob <= (1 - config.confidence_threshold)
+        high_conf_mask = conf_mask_pos | conf_mask_neg
+
+        if high_conf_mask.sum() == 0:
+            logger.info("  No samples above threshold. Stopping.")
+            break
+
+        # Get predictions based on combined probability
+        predictions = (combined_prob >= 0.5).astype(int)
+
+        # Select samples
+        if config.balance_classes:
+            pos_indices = np.where(conf_mask_pos)[0]
+            neg_indices = np.where(conf_mask_neg)[0]
+
+            if len(pos_indices) == 0 or len(neg_indices) == 0:
+                n = min(high_conf_mask.sum(), config.max_samples_per_round)
+                selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
+                logger.info(f"  Selected: {n} samples (one class only)")
+            else:
+                n_per_class = min(len(pos_indices), len(neg_indices), config.max_samples_per_round // 2)
+                if n_per_class == 0:
+                    n_per_class = min(len(pos_indices), len(neg_indices))
+                # Select samples with highest confidence within each class
+                pos_scores = combined_prob[pos_indices]
+                neg_scores = 1 - combined_prob[neg_indices]
+                selected_pos = pos_indices[np.argsort(pos_scores)[-n_per_class:]]
+                selected_neg = neg_indices[np.argsort(neg_scores)[-n_per_class:]]
+                selected = np.concatenate([selected_pos, selected_neg])
+                logger.info(f"  Selected: {len(selected_pos)} pos + {len(selected_neg)} neg")
+        else:
+            n = min(high_conf_mask.sum(), config.max_samples_per_round)
+            # Select samples with highest combined confidence
+            conf_scores = np.abs(combined_prob - 0.5)
+            selected = np.argsort(conf_scores)[-n:]
+            logger.info(f"  Selected: {n} samples")
+
+        # Update datasets
+        vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
+        vis_Y = pd.concat([vis_Y, pd.Series(predictions[selected])], ignore_index=True)
+        vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
+        inv_X = inv_X.drop(inv_X.index[selected]).reset_index(drop=True)
+        inv_Y = inv_Y.drop(inv_Y.index[selected]).reset_index(drop=True)
+        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected]).reset_index(drop=True)
+
+        if len(inv_X) == 0:
+            logger.info("  No more invisible samples. Stopping.")
+            break
+
+    return vis_X, vis_Y, inv_X, inv_Y
+
+
+def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                        inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
+    """Dispatch to appropriate self-training method based on config."""
+    if config.self_training_mode == 'confidence':
+        return apply_self_training_confidence(vis_X, vis_Y, inv_X, inv_Y, features, config)
+    elif config.self_training_mode == 'geometric':
+        return apply_self_training_geometric(vis_X, vis_Y, inv_X, inv_Y, features, config)
+    else:
+        raise ValueError(f"Unknown self_training_mode: {config.self_training_mode}. "
+                        f"Must be 'confidence' or 'geometric'")
+
+
 # =============================================================================
 # Core Functions
 # =============================================================================
@@ -166,6 +307,9 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
     """Run classification with specified method combinations."""
     start_time = time.time()
 
+    # Track initial training size
+    initial_train_size = len(vis_X)
+
     # Preprocess
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
@@ -178,12 +322,30 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
         logger.info(f"  [No Feature Selection] Using all {len(features)} features")
 
     # Step 2: Self-training (if enabled)
-    if 'ST' in methods:
+    if any(m.startswith('ST') for m in methods):
+        # Determine self-training mode from methods list
+        st_mode = config.self_training_mode
+        for m in methods:
+            if m.startswith('ST_'):
+                st_mode = m.split('_', 1)[1]
+                break
+
+        # Temporarily set the mode for this run
+        original_mode = config.self_training_mode
+        config.self_training_mode = st_mode
+
         vis_X, vis_Y, inv_X, inv_Y = apply_self_training(
             vis_X, vis_Y, inv_X, inv_Y, features, config
         )
+
+        # Restore original mode
+        config.self_training_mode = original_mode
+
         vis_X_proc = preprocess_features(vis_X)
         inv_X_proc = preprocess_features(inv_X)
+
+    # Track final training size
+    final_train_size = len(vis_X)
 
     # Step 3: Final training and prediction
     clf = train_classifier(vis_X_proc[features], vis_Y, config)
@@ -198,7 +360,8 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
     return {
         'metrics': metrics,
         'features': features,
-        'time': elapsed
+        'time': elapsed,
+        'train_size': final_train_size
     }
 
 
@@ -234,6 +397,7 @@ def run_experiment(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
             'R': result['metrics']['recall'],
             'Feats': len(result['features']),
             'Time': result['time'],
+            'TrainSize': result['train_size'],
             'Improvement': (result['metrics']['f1'] - baseline_f1) / baseline_f1 * 100
         })
 
@@ -242,9 +406,9 @@ def run_experiment(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
 
 def print_report(all_results: Dict[str, List[Dict]]) -> None:
     """Print centralized report across all workloads."""
-    logger.info("\n\n" + "="*120)
-    logger.info(" " * 45 + "CENTRALIZED REPORT")
-    logger.info("="*120)
+    logger.info("\n\n" + "="*129)
+    logger.info(" " * 45 + "EXPERIMENT REPORT")
+    logger.info("="*129)
 
     # Prepare data for summary table
     summary_data = []
@@ -258,7 +422,8 @@ def print_report(all_results: Dict[str, List[Dict]]) -> None:
                 'Recall': result['R'],
                 'Improvement': result['Improvement'],
                 'Feats': result['Feats'],
-                'Time': result['Time']
+                'Time': result['Time'],
+                'TrainSize': result['TrainSize']
             })
 
     df = pd.DataFrame(summary_data)
@@ -273,7 +438,8 @@ def print_report(all_results: Dict[str, List[Dict]]) -> None:
         'Recall': 'mean',
         'Improvement': 'mean',
         'Feats': 'mean',
-        'Time': 'mean'
+        'Time': 'mean',
+        'TrainSize': 'mean'
     }).reset_index()
     avg_df['Dataset'] = 'AVERAGE'
 
@@ -287,18 +453,18 @@ def print_report(all_results: Dict[str, List[Dict]]) -> None:
     df_combined = df_combined.sort_values(['Dataset', 'Method'])
 
     # Print table
-    logger.info(f"\n{'Dataset':<25} {'Method':<20} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Improvement':>12} {'Feats':>8} {'Time(s)':>8}")
-    logger.info("-" * 120)
+    logger.info(f"\n{'Dataset':<25} {'Method':<20} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Improvement':>12} {'TrainSize':>10} {'Feats':>8} {'Time(s)':>8}")
+    logger.info("-" * 129)
 
     current_dataset = None
     for _, row in df_combined.iterrows():
         if current_dataset is not None and row['Dataset'] != current_dataset:
-            logger.info("-" * 120)
+            logger.info("-" * 129)
         current_dataset = row['Dataset']
 
-        logger.info(f"{row['Dataset']:<25} {row['Method']:<20} {row['F1']:>8.4f} {row['Precision']:>10.4f} {row['Recall']:>8.4f} {row['Improvement']:>10.2f}% {int(row['Feats']):>8} {row['Time']:>8.2f}")
+        logger.info(f"{row['Dataset']:<25} {row['Method']:<20} {row['F1']:>8.4f} {row['Precision']:>10.4f} {row['Recall']:>8.4f} {row['Improvement']:>10.2f}% {int(row['TrainSize']):>10} {int(row['Feats']):>8} {row['Time']:>8.2f}")
 
-    logger.info("="*120 + "\n")
+    logger.info("="*129 + "\n")
 
 
 # =============================================================================
@@ -306,25 +472,53 @@ def print_report(all_results: Dict[str, List[Dict]]) -> None:
 # =============================================================================
 if __name__ == "__main__":
     # Define workloads with methods to run
-    # Methods: [] = Baseline, ['FS'] = Feature Selection, ['ST'] = Self-Training, ['FS', 'ST'] = Both
+    # Methods:
+    #   [] = Baseline
+    #   ['FS'] = Feature Selection
+    #   ['ST_confidence'] = Self-Training (confidence-based)
+    #   ['ST_geometric'] = Self-Training (geometric-based)
+    #   ['FS', 'ST_confidence'] = FS + ST (confidence)
+    #   ['FS', 'ST_geometric'] = FS + ST (geometric)
     workloads = [
+        # Compare all self-training methods on each dataset
         ("medical_Q1", Config(
             data_path="data/medical/.ckpt/NOPXY__Q1_full.csv",
             visible_samples=50,
             random_seed=42,
-            methods=[[], ['FS'], ['ST'], ['FS', 'ST']]  # Specify which method combinations to run
+            methods=[
+                [],
+                ['FS'],
+                ['ST_confidence'],
+                ['ST_geometric'],
+                ['FS', 'ST_confidence'],
+                ['FS', 'ST_geometric']
+            ]
         )),
         ("medical_Q3", Config(
             data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
             visible_samples=50,
             random_seed=42,
-            methods=[[], ['FS'], ['ST'], ['FS', 'ST']]
+            methods=[
+                [],
+                ['FS'],
+                ['ST_confidence'],
+                ['ST_geometric'],
+                ['FS', 'ST_confidence'],
+                ['FS', 'ST_geometric']
+            ]
         )),
         ("medical_Q8", Config(
             data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
             visible_samples=50,
             random_seed=42,
-            methods=[[], ['FS'], ['ST'], ['FS', 'ST']]
+            methods=[
+                [],
+                ['FS'],
+                ['ST_confidence'],
+                ['ST_geometric'],
+                ['FS', 'ST_confidence'],
+                ['FS', 'ST_geometric']
+            ]
         )),
     ]
 
