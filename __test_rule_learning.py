@@ -8,8 +8,10 @@ import pandas as pd
 import numpy as np
 import logging
 import time
+import argparse
 from dataclasses import dataclass, field
-from typing import List, Callable, Dict, Any
+from typing import List, Dict, Any
+import sys
 
 # Setup logging
 logging.basicConfig(
@@ -467,9 +469,103 @@ def print_report(all_results: Dict[str, List[Dict]]) -> None:
 
 
 # =============================================================================
-# Main
+# Argument Parser & Main
 # =============================================================================
-if __name__ == "__main__":
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Few-Shot Binary Classification with Self-Training',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run predefined workflows (default behavior)
+  python __test_rule_learning.py
+
+  # Run single dataset with custom parameters
+  python __test_rule_learning.py --workload medical.Q1 --methods FS ST_geometric
+
+  # Experiment with geometric ST parameters
+  python __test_rule_learning.py --workload medical.Q1 --methods ST_geometric --geo-k 10 --geo-weight 0.8
+
+  # Compare multiple methods
+  python __test_rule_learning.py --workload medical.Q1 --methods Baseline FS ST_geometric "FS + ST_geometric"
+
+Available methods:
+  Baseline              : No optimization
+  FS                    : Feature Selection
+  ST_confidence         : Self-Training (confidence-based)
+  ST_geometric          : Self-Training (geometric-based)
+  FS + ST_confidence    : Feature Selection + ST (confidence)
+  FS + ST_geometric     : Feature Selection + ST (geometric)
+        """
+    )
+
+    # Data arguments
+    parser.add_argument('--workload', type=str, help='Workload name for reporting')
+    parser.add_argument('--visible-samples', type=int, default=50, help='Number of visible samples (default: 50)')
+    parser.add_argument('--random-seed', type=int, default=42, help='Random seed (default: 42)')
+
+    # Methods
+    parser.add_argument('--methods', type=str, nargs='+', default=['Baseline', 'FS', 'ST_confidence', 'ST_geometric', 'FS + ST_confidence', 'FS + ST_geometric'],
+                        help='Methods to compare (space-separated). Use quotes for methods with spaces.')
+
+    # Feature selection
+    parser.add_argument('--top-k', type=int, default=10, help='Top-k features to select (default: 10)')
+
+    # Self-training
+    parser.add_argument('--st-rounds', type=int, default=3, help='Number of self-training rounds (default: 3)')
+    parser.add_argument('--max-samples', type=int, default=10, help='Max samples per round (default: 10)')
+    parser.add_argument('--balance-classes', action='store_true', default=True, help='Balance classes when selecting samples')
+
+    # Geometric ST parameters
+    parser.add_argument('--geo-k', type=int, default=5, help='k for k-NN in geometric ST (default: 5)')
+    parser.add_argument('--geo-weight', type=float, default=0.6, help='Initial geometric weight (default: 0.6)')
+
+    # Classifier
+    parser.add_argument('--n-estimators', type=int, default=100, help='Random forest estimators (default: 100)')
+    parser.add_argument('--max-depth', type=int, default=10, help='Random forest max depth (default: 10)')
+
+    # Dataset name for reporting
+
+    return parser.parse_args()
+
+
+def create_config_from_args(args):
+    """Create Config object from command-line arguments."""
+    # Parse methods
+    method_map = {
+        'Baseline': [],
+        'FS': ['FS'],
+        'ST_confidence': ['ST_confidence'],
+        'ST_geometric': ['ST_geometric'],
+        'FS + ST_confidence': ['FS', 'ST_confidence'],
+        'FS + ST_geometric': ['FS', 'ST_geometric'],
+    }
+
+    methods = [method_map[m] for m in args.methods]
+
+    # Detect dataset name from filename if not provided
+    _dataset, _query = args.workload.split('.')
+    _data_path: str = f"data/{_dataset}/.ckpt/NOPXY__{_query}_full.csv"
+
+    return Config(
+        data_path=_data_path,
+        visible_samples=args.visible_samples,
+        random_seed=args.random_seed,
+        top_k=args.top_k,
+        n_rounds=args.st_rounds,
+        max_samples_per_round=args.max_samples,
+        balance_classes=args.balance_classes,
+        geo_k_neighbors=args.geo_k,
+        geo_initial_weight=args.geo_weight,
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        methods=methods
+    ), args.workload
+
+
+def run_predefined_workloads():
+    """Run predefined workflow experiments."""
     # Define workloads with methods to run
     # Methods:
     #   [] = Baseline
@@ -550,3 +646,62 @@ if __name__ == "__main__":
 
     # Print centralized report
     print_report(all_results)
+
+
+def run_custom_experiment(args):
+    """Run custom experiment with command-line parameters."""
+    config, dataset_name = create_config_from_args(args)
+
+    logger.info(f"\n\n{'#'*80}")
+    logger.info(f"# CUSTOM EXPERIMENT: {dataset_name}")
+    logger.info(f"{'#'*80}\n")
+    logger.info(f"Configuration:")
+    logger.info(f"  Data: {config.data_path}")
+    logger.info(f"  Visible samples: {config.visible_samples}")
+    logger.info(f"  Methods: {args.methods}")
+    logger.info(f"  ST rounds: {config.n_rounds}")
+    logger.info(f"  Max samples/round: {config.max_samples_per_round}")
+    logger.info(f"  Geo k-neighbors: {config.geo_k_neighbors}")
+    logger.info(f"  Geo initial weight: {config.geo_initial_weight}")
+    logger.info(f"  Top-k features: {config.top_k}")
+    logger.info(f"  Random seed: {config.random_seed}\n")
+
+    # Load and split data
+    df = pd.read_csv(config.data_path)
+    Y, X = df['label'], df.drop(columns=['label', 'patient_id'])
+
+    np.random.seed(config.random_seed)
+    vis_idx = X.sample(n=config.visible_samples).index
+    inv_idx = X.index.difference(vis_idx)
+
+    vis_X, inv_X = X.loc[vis_idx].reset_index(drop=True), X.loc[inv_idx].reset_index(drop=True)
+    vis_Y, inv_Y = Y.loc[vis_idx].reset_index(drop=True), Y.loc[inv_idx].reset_index(drop=True)
+
+    logger.info(f"Data: {len(vis_X)} visible, {len(inv_X)} invisible")
+    logger.info(f"Methods: {config.methods}\n")
+
+    # Run experiment
+    results = run_experiment(vis_X, vis_Y, inv_X, inv_Y, config)
+
+    # Print report
+    print_report({dataset_name: results})
+
+
+if __name__ == "__main__":
+
+    # Check if any command-line arguments are provided (excluding script name)
+    args = parse_args()
+
+    # Check if --workload is provided (custom mode) or running default
+    if len(sys.argv) == 1 or (len(sys.argv) > 1 and '--workload' not in sys.argv):
+        # No arguments or no --workload flag: run predefined workflows
+        if len(sys.argv) > 1:
+            logger.info("No --workload argument provided. Running predefined workflows.\n")
+        run_predefined_workloads()
+    else:
+        # Custom experiment mode
+        if args.workload is None:
+            logger.error("Error: --workload argument is required for custom experiments.")
+            logger.info("Use --help to see usage information.")
+            sys.exit(1)
+        run_custom_experiment(args)
