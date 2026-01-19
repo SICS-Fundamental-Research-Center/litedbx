@@ -32,7 +32,7 @@ class Config:
 
     # Self-training
     use_self_training = True
-    n_rounds = 5
+    n_rounds = 3
     confidence_threshold = 0.95
     max_samples_per_round = 10
     balance_classes = True
@@ -110,6 +110,9 @@ def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
     result_init = few_shot_classify(vis_X, vis_Y, inv_X, use_fs)
     features = result_init['features']
 
+    # Use seeded RNG for reproducibility
+    rng = np.random.default_rng(Config.random_seed)
+
     logger.info(f"[SELF-TRAINING] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
     for round_idx in range(Config.n_rounds):
@@ -139,19 +142,19 @@ def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
 
             if len(pos_idx) == 0 or len(neg_idx) == 0:
                 n = min(high_conf_mask.sum(), Config.max_samples_per_round)
-                selected = np.random.choice(np.where(high_conf_mask)[0], n, replace=False)
+                selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
                 logger.info(f"Selected: {n} samples (one class only)")
             else:
                 n_per_class = min(len(pos_idx), len(neg_idx), Config.max_samples_per_round // 2)
                 if n_per_class == 0:
                     n_per_class = min(len(pos_idx), len(neg_idx))
-                selected_pos = np.random.choice(pos_idx, n_per_class, replace=False)
-                selected_neg = np.random.choice(neg_idx, n_per_class, replace=False)
+                selected_pos = rng.choice(pos_idx, n_per_class, replace=False)
+                selected_neg = rng.choice(neg_idx, n_per_class, replace=False)
                 selected = np.concatenate([selected_pos, selected_neg])
                 logger.info(f"Selected: {n_per_class} pos + {n_per_class} neg")
         else:
             n = min(high_conf_mask.sum(), Config.max_samples_per_round)
-            selected = np.random.choice(np.where(high_conf_mask)[0], n, replace=False)
+            selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
             logger.info(f"Selected: {n} samples")
 
         # Update datasets
@@ -206,7 +209,20 @@ def run_ablation(vis_X, vis_Y, inv_X, inv_Y):
         results.append({'Method': f'+ FS', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
         logger.info(f"+FS F1: {m['f1']:.4f} (vs baseline: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
 
-    # + Self-Training (on top of feature selection)
+    # + Self-Training
+    if Config.use_self_training:
+        logger.info("="*80)
+        logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
+        logger.info("="*80)
+
+        start = time.time()
+        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=False)
+        elapsed = time.time() - start
+        m = res['metrics']
+        results.append({'Method': '+ ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
+        logger.info(f"+ST: {m['f1']:.4f} (vs previous: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
+
+    # + Feature selection + Self-Training
     if Config.use_self_training:
         logger.info("="*80)
         logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
@@ -220,19 +236,6 @@ def run_ablation(vis_X, vis_Y, inv_X, inv_Y):
         m = res['metrics']
         results.append({'Method': '+ FS & ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
         logger.info(f"+ST F1: {m['f1']:.4f} (vs previous: {(m['f1']-prev_f1)/prev_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
-
-    # + Self-Training
-    if Config.use_self_training:
-        logger.info("="*80)
-        logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
-        logger.info("="*80)
-
-        start = time.time()
-        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=False)
-        elapsed = time.time() - start
-        m = res['metrics']
-        results.append({'Method': '+ ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
-        logger.info(f"+ST: {m['f1']:.4f} (vs previous: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
 
     # Print report
     logger.info("\n" + "="*90)
