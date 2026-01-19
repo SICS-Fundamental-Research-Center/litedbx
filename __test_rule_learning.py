@@ -83,7 +83,7 @@ def evaluate_predictions(vis_Y, inv_Y, inv_Y_pred):
     }
 
 
-def few_shot_classify(vis_X, vis_Y, inv_X, use_fs=True):
+def few_shot_classify(vis_X, vis_Y, inv_X, config: Config, use_fs=True):
     """Few-shot classification with optional feature selection."""
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
@@ -94,8 +94,8 @@ def few_shot_classify(vis_X, vis_Y, inv_X, use_fs=True):
             'feature': vis_X_proc.columns,
             'importance': clf_temp.feature_importances_
         }).sort_values('importance', ascending=False)
-        features = importances.head(Config.top_k)['feature'].tolist()
-        logger.info(f"[FEATURE SELECTION] Top-{Config.top_k}: {len(features)} features")
+        features = importances.head(config.top_k)['feature'].tolist()
+        logger.info(f"[FEATURE SELECTION] Top-{config.top_k}: {len(features)} features")
     else:
         features = vis_X_proc.columns.tolist()
         logger.info(f"[NO FEATURE SELECTION] Using all {len(features)} features")
@@ -106,21 +106,21 @@ def few_shot_classify(vis_X, vis_Y, inv_X, use_fs=True):
     return {'predictions': predictions, 'features': features}
 
 
-def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
+def self_training(vis_X, vis_Y, inv_X, inv_Y, config: Config, use_fs=True):
     """Self-training with safety rails."""
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
 
-    result_init = few_shot_classify(vis_X, vis_Y, inv_X, use_fs)
+    result_init = few_shot_classify(vis_X, vis_Y, inv_X, config, use_fs)
     features = result_init['features']
 
     # Use seeded RNG for reproducibility
-    rng = np.random.default_rng(Config.random_seed)
+    rng = np.random.default_rng(config.random_seed)
 
     logger.info(f"[SELF-TRAINING] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
-    for round_idx in range(Config.n_rounds):
-        logger.info(f"\nRound {round_idx + 1}/{Config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
+    for round_idx in range(config.n_rounds):
+        logger.info(f"\nRound {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
 
         clf = train_classifier(vis_X_proc[features], vis_Y)
         probas = clf.predict_proba(inv_X_proc[features])[:, 1]
@@ -129,8 +129,8 @@ def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
         metrics = evaluate_predictions(vis_Y, inv_Y, predictions)
         logger.info(f"[ROUND {round_idx + 1}] F1: {metrics['f1']:.4f}, P: {metrics['precision']:.4f}, R: {metrics['recall']:.4f}")
 
-        conf_mask_pos = (probas >= Config.confidence_threshold)
-        conf_mask_neg = (probas <= (1 - Config.confidence_threshold))
+        conf_mask_pos = (probas >= config.confidence_threshold)
+        conf_mask_neg = (probas <= (1 - config.confidence_threshold))
         high_conf_mask = conf_mask_pos | conf_mask_neg
 
         logger.debug(f"High-conf: {high_conf_mask.sum()} (Pos={conf_mask_pos.sum()}, Neg={conf_mask_neg.sum()})")
@@ -140,16 +140,16 @@ def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
             break
 
         # Select samples
-        if Config.balance_classes:
+        if config.balance_classes:
             pos_idx = np.where(conf_mask_pos)[0]
             neg_idx = np.where(conf_mask_neg)[0]
 
             if len(pos_idx) == 0 or len(neg_idx) == 0:
-                n = min(high_conf_mask.sum(), Config.max_samples_per_round)
+                n = min(high_conf_mask.sum(), config.max_samples_per_round)
                 selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
                 logger.info(f"Selected: {n} samples (one class only)")
             else:
-                n_per_class = min(len(pos_idx), len(neg_idx), Config.max_samples_per_round // 2)
+                n_per_class = min(len(pos_idx), len(neg_idx), config.max_samples_per_round // 2)
                 if n_per_class == 0:
                     n_per_class = min(len(pos_idx), len(neg_idx))
                 selected_pos = rng.choice(pos_idx, n_per_class, replace=False)
@@ -157,7 +157,7 @@ def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
                 selected = np.concatenate([selected_pos, selected_neg])
                 logger.info(f"Selected: {n_per_class} pos + {n_per_class} neg")
         else:
-            n = min(high_conf_mask.sum(), Config.max_samples_per_round)
+            n = min(high_conf_mask.sum(), config.max_samples_per_round)
             selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
             logger.info(f"Selected: {n} samples")
 
@@ -185,84 +185,114 @@ def self_training(vis_X, vis_Y, inv_X, inv_Y, use_fs=True):
 # =============================================================================
 # Ablation Study
 # =============================================================================
-def run_ablation(vis_X, vis_Y, inv_X, inv_Y):
-    """Run ablation study and print report."""
+def run_ablation(vis_X, vis_Y, inv_X, inv_Y, config: Config):
+    """Run ablation study and return results (no printing)."""
     results = []
 
     # Baseline
-    logger.info("\n" + "="*80)
     logger.info("[ABLATION] BASELINE (no optimizations)")
-    logger.info("="*80)
     start = time.time()
-    res = few_shot_classify(vis_X, vis_Y, inv_X, use_fs=False)
+    res = few_shot_classify(vis_X, vis_Y, inv_X, config, use_fs=False)
     elapsed = time.time() - start
     m = evaluate_predictions(vis_Y, inv_Y, res['predictions'])
     results.append({'Method': 'Baseline', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
     baseline_f1 = m['f1']
-    logger.info(f"BASELINE F1: {m['f1']:.4f} (Time: {elapsed:.2f}s)\n")
+    logger.info(f"  F1: {m['f1']:.4f}, Precision: {m['precision']:.4f}, Recall: {m['recall']:.4f} (Time: {elapsed:.2f}s)\n")
 
     # + Feature Selection
-    if Config.use_feature_selection:
-        logger.info("="*80)
-        logger.info(f"[ABLATION] + FEATURE SELECTION (top-{Config.top_k})")
-        logger.info("="*80)
+    if config.use_feature_selection:
+        logger.info(f"[ABLATION] + FEATURE SELECTION (top-{config.top_k})")
         start = time.time()
-        res = few_shot_classify(vis_X, vis_Y, inv_X, use_fs=True)
+        res = few_shot_classify(vis_X, vis_Y, inv_X, config, use_fs=True)
         elapsed = time.time() - start
         m = evaluate_predictions(vis_Y, inv_Y, res['predictions'])
-        results.append({'Method': f'+ FS', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
-        logger.info(f"+FS F1: {m['f1']:.4f} (vs baseline: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
+        results.append({'Method': '+ FS', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
+        logger.info(f"  F1: {m['f1']:.4f} (vs baseline: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
 
     # + Self-Training
-    if Config.use_self_training:
-        logger.info("="*80)
-        logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
-        logger.info("="*80)
-
+    if config.use_self_training:
+        logger.info(f"[ABLATION] + SELF-TRAINING ({config.n_rounds} rounds)")
         start = time.time()
-        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=False)
+        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), config, use_fs=False)
         elapsed = time.time() - start
         m = res['metrics']
         results.append({'Method': '+ ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
-        logger.info(f"+ST: {m['f1']:.4f} (vs previous: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
+        logger.info(f"  F1: {m['f1']:.4f} (vs baseline: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
 
     # + Feature selection + Self-Training
-    if Config.use_self_training:
-        logger.info("="*80)
-        logger.info(f"[ABLATION] + SELF-TRAINING ({Config.n_rounds} rounds)")
-        logger.info("="*80)
-
-        prev_f1 = results[1]['F1']
-
+    if config.use_self_training and config.use_feature_selection:
+        logger.info(f"[ABLATION] + FS & SELF-TRAINING ({config.n_rounds} rounds)")
         start = time.time()
-        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), use_fs=True)
+        res = self_training(vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(), config, use_fs=True)
         elapsed = time.time() - start
         m = res['metrics']
         results.append({'Method': '+ FS & ST', 'F1': m['f1'], 'P': m['precision'], 'R': m['recall'], 'Feats': len(res['features']), 'Time': elapsed})
-        logger.info(f"+ST F1: {m['f1']:.4f} (vs previous: {(m['f1']-prev_f1)/prev_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
+        logger.info(f"  F1: {m['f1']:.4f} (vs baseline: {(m['f1']-baseline_f1)/baseline_f1*100:+.2f}%, Time: {elapsed:.2f}s)\n")
 
-    # Print report
-    logger.info("\n" + "="*90)
-    logger.info(" " * 35 + "ABLATION REPORT")
-    logger.info("="*90)
-
+    # Add improvement percentages
     for r in results:
         r['Improvement'] = (r['F1'] - baseline_f1) / baseline_f1 * 100
 
-    logger.info(f"\n{'Method':<20} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Improvement':>15} {'# Feats':>10} {'Time(s)':>8}")
-    logger.info("-" * 90)
-    for r in results:
-        logger.info(f"{r['Method']:<20} {r['F1']:>8.4f} {r['P']:>10.4f} {r['R']:>8.4f} {r['Improvement']:>12.2f}% {r['Feats']:>10} {r['Time']:>8.2f}")
-    logger.info("="*90 + "\n")
+    return results
+
+
+def print_centralized_report(all_results):
+    """Print centralized ablation report across all workloads."""
+    logger.info("\n\n" + "="*120)
+    logger.info(" " * 45 + "CENTRALIZED ABLATION REPORT")
+    logger.info("="*120)
+
+    # Prepare data for summary table
+    summary_data = []
+    for dataset_name, methods in all_results.items():
+        for method_result in methods:
+            summary_data.append({
+                'Dataset': dataset_name,
+                'Method': method_result['Method'],
+                'F1': method_result['F1'],
+                'Precision': method_result['P'],
+                'Recall': method_result['R'],
+                'Improvement': method_result['Improvement'],
+                'Feats': method_result['Feats'],
+                'Time': method_result['Time']
+            })
+
+    # Convert to DataFrame for easier manipulation
+    df = pd.DataFrame(summary_data)
+
+    # Print full table
+    logger.info(f"\n{'Dataset':<25} {'Method':<15} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Improvement':>12} {'Feats':>8} {'Time(s)':>8}")
+    logger.info("-" * 120)
+    for _, row in df.iterrows():
+        logger.info(f"{row['Dataset']:<25} {row['Method']:<15} {row['F1']:>8.4f} {row['Precision']:>10.4f} {row['Recall']:>8.4f} {row['Improvement']:>10.2f}% {row['Feats']:>8} {row['Time']:>8.2f}")
+    logger.info("="*120)
+
+    # Print average summary by method
+    logger.info("\n" + "="*100)
+    logger.info(" " * 35 + "AVERAGE PERFORMANCE BY METHOD")
+    logger.info("="*100)
+    avg_df = df.groupby('Method').agg({
+        'F1': 'mean',
+        'Precision': 'mean',
+        'Recall': 'mean',
+        'Improvement': 'mean',
+        'Time': 'mean'
+    }).reset_index()
+
+    logger.info(f"\n{'Method':<20} {'F1':>8} {'Precision':>10} {'Recall':>8} {'Improvement':>12} {'Time(s)':>8}")
+    logger.info("-" * 100)
+    for _, row in avg_df.iterrows():
+        logger.info(f"{row['Method']:<20} {row['F1']:>8.4f} {row['Precision']:>10.4f} {row['Recall']:>8.4f} {row['Improvement']:>10.2f}% {row['Time']:>8.2f}")
+    logger.info("="*100 + "\n")
 
 
 # =============================================================================
 # Main
 # =============================================================================
-def run_experiment(config: Config):
-    """Run ablation study for a single configuration."""
+def run_experiment(config: Config, dataset_name: str):
+    """Run ablation study for a single configuration and return results."""
     logger.info("="*80)
-    logger.info(f"DATASET: {config.data_path}")
+    logger.info(f"DATASET: {dataset_name}")
     logger.info("="*80)
 
     # Load data
@@ -280,29 +310,41 @@ def run_experiment(config: Config):
     logger.info(f"Data: {len(vis_X)} visible, {len(inv_X)} invisible")
     logger.info(f"Features for training:\n{list(X.columns)}\n")
 
-    # Run ablation
-    run_ablation(vis_X, vis_Y, inv_X, inv_Y)
+    # Run ablation and return results
+    results = run_ablation(vis_X, vis_Y, inv_X, inv_Y, config)
+    return results
 
 
 if __name__ == "__main__":
-    # Define multiple workloads
-    configs = [
-        Config(
+    # Define multiple workloads with descriptive names
+    workloads = [
+        ("medical_Q1", Config(
             data_path="data/medical/.ckpt/NOPXY__Q1_full.csv",
             visible_samples=50,
             random_seed=42
-        ),
-        # Add more workloads here:
-        # Config(
-        #     data_path="data/medical/.ckpt/NOPXY__Q2_full.csv",
-        #     visible_samples=50,
-        #     random_seed=42
-        # ),
+        )),
+        ("medical_Q3", Config(
+            data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
+            visible_samples=50,
+            random_seed=42
+        )),
+        ("medical_Q8", Config(
+            data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
+            visible_samples=50,
+            random_seed=42
+        )),
     ]
 
+    # Store all results for centralized report
+    all_results = {}
+
     # Run experiments for each workload
-    for i, config in enumerate(configs, 1):
+    for i, (dataset_name, config) in enumerate(workloads, 1):
         logger.info(f"\n\n{'#'*80}")
-        logger.info(f"# WORKLOAD {i}/{len(configs)}")
+        logger.info(f"# WORKLOAD {i}/{len(workloads)}: {dataset_name}")
         logger.info(f"{'#'*80}\n")
-        run_experiment(config)
+        results = run_experiment(config, dataset_name)
+        all_results[dataset_name] = results
+
+    # Print centralized report
+    print_centralized_report(all_results)
