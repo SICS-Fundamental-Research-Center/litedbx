@@ -38,7 +38,7 @@ class Config:
 
     # Self-training
     self_training_mode: str = 'Conf'  # Options: 'Conf', 'ConfGeo'
-    n_rounds: int = 3
+    n_rounds: int = 3  # TODO: compute risk value in each round to determine the risk threshold.
     confidence_threshold: float = 0.95
     max_samples_per_round: int = 10
     balance_classes: bool = True
@@ -218,6 +218,8 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
         # For geometric method, we select top-k instead of using strict threshold
         conf_scores = np.abs(combined_prob - config.geo_decision_boundary)
 
+        # TODO: Improve balancing logic
+        # TODO; HUMAN IN THE LOOP
         if config.balance_classes:
             # Separate by predicted class
             pos_pred_idx = np.where(predictions == 1)[0]
@@ -940,9 +942,9 @@ def run_predefined_workloads():
             random_seed=42,
             geo_k_neighbors=10,
             geo_initial_weight=0.7,
-            geo_decision_boundary=0.5,
+            geo_decision_boundary=0.3,
             max_samples_per_round=10,
-            n_rounds=9,
+            n_rounds=4,
             methods=[
                 [],
                 ['FS'],
@@ -957,10 +959,10 @@ def run_predefined_workloads():
             visible_samples=50,
             random_seed=42,
             geo_k_neighbors=5,
-            geo_initial_weight=0.3,
-            geo_decision_boundary=0.3,
+            geo_initial_weight=0.1,
+            geo_decision_boundary=0.1,
             max_samples_per_round=20,
-            n_rounds=11,
+            n_rounds=4,
             methods=[
                 [],
                 ['FS'],
@@ -974,11 +976,11 @@ def run_predefined_workloads():
             data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
             visible_samples=50,
             random_seed=42,
-            geo_k_neighbors=15,
+            geo_k_neighbors=5,
             geo_initial_weight=0.7,
-            geo_decision_boundary=0.3,
-            max_samples_per_round=20,
-            n_rounds=15,
+            geo_decision_boundary=0.1,
+            max_samples_per_round=50,
+            n_rounds=16,
             methods=[
                 [],
                 ['FS'],
