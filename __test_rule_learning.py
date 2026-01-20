@@ -809,11 +809,11 @@ def grid_search_workloads(n_jobs: int = -1):
 
         # A comprehensive grid
         'comprehensive': {
-            'geo_k_neighbors': [5, 10, 15],
-            'geo_initial_weight': [0.3, 0.5, 0.7, 0.9],
-            'geo_decision_boundary': [0.3, 0.4, 0.5, 0.6],
-            'max_samples_per_round': [10, 20, 30, 40],
-            'n_rounds': [9, 11, 13, 15]
+            'geo_k_neighbors': [5, 10, 15, 20],
+            'geo_initial_weight': [0.1, 0.3, 0.5, 0.7, 0.9],
+            'geo_decision_boundary': [0.1, 0.3, 0.5, 0.7, 0.9],
+            'max_samples_per_round': [10, 20, 30, 40, 50],
+            'n_rounds': [4, 6, 8, 10, 12, 14, 16]
         }
 
     }
@@ -868,9 +868,9 @@ def grid_search_workloads(n_jobs: int = -1):
 
 def print_grid_search_summary(all_results: Dict[str, Dict[str, Any]]) -> None:
     """Print summary of grid search results across all workloads."""
-    logger.info("\n" + "="*150)
-    logger.info("GRID SEARCH SUMMARY".center(150))
-    logger.info("="*150)
+    logger.info("\n" + "="*100)
+    logger.info("GRID SEARCH SUMMARY".center(70))
+    logger.info("="*100)
 
     # Group by workload
     workloads = {}
@@ -904,9 +904,9 @@ def print_grid_search_summary(all_results: Dict[str, Dict[str, Any]]) -> None:
         results.sort(key=lambda x: x['best_f1'], reverse=True)
 
         logger.info(f"\n{workload_name} (Baseline F1: {baseline:.4f})")
-        logger.info("-" * 150)
+        logger.info("-" * 100)
         logger.info(f"{'Method':<25} {'F1':>8} {'Improvement':>12} {'K':>4} {'Weight':>6} {'Boundary':>8} {'Samples':>8} {'Rounds':>6} {'Train':>6}")
-        logger.info("-" * 150)
+        logger.info("-" * 100)
 
         for r in results:
             method = r['method']
@@ -919,7 +919,7 @@ def print_grid_search_summary(all_results: Dict[str, Dict[str, Any]]) -> None:
                        f"{config['geo_initial_weight']:>6.1f} {config['geo_decision_boundary']:>8.1f} "
                        f"{config['max_samples_per_round']:>8} {config['n_rounds']:>6} {train_size:>6}")
 
-    logger.info("\n" + "="*150 + "\n")
+    logger.info("\n" + "="*100 + "\n")
 
 
 def run_predefined_workloads():
@@ -938,56 +938,56 @@ def run_predefined_workloads():
             data_path="data/medical/.ckpt/NOPXY__Q1_full.csv",
             visible_samples=50,
             random_seed=42,
-            geo_k_neighbors=5,
-            geo_initial_weight=0.3,
+            geo_k_neighbors=10,
+            geo_initial_weight=0.7,
             geo_decision_boundary=0.5,
-            max_samples_per_round=70,
-            n_rounds=15,
+            max_samples_per_round=10,
+            n_rounds=9,
             methods=[
-                # [],
-                # ['FS'],
-                # ['ST_Conf'],
+                [],
+                ['FS'],
+                ['ST_Conf'],
                 ['ST_ConfGeo'],
-                # ['FS', 'ST_Conf'],
-                # ['FS', 'ST_ConfGeo']
+                ['FS', 'ST_Conf'],
+                ['FS', 'ST_ConfGeo']
             ]
         )),
-        # ("medical_Q3", Config(
-        #     data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
-        #     visible_samples=50,
-        #     random_seed=42,
-        #     geo_k_neighbors=5,
-        #     geo_initial_weight=0.3,
-        #     geo_decision_boundary=0.3,
-        #     max_samples_per_round=70,
-        #     n_rounds=15,
-        #     methods=[
-        #         [],
-        #         # ['FS'],
-        #         # ['ST_Conf'],
-        #         ['ST_ConfGeo'],
-        #         # ['FS', 'ST_Conf'],
-        #         # ['FS', 'ST_ConfGeo']
-        #     ]
-        # )),
-        # ("medical_Q8", Config(
-        #     data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
-        #     visible_samples=50,
-        #     random_seed=42,
-        #     geo_k_neighbors=15,
-        #     geo_initial_weight=0.9,
-        #     geo_decision_boundary=0.3,
-        #     max_samples_per_round=60,
-        #     n_rounds=15,
-        #     methods=[
-        #         [],
-        #         # ['FS'],
-        #         # ['ST_Conf'],
-        #         # ['ST_ConfGeo'],
-        #         # ['FS', 'ST_Conf'],
-        #         ['FS', 'ST_ConfGeo']
-        #     ]
-        # )),
+        ("medical_Q3", Config(
+            data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
+            visible_samples=50,
+            random_seed=42,
+            geo_k_neighbors=5,
+            geo_initial_weight=0.3,
+            geo_decision_boundary=0.3,
+            max_samples_per_round=20,
+            n_rounds=11,
+            methods=[
+                [],
+                ['FS'],
+                ['ST_Conf'],
+                ['ST_ConfGeo'],
+                ['FS', 'ST_Conf'],
+                ['FS', 'ST_ConfGeo']
+            ]
+        )),
+        ("medical_Q8", Config(
+            data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
+            visible_samples=50,
+            random_seed=42,
+            geo_k_neighbors=15,
+            geo_initial_weight=0.7,
+            geo_decision_boundary=0.3,
+            max_samples_per_round=20,
+            n_rounds=15,
+            methods=[
+                [],
+                ['FS'],
+                ['ST_Conf'],
+                ['ST_ConfGeo'],
+                ['FS', 'ST_Conf'],
+                ['FS', 'ST_ConfGeo']
+            ]
+        )),
     ]
 
     # Store all results
