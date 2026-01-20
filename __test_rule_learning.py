@@ -72,8 +72,13 @@ def apply_feature_selection(vis_X: pd.DataFrame, vis_Y: pd.Series, config: Confi
 
 
 def apply_self_training_confidence(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                                    inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
-    """Apply self-training to augment training data."""
+                                    features: List[str], config: Config) -> tuple:
+    """Apply self-training to augment training data.
+
+    Returns:
+        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+               The caller can use inv_X.index to sync inv_Y.
+    """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
     rng = np.random.default_rng(config.random_seed)
@@ -114,24 +119,28 @@ def apply_self_training_confidence(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X:
             n = min(high_conf_mask.sum(), config.max_samples_per_round)
             selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
 
-        # Update datasets
+        # Update datasets 
         vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
         vis_Y = pd.concat([vis_Y, pd.Series(predictions[selected])], ignore_index=True)
         vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
-        inv_X = inv_X.drop(inv_X.index[selected]).reset_index(drop=True)
-        inv_Y = inv_Y.drop(inv_Y.index[selected]).reset_index(drop=True)
-        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected]).reset_index(drop=True)
+        inv_X = inv_X.drop(inv_X.index[selected])
+        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected])
 
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X, inv_Y
+    return vis_X, vis_Y, inv_X
 
 
 def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                                   inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
-    """Apply geometric self-training using k-NN and feature importance weighting."""
+                                   features: List[str], config: Config) -> tuple:
+    """Apply geometric self-training using k-NN and feature importance weighting.
+
+    Returns:
+        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+               The caller can use inv_X.index to sync inv_Y.
+    """
     from sklearn.neighbors import NearestNeighbors
     from sklearn.preprocessing import StandardScaler
 
@@ -244,24 +253,28 @@ def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: 
         logger.info(f"  Adding {len(new_labels)} new labels: {new_labels.value_counts().to_dict()}")
         vis_Y = pd.concat([vis_Y, new_labels], ignore_index=True).astype(vis_Y.dtype)
         vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
-        inv_X = inv_X.drop(inv_X.index[selected]).reset_index(drop=True)
-        inv_Y = inv_Y.drop(inv_Y.index[selected]).reset_index(drop=True)
-        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected]).reset_index(drop=True)
+        inv_X = inv_X.drop(inv_X.index[selected])
+        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected])
 
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X, inv_Y
+    return vis_X, vis_Y, inv_X
 
 
 def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                        inv_Y: pd.Series, features: List[str], config: Config) -> tuple:
-    """Dispatch to appropriate self-training method based on config."""
+                        features: List[str], config: Config) -> tuple:
+    """Dispatch to appropriate self-training method based on config.
+
+    Returns:
+        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+               The caller can use inv_X.index to sync inv_Y.
+    """
     if config.self_training_mode == 'Conf':
-        return apply_self_training_confidence(vis_X, vis_Y, inv_X, inv_Y, features, config)
+        return apply_self_training_confidence(vis_X, vis_Y, inv_X, features, config)
     elif config.self_training_mode == 'ConfGeo':
-        return apply_self_training_geometric(vis_X, vis_Y, inv_X, inv_Y, features, config)
+        return apply_self_training_geometric(vis_X, vis_Y, inv_X, features, config)
     else:
         raise ValueError(f"Unknown self_training_mode: {config.self_training_mode}. "
                         f"Must be 'Conf' or 'ConfGeo'")
@@ -336,9 +349,13 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
         original_mode = config.self_training_mode
         config.self_training_mode = st_mode
 
-        vis_X, vis_Y, inv_X, inv_Y = apply_self_training(
-            vis_X, vis_Y, inv_X, inv_Y, features, config
+        vis_X, vis_Y, inv_X = apply_self_training(
+            vis_X, vis_Y, inv_X, features, config
         )
+
+        # Sync inv_Y with inv_X using the remaining indices
+        inv_Y = inv_Y.loc[inv_X.index].reset_index(drop=True)
+        inv_X = inv_X.reset_index(drop=True)
 
         # Restore original mode
         config.self_training_mode = original_mode
@@ -387,21 +404,28 @@ def run_experiment(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
         method_name = " + ".join(methods) if methods else "Baseline"
 
         logger.info(f"\n[METHOD] {method_name}")
-        result = run_classification(
-            vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
-            config, methods=methods
-        )
+        try:
+            result = run_classification(
+                vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
+                config, methods=methods
+            )
 
-        results.append({
-            'Method': method_name,
-            'F1': result['metrics']['f1'],
-            'P': result['metrics']['precision'],
-            'R': result['metrics']['recall'],
-            'Feats': len(result['features']),
-            'Time': result['time'],
-            'TrainSize': result['train_size'],
-            'Improvement': (result['metrics']['f1'] - baseline_f1) / baseline_f1 * 100
-        })
+            result_entry = {
+                'Method': method_name,
+                'F1': result['metrics']['f1'],
+                'P': result['metrics']['precision'],
+                'R': result['metrics']['recall'],
+                'Feats': len(result['features']),
+                'Time': result['time'],
+                'TrainSize': result['train_size'],
+                'Improvement': (result['metrics']['f1'] - baseline_f1) / baseline_f1 * 100
+            }
+            logger.info(f"[DEBUG] Appending result: Method='{result_entry['Method']}', F1={result_entry['F1']}")
+            results.append(result_entry)
+        except Exception as e:
+            logger.error(f"[ERROR] Exception running method {method_name}: {e}")
+            import traceback
+            traceback.print_exc()
 
     return results
 
@@ -430,8 +454,11 @@ def print_report(all_results: Dict[str, List[Dict]]) -> None:
 
     df = pd.DataFrame(summary_data)
 
-    # Get method order from first dataset to maintain consistency
-    method_order = df[df['Dataset'] == df['Dataset'].unique()[0]]['Method'].tolist()
+    # Get all unique methods across all datasets to maintain consistency
+    all_methods = df['Method'].unique().tolist()
+    # Sort methods: Baseline first, then alphabetically
+    all_methods_sorted = ['Baseline'] + sorted([m for m in all_methods if m != 'Baseline'])
+    method_order = all_methods_sorted
 
     # Calculate average by method
     avg_df = df.groupby('Method').agg({
@@ -914,11 +941,11 @@ def run_predefined_workloads():
             n_rounds=15,
             methods=[
                 [],
-                ['FS'],
+                # ['FS'],
                 # ['ST_Conf'],
                 ['ST_ConfGeo'],
                 # ['FS', 'ST_Conf'],
-                ['FS', 'ST_ConfGeo']
+                # ['FS', 'ST_ConfGeo']
             ]
         )),
         ("medical_Q3", Config(
@@ -932,11 +959,11 @@ def run_predefined_workloads():
             n_rounds=15,
             methods=[
                 [],
-                ['FS'],
+                # ['FS'],
                 # ['ST_Conf'],
                 ['ST_ConfGeo'],
                 # ['FS', 'ST_Conf'],
-                ['FS', 'ST_ConfGeo']
+                # ['FS', 'ST_ConfGeo']
             ]
         )),
         ("medical_Q8", Config(
@@ -950,9 +977,9 @@ def run_predefined_workloads():
             n_rounds=15,
             methods=[
                 [],
-                ['FS'],
+                # ['FS'],
                 # ['ST_Conf'],
-                ['ST_ConfGeo'],
+                # ['ST_ConfGeo'],
                 # ['FS', 'ST_Conf'],
                 ['FS', 'ST_ConfGeo']
             ]
