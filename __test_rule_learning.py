@@ -37,7 +37,7 @@ class Config:
     top_k: int = 10
 
     # Self-training
-    self_training_mode: str = 'Conf'  # Options: 'Conf', 'ConfGeo'
+    self_training_mode: str = 'Conf'  # Options: 'Conf', 'ConfGeo', 'Geo
     n_rounds: int = 3  # TODO: compute risk value in each round to determine the risk threshold.
     confidence_threshold: float = 0.95
     max_samples_per_round: int = 10
@@ -122,6 +122,131 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
         # Update datasets 
         vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
         vis_Y = pd.concat([vis_Y, pd.Series(predictions[selected])], ignore_index=True)
+        vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
+        inv_X = inv_X.drop(inv_X.index[selected])
+        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected])
+
+        if len(inv_X) == 0:
+            logger.info("  No more invisible samples. Stopping.")
+            break
+
+    return vis_X, vis_Y, inv_X
+
+
+def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                          features: List[str], config: Config) -> tuple:
+    """Apply geometric self-training using ONLY clustering (k-NN distances), no confidence scores.
+
+    This method selects samples based purely on geometric proximity to labeled samples
+    using k-NN distances weighted by feature importance.
+
+    Returns:
+        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+               The caller can use inv_X.index to sync inv_Y.
+    """
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.preprocessing import StandardScaler
+
+    vis_X_proc = preprocess_features(vis_X)
+    inv_X_proc = preprocess_features(inv_X)
+
+    logger.info(f"  [Self-Training: Geo-Only] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
+
+    for round_idx in range(config.n_rounds):
+        logger.info(f"  Round {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
+
+        # Get feature importances from current classifier
+        clf_temp = train_classifier(vis_X_proc[features], vis_Y, config)
+        feature_importances = clf_temp.feature_importances_
+
+        # Create feature weights based on importance
+        feature_weights = np.ones(len(features))
+        for i, feat in enumerate(features):
+            if feat in vis_X_proc.columns:
+                idx = list(vis_X_proc.columns).index(feat)
+                if idx < len(feature_importances):
+                    feature_weights[i] = np.sqrt(feature_importances[idx])
+
+        # Normalize features
+        scaler = StandardScaler()
+        vis_X_norm = scaler.fit_transform(vis_X_proc[features])
+        inv_X_norm = scaler.transform(inv_X_proc[features])
+
+        # Apply feature importance weights
+        vis_X_weighted = vis_X_norm * feature_weights
+        inv_X_weighted = inv_X_norm * feature_weights
+
+        # Separate visible samples by class
+        pos_idx = vis_Y[vis_Y == 1].index
+        neg_idx = vis_Y[vis_Y == 0].index
+
+        if len(pos_idx) == 0 or len(neg_idx) == 0:
+            logger.info("  Not enough samples of both classes. Stopping.")
+            break
+
+        # Compute k-NN distances to each class
+        pos_samples = vis_X_weighted[pos_idx]
+        neg_samples = vis_X_weighted[neg_idx]
+
+        n_neighbors = min(config.geo_k_neighbors, len(pos_idx), len(neg_idx))
+        knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
+        knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
+
+        dist_pos, _ = knn_pos.kneighbors(inv_X_weighted)
+        dist_neg, _ = knn_neg.kneighbors(inv_X_weighted)
+
+        # Calculate geometric scores: inverse of average distance
+        # Closer to positive class → higher positive score
+        # Closer to negative class → higher negative score
+        epsilon = 1e-6
+        geo_score_pos = 1.0 / (dist_pos.mean(axis=1) + epsilon)
+        geo_score_neg = 1.0 / (dist_neg.mean(axis=1) + epsilon)
+
+        # Convert scores to probabilities using softmax-like normalization
+        total_score = geo_score_pos + geo_score_neg
+        geo_prob_pos = geo_score_pos / total_score
+
+        # Make predictions based PURELY on geometric proximity
+        predictions = (geo_prob_pos >= config.geo_decision_boundary).astype(int)
+
+        # Select samples with HIGHEST geometric confidence
+        # Geometric confidence = distance from decision boundary
+        geo_confidence = np.abs(geo_prob_pos - config.geo_decision_boundary)
+
+        if config.balance_classes:
+            # Separate by predicted class
+            pos_pred_idx = np.where(predictions == 1)[0]
+            neg_pred_idx = np.where(predictions == 0)[0]
+
+            if len(pos_pred_idx) == 0 or len(neg_pred_idx) == 0:
+                # If only one class predicted, select from that class
+                available_idx = pos_pred_idx if len(pos_pred_idx) > 0 else neg_pred_idx
+                n = min(len(available_idx), config.max_samples_per_round)
+                if n == 0:
+                    logger.info("  No samples available. Stopping.")
+                    break
+                selected = available_idx[np.argsort(geo_confidence[available_idx])[-n:]]
+                logger.info(f"  Selected: {n} samples (one class only)")
+            else:
+                # Balance classes: select equal number from each
+                n_per_class = min(len(pos_pred_idx), len(neg_pred_idx), config.max_samples_per_round // 2)
+                if n_per_class == 0:
+                    n_per_class = min(len(pos_pred_idx), len(neg_pred_idx))
+                # Select samples with HIGHEST geometric confidence within each class
+                selected_pos = pos_pred_idx[np.argsort(geo_confidence[pos_pred_idx])[-n_per_class:]]
+                selected_neg = neg_pred_idx[np.argsort(geo_confidence[neg_pred_idx])[-n_per_class:]]
+                selected = np.concatenate([selected_pos, selected_neg])
+                logger.info(f"  Selected: {len(selected_pos)} pos + {len(selected_neg)} neg")
+        else:
+            n = min(len(inv_X), config.max_samples_per_round)
+            selected = np.argsort(geo_confidence)[-n:]
+            logger.info(f"  Selected: {n} samples")
+
+        # Update datasets (do NOT reset index for inv_X/inv_X_proc)
+        vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
+        new_labels = pd.Series(predictions[selected], dtype=vis_Y.dtype)
+        logger.info(f"  Adding {len(new_labels)} new labels: {new_labels.value_counts().to_dict()}")
+        vis_Y = pd.concat([vis_Y, new_labels], ignore_index=True).astype(vis_Y.dtype)
         vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
         inv_X = inv_X.drop(inv_X.index[selected])
         inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected])
@@ -277,9 +402,11 @@ def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFra
         return apply_self_training_conf(vis_X, vis_Y, inv_X, features, config)
     elif config.self_training_mode == 'ConfGeo':
         return apply_self_training_conf_geo(vis_X, vis_Y, inv_X, features, config)
+    elif config.self_training_mode == 'Geo':
+        return apply_self_training_geo(vis_X, vis_Y, inv_X, features, config)
     else:
         raise ValueError(f"Unknown self_training_mode: {config.self_training_mode}. "
-                        f"Must be 'Conf' or 'ConfGeo'")
+                        f"Must be 'Conf' or 'ConfGeo' or 'Geo'")
 
 
 # =============================================================================
@@ -836,12 +963,14 @@ def grid_search_workloads(n_jobs: int = -1):
 
     # Define methods to test
     method_combinations = [
-        [],
-        ['FS'],
-        ['ST_Conf'],
-        ['ST_ConfGeo'],
-        ['FS', 'ST_Conf'],
-        ['FS', 'ST_ConfGeo']
+        # [],
+        # ['FS'],
+        # ['ST_Conf'],
+        # ['ST_ConfGeo'],
+        # ['ST_Geo'],
+        # ['FS', 'ST_Conf'],
+        # ['FS', 'ST_ConfGeo']
+        ['FS', 'ST_Geo']
     ]
 
     for workload_name, data_path in workloads:
