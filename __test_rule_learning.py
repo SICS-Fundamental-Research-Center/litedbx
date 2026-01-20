@@ -37,7 +37,7 @@ class Config:
     top_k: int = 10
 
     # Self-training
-    self_training_mode: str = 'confidence'  # Options: 'confidence', 'geometric'
+    self_training_mode: str = 'Conf'  # Options: 'Conf', 'ConfGeo'
     n_rounds: int = 3
     confidence_threshold: float = 0.95
     max_samples_per_round: int = 10
@@ -329,6 +329,11 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
 
+    # Store original data before self-training (for reference)
+    inv_X_proc_orig = inv_X_proc.copy()
+    vis_Y_orig = vis_Y.copy()
+    inv_Y_orig = inv_Y.copy()
+
     # Step 1: Feature selection (if enabled)
     if 'FS' in methods:
         features = apply_feature_selection(vis_X_proc, vis_Y, config)
@@ -368,10 +373,11 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
 
     # Step 3: Final training and prediction
     clf = train_classifier(vis_X_proc[features], vis_Y, config)
-    predictions = clf.predict(inv_X_proc[features])
+    predictions = clf.predict(inv_X_proc_orig[features])
+
 
     # Evaluate
-    metrics = evaluate_predictions(vis_Y, inv_Y, predictions)
+    metrics = evaluate_predictions(vis_Y_orig, inv_Y_orig, predictions)
     elapsed = time.time() - start_time
 
     logger.info(f"  Results -> F1: {metrics['f1']:.4f}, P: {metrics['precision']:.4f}, R: {metrics['recall']:.4f} (Time: {elapsed:.2f}s)\n")
@@ -806,10 +812,8 @@ def grid_search_workloads(n_jobs: int = -1):
             'geo_k_neighbors': [5, 10, 15],
             'geo_initial_weight': [0.3, 0.5, 0.7, 0.9],
             'geo_decision_boundary': [0.3, 0.4, 0.5, 0.6],
-            'max_samples_per_round': [10, 30, 50, 70, 90],
+            'max_samples_per_round': [10, 20, 30, 40],
             'n_rounds': [9, 11, 13, 15]
-            # 'max_samples_per_round': [10, 20, 30, 40],
-            # 'n_rounds': [3, 5, 7]
         }
 
     }
@@ -940,7 +944,7 @@ def run_predefined_workloads():
             max_samples_per_round=70,
             n_rounds=15,
             methods=[
-                [],
+                # [],
                 # ['FS'],
                 # ['ST_Conf'],
                 ['ST_ConfGeo'],
@@ -948,42 +952,42 @@ def run_predefined_workloads():
                 # ['FS', 'ST_ConfGeo']
             ]
         )),
-        ("medical_Q3", Config(
-            data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
-            visible_samples=50,
-            random_seed=42,
-            geo_k_neighbors=5,
-            geo_initial_weight=0.3,
-            geo_decision_boundary=0.3,
-            max_samples_per_round=70,
-            n_rounds=15,
-            methods=[
-                [],
-                # ['FS'],
-                # ['ST_Conf'],
-                ['ST_ConfGeo'],
-                # ['FS', 'ST_Conf'],
-                # ['FS', 'ST_ConfGeo']
-            ]
-        )),
-        ("medical_Q8", Config(
-            data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
-            visible_samples=50,
-            random_seed=42,
-            geo_k_neighbors=15,
-            geo_initial_weight=0.9,
-            geo_decision_boundary=0.3,
-            max_samples_per_round=60,
-            n_rounds=15,
-            methods=[
-                [],
-                # ['FS'],
-                # ['ST_Conf'],
-                # ['ST_ConfGeo'],
-                # ['FS', 'ST_Conf'],
-                ['FS', 'ST_ConfGeo']
-            ]
-        )),
+        # ("medical_Q3", Config(
+        #     data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
+        #     visible_samples=50,
+        #     random_seed=42,
+        #     geo_k_neighbors=5,
+        #     geo_initial_weight=0.3,
+        #     geo_decision_boundary=0.3,
+        #     max_samples_per_round=70,
+        #     n_rounds=15,
+        #     methods=[
+        #         [],
+        #         # ['FS'],
+        #         # ['ST_Conf'],
+        #         ['ST_ConfGeo'],
+        #         # ['FS', 'ST_Conf'],
+        #         # ['FS', 'ST_ConfGeo']
+        #     ]
+        # )),
+        # ("medical_Q8", Config(
+        #     data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
+        #     visible_samples=50,
+        #     random_seed=42,
+        #     geo_k_neighbors=15,
+        #     geo_initial_weight=0.9,
+        #     geo_decision_boundary=0.3,
+        #     max_samples_per_round=60,
+        #     n_rounds=15,
+        #     methods=[
+        #         [],
+        #         # ['FS'],
+        #         # ['ST_Conf'],
+        #         # ['ST_ConfGeo'],
+        #         # ['FS', 'ST_Conf'],
+        #         ['FS', 'ST_ConfGeo']
+        #     ]
+        # )),
     ]
 
     # Store all results
