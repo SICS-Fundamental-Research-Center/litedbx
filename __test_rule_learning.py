@@ -71,7 +71,7 @@ def apply_feature_selection(vis_X: pd.DataFrame, vis_Y: pd.Series, config: Confi
     return features
 
 
-def apply_self_training_confidence(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
                                     features: List[str], config: Config) -> tuple:
     """Apply self-training to augment training data.
 
@@ -133,7 +133,7 @@ def apply_self_training_confidence(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X:
     return vis_X, vis_Y, inv_X
 
 
-def apply_self_training_geometric(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
                                    features: List[str], config: Config) -> tuple:
     """Apply geometric self-training using k-NN and feature importance weighting.
 
@@ -272,9 +272,9 @@ def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFra
                The caller can use inv_X.index to sync inv_Y.
     """
     if config.self_training_mode == 'Conf':
-        return apply_self_training_confidence(vis_X, vis_Y, inv_X, features, config)
+        return apply_self_training_conf(vis_X, vis_Y, inv_X, features, config)
     elif config.self_training_mode == 'ConfGeo':
-        return apply_self_training_geometric(vis_X, vis_Y, inv_X, features, config)
+        return apply_self_training_conf_geo(vis_X, vis_Y, inv_X, features, config)
     else:
         raise ValueError(f"Unknown self_training_mode: {config.self_training_mode}. "
                         f"Must be 'Conf' or 'ConfGeo'")
