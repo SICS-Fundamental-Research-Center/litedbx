@@ -42,6 +42,8 @@ class Config:
     confidence_threshold: float = 0.95
     max_samples_per_round: int = 10
     balance_classes: bool = True
+    report_each_round_f1: bool = False
+    report_each_round_risk: bool = False
 
     # Geometric self-training parameters
     geo_k_neighbors: int = 5  # k for k-NN (max neighbors, will be capped by minority class size)
@@ -221,17 +223,41 @@ def _update_datasets(vis_X: pd.DataFrame, vis_Y: pd.Series, vis_X_proc: pd.DataF
     return vis_X_new, vis_Y_new, vis_X_proc_new, inv_X_new, inv_X_proc_new
 
 
+def _compute_round_f1(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                      inv_Y: Optional[pd.Series], features: List[str], config: Config) -> float:
+    """Compute F1 score for current round using all visible and invisible samples."""
+    from sklearn.metrics import f1_score
+
+    if inv_Y is None:
+        raise ValueError("inv_Y must be provided to compute F1 score")
+
+    # Preprocess and train classifier on current visible set
+    vis_X_proc = preprocess_features(vis_X)
+    inv_X_proc = preprocess_features(inv_X)
+
+    clf = train_classifier(vis_X_proc[features], vis_Y, config)
+    inv_Y_pred = clf.predict(inv_X_proc[features])
+
+    # Compute F1 using all samples
+    all_Y_pred = np.concatenate([vis_Y.to_numpy(), inv_Y_pred])
+    all_Y_true = np.concatenate([vis_Y.to_numpy(), inv_Y.to_numpy()])
+
+    return float(f1_score(all_Y_true, all_Y_pred))
+
+
 def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                             features: List[str], config: Config) -> tuple:
+                             features: List[str], config: Config, inv_Y: Optional[pd.Series] = None) -> tuple:
     """Apply self-training to augment training data using confidence scores.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+               f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
     rng = np.random.default_rng(config.random_seed)
+    f1_history = []
 
     logger.info(f"  [Self-Training] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -259,26 +285,38 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
             vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc, selected, predictions
         )
 
+        # Compute F1 score for this round if enabled
+        if config.report_each_round_f1 and inv_Y is not None:
+            # Sync inv_Y with inv_X after dropping selected samples
+            current_inv_Y = inv_Y.iloc[selected].reset_index(drop=True)
+            inv_Y = inv_Y.drop(inv_Y.index[selected])
+
+            f1 = _compute_round_f1(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            f1_history.append(f1)
+            logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
+
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X
+    return vis_X, vis_Y, inv_X, f1_history
 
 
 def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                            features: List[str], config: Config) -> tuple:
+                            features: List[str], config: Config, inv_Y: Optional[pd.Series] = None) -> tuple:
     """Apply geometric self-training using ONLY k-NN distances, no confidence scores.
 
     This method selects samples based purely on geometric proximity to labeled samples
     using k-NN distances weighted by feature importance.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+               f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
+    f1_history = []
 
     logger.info(f"  [Self-Training: Geo-Only] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -306,23 +344,33 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
             vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc, selected, predictions, log_labels=True
         )
 
+        # Compute F1 score for this round if enabled
+        if config.report_each_round_f1 and inv_Y is not None:
+            inv_Y = inv_Y.drop(inv_Y.index[selected])
+
+            f1 = _compute_round_f1(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            f1_history.append(f1)
+            logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
+
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X
+    return vis_X, vis_Y, inv_X, f1_history
 
 
 def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                                 features: List[str], config: Config) -> tuple:
+                                 features: List[str], config: Config, inv_Y: Optional[pd.Series] = None) -> tuple:
     """Apply self-training combining confidence scores and geometric k-NN.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+               f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
+    f1_history = []
 
     logger.info(f"  [Self-Training: Geometric] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -362,27 +410,36 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
             vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc, selected, predictions, log_labels=True
         )
 
+        # Compute F1 score for this round if enabled
+        if config.report_each_round_f1 and inv_Y is not None:
+            inv_Y = inv_Y.drop(inv_Y.index[selected])
+
+            f1 = _compute_round_f1(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            f1_history.append(f1)
+            logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
+
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X
+    return vis_X, vis_Y, inv_X, f1_history
 
 
 def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                        features: List[str], config: Config) -> tuple:
+                        features: List[str], config: Config, inv_Y: Optional[pd.Series] = None) -> tuple:
     """Dispatch to appropriate self-training method based on config.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+               f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     if config.self_training_mode == 'Conf':
-        return apply_self_training_conf(vis_X, vis_Y, inv_X, features, config)
+        return apply_self_training_conf(vis_X, vis_Y, inv_X, features, config, inv_Y)
     elif config.self_training_mode == 'ConfGeo':
-        return apply_self_training_conf_geo(vis_X, vis_Y, inv_X, features, config)
+        return apply_self_training_conf_geo(vis_X, vis_Y, inv_X, features, config, inv_Y)
     elif config.self_training_mode == 'Geo':
-        return apply_self_training_geo(vis_X, vis_Y, inv_X, features, config)
+        return apply_self_training_geo(vis_X, vis_Y, inv_X, features, config, inv_Y)
     else:
         raise ValueError(f"Unknown self_training_mode: {config.self_training_mode}. "
                         f"Must be 'Conf' or 'ConfGeo' or 'Geo'")
@@ -450,6 +507,7 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
         logger.info(f"  [No Feature Selection] Using all {len(features)} features")
 
     # Step 2: Self-training (if enabled)
+    f1_history = []
     if any(m.startswith('ST') for m in methods):
         # Determine self-training mode from methods list
         st_mode = config.self_training_mode
@@ -462,8 +520,8 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
         original_mode = config.self_training_mode
         config.self_training_mode = st_mode
 
-        vis_X, vis_Y, inv_X = apply_self_training(
-            vis_X, vis_Y, inv_X, features, config
+        vis_X, vis_Y, inv_X, f1_history = apply_self_training(
+            vis_X, vis_Y, inv_X, features, config, inv_Y
         )
 
         # Sync inv_Y with inv_X using the remaining indices
@@ -494,7 +552,8 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
         'metrics': metrics,
         'features': features,
         'time': elapsed,
-        'train_size': final_train_size
+        'train_size': final_train_size,
+        'f1_history': f1_history
     }
 
 
@@ -524,6 +583,12 @@ def run_experiment(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
                 config, methods=methods
             )
 
+            # Handle F1 history: find best round
+            f1_history = result.get('f1_history', [])
+            best_round = -1  # -1 means no F1 history or empty
+            if f1_history:
+                best_round = int(np.argmax(f1_history)) + 1  # +1 for 1-based indexing
+
             result_entry = {
                 'Method': method_name,
                 'F1': result['metrics']['f1'],
@@ -532,7 +597,8 @@ def run_experiment(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
                 'Feats': len(result['features']),
                 'Time': result['time'],
                 'TrainSize': result['train_size'],
-                'Improvement': (result['metrics']['f1'] - baseline_f1) / baseline_f1 * 100
+                'Improvement': (result['metrics']['f1'] - baseline_f1) / baseline_f1 * 100,
+                'BestRound': best_round
             }
             logger.info(f"[DEBUG] Appending result: Method='{result_entry['Method']}', F1={result_entry['F1']}")
             results.append(result_entry)
@@ -1053,51 +1119,51 @@ def run_predefined_workloads():
             geo_decision_boundary=0.3,
             max_samples_per_round=10,
             n_rounds=4,
+            report_each_round_f1=True,
             methods=[
                 [],
-                ['FS'],
                 ['ST_Conf'],
                 ['ST_ConfGeo'],
                 ['FS', 'ST_Conf'],
                 ['FS', 'ST_ConfGeo']
             ]
         )),
-        ("medical_Q3", Config(
-            data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
-            visible_samples=50,
-            random_seed=42,
-            geo_k_neighbors=5,
-            geo_initial_weight=0.1,
-            geo_decision_boundary=0.1,
-            max_samples_per_round=20,
-            n_rounds=4,
-            methods=[
-                [],
-                ['FS'],
-                ['ST_Conf'],
-                ['ST_ConfGeo'],
-                ['FS', 'ST_Conf'],
-                ['FS', 'ST_ConfGeo']
-            ]
-        )),
-        ("medical_Q8", Config(
-            data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
-            visible_samples=50,
-            random_seed=42,
-            geo_k_neighbors=5,
-            geo_initial_weight=0.7,
-            geo_decision_boundary=0.1,
-            max_samples_per_round=50,
-            n_rounds=16,
-            methods=[
-                [],
-                ['FS'],
-                ['ST_Conf'],
-                ['ST_ConfGeo'],
-                ['FS', 'ST_Conf'],
-                ['FS', 'ST_ConfGeo']
-            ]
-        )),
+        # ("medical_Q3", Config(
+        #     data_path="data/medical/.ckpt/NOPXY__Q3_full.csv",
+        #     visible_samples=50,
+        #     random_seed=42,
+        #     geo_k_neighbors=5,
+        #     geo_initial_weight=0.1,
+        #     geo_decision_boundary=0.1,
+        #     max_samples_per_round=20,
+        #     n_rounds=4,
+        #     methods=[
+        #         [],
+        #         ['FS'],
+        #         ['ST_Conf'],
+        #         ['ST_ConfGeo'],
+        #         ['FS', 'ST_Conf'],
+        #         ['FS', 'ST_ConfGeo']
+        #     ]
+        # )),
+        # ("medical_Q8", Config(
+        #     data_path="data/medical/.ckpt/NOPXY__Q8_full.csv",
+        #     visible_samples=50,
+        #     random_seed=42,
+        #     geo_k_neighbors=5,
+        #     geo_initial_weight=0.7,
+        #     geo_decision_boundary=0.1,
+        #     max_samples_per_round=50,
+        #     n_rounds=16,
+        #     methods=[
+        #         [],
+        #         ['FS'],
+        #         ['ST_Conf'],
+        #         ['ST_ConfGeo'],
+        #         ['FS', 'ST_Conf'],
+        #         ['FS', 'ST_ConfGeo']
+        #     ]
+        # )),
     ]
 
     # Store all results
