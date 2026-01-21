@@ -422,6 +422,9 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
     f1_history = []
     risk_history = []
 
+    # Track original visible samples (before adding pseudo-labels)
+    orig_vis_size = len(vis_X)
+
     logger.info(f"  [Self-Training] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
     for round_idx in range(config.n_rounds):
@@ -461,7 +464,18 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
             current_inv_Y = inv_Y.iloc[selected].reset_index(drop=True)
             inv_Y = inv_Y.drop(inv_Y.index[selected])
 
-            f1 = _compute_round_f1(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            # Use only original visible samples (exclude pseudo-labeled samples)
+            vis_X_orig = vis_X.iloc[:orig_vis_size]
+            vis_Y_orig = vis_Y.iloc[:orig_vis_size]
+
+            # Add pseudo-labeled samples back to invisible set for evaluation
+            vis_X_pseudo = vis_X.iloc[orig_vis_size:]
+            vis_Y_pseudo = vis_Y.iloc[orig_vis_size:]
+
+            inv_X_eval = pd.concat([inv_X, vis_X_pseudo], ignore_index=True)
+            inv_Y_eval = pd.concat([inv_Y, vis_Y_pseudo], ignore_index=True)
+
+            f1 = _compute_round_f1(vis_X_orig, vis_Y_orig, inv_X_eval, inv_Y_eval, features, config)
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
@@ -489,6 +503,9 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
     inv_X_proc = preprocess_features(inv_X)
     f1_history = []
     risk_history = []
+
+    # Track original visible samples (before adding pseudo-labels)
+    orig_vis_size = len(vis_X)
 
     logger.info(f"  [Self-Training: Geo-Only] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -526,7 +543,18 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
         if config.report_each_round_f1 and inv_Y is not None:
             inv_Y = inv_Y.drop(inv_Y.index[selected])
 
-            f1 = _compute_round_f1(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            # Use only original visible samples (exclude pseudo-labeled samples)
+            vis_X_orig = vis_X.iloc[:orig_vis_size]
+            vis_Y_orig = vis_Y.iloc[:orig_vis_size]
+
+            # Add pseudo-labeled samples back to invisible set for evaluation
+            vis_X_pseudo = vis_X.iloc[orig_vis_size:]
+            vis_Y_pseudo = vis_Y.iloc[orig_vis_size:]
+
+            inv_X_eval = pd.concat([inv_X, vis_X_pseudo], ignore_index=True)
+            inv_Y_eval = pd.concat([inv_Y, vis_Y_pseudo], ignore_index=True)
+
+            f1 = _compute_round_f1(vis_X_orig, vis_Y_orig, inv_X_eval, inv_Y_eval, features, config)
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
@@ -551,6 +579,9 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
     inv_X_proc = preprocess_features(inv_X)
     f1_history = []
     risk_history = []
+
+    # Track original visible samples (before adding pseudo-labels)
+    orig_vis_size = len(vis_X)
 
     logger.info(f"  [Self-Training: Geometric] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -600,7 +631,18 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
         if config.report_each_round_f1 and inv_Y is not None:
             inv_Y = inv_Y.drop(inv_Y.index[selected])
 
-            f1 = _compute_round_f1(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            # Use only original visible samples (exclude pseudo-labeled samples)
+            vis_X_orig = vis_X.iloc[:orig_vis_size]
+            vis_Y_orig = vis_Y.iloc[:orig_vis_size]
+
+            # Add pseudo-labeled samples back to invisible set for evaluation
+            vis_X_pseudo = vis_X.iloc[orig_vis_size:]
+            vis_Y_pseudo = vis_Y.iloc[orig_vis_size:]
+
+            inv_X_eval = pd.concat([inv_X, vis_X_pseudo], ignore_index=True)
+            inv_Y_eval = pd.concat([inv_Y, vis_Y_pseudo], ignore_index=True)
+
+            f1 = _compute_round_f1(vis_X_orig, vis_Y_orig, inv_X_eval, inv_Y_eval, features, config)
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
@@ -928,6 +970,8 @@ Available methods:
 
     # Grid search
     parser.add_argument('--grid-search', action='store_true', help='Run grid search to find best parameters for all workloads')
+    parser.add_argument('--optimized-grid', type=str, metavar='WORKLOAD', help='Run optimized grid search with F1/risk tracing (format: WORKLOAD:GRID_TYPE, e.g., medical.Q1:quick)')
+    parser.add_argument('--grid-output', type=str, metavar='FILE', help='Output file for grid search results (JSON format)')
     parser.add_argument('--n-jobs', type=int, default=-1, help='Number of parallel jobs for grid search (default: -1 for all cores, use 1 for sequential)')
 
     return parser.parse_args()
@@ -1119,6 +1163,332 @@ def grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[A
     }
 
 
+def optimized_grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[Any]],
+                           methods_list: List[List[str]], metric: str = 'f1',
+                           n_jobs: int = -1, output_file: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Optimized grid search that uses n_rounds as upper bound and analyzes F1 traces.
+
+    Strategy:
+    1. Run all parameter combinations with report_each_round_f1=True
+    2. For each method, find best config (params + best_n_round from F1 trace)
+    3. Re-run best configs with report_each_round_risk=True
+    4. Export results to summary file
+
+    Args:
+        workload_name: Name of the workload (e.g., 'medical.Q1')
+        data_path: Path to the data file
+        param_grid: Dictionary of parameters to search (n_rounds should have single value as UB)
+            {
+                'geo_k_neighbors': [5, 10, 15],
+                'geo_initial_weight': [0.3, 0.6, 0.8],
+                'geo_decision_boundary': [0.4, 0.5, 0.6],
+                'max_samples_per_round': [10, 20, 30],
+                'n_rounds': [10]  # Single value = upper bound
+            }
+        methods_list: List of method combinations to test [['FS', 'ST_Conf'], ['ST_ConfGeo'], ...]
+        metric: Metric to optimize ('f1', 'precision', 'recall')
+        n_jobs: Number of parallel jobs
+        output_file: Path to save results summary (optional)
+
+    Returns:
+        Dictionary with best configs, F1 traces, and risk traces for each method
+    """
+    from itertools import product
+    from datetime import datetime
+    from tqdm import tqdm
+    from joblib import Parallel, delayed
+    import json
+
+    logger.info(f"\n{'='*80}")
+    logger.info(f"OPTIMIZED GRID SEARCH: {workload_name}")
+    logger.info(f"{'='*80}")
+    logger.info(f"Methods to test: {['+'.join(m) for m in methods_list]}")
+    logger.info(f"Parameters to search: {list(param_grid.keys())}")
+    logger.info(f"Optimizing: {metric}")
+    total_combos = np.prod([len(v) for v in param_grid.values()]) * len(methods_list)
+    logger.info(f"Total combinations: {total_combos}")
+    logger.info(f"Parallel jobs: {n_jobs if n_jobs > 0 else 'All available cores'}")
+    logger.info(f"{'='*80}\n")
+
+    # Load and split data
+    df = pd.read_csv(data_path)
+    Y, X = df['label'], df.drop(columns=['label', 'patient_id'])
+
+    # Use fixed seed for reproducibility
+    np.random.seed(42)
+    vis_idx = X.sample(n=50).index
+    inv_idx = X.index.difference(vis_idx)
+
+    vis_X, inv_X = X.loc[vis_idx].reset_index(drop=True), X.loc[inv_idx].reset_index(drop=True)
+    vis_Y, inv_Y = Y.loc[vis_idx].reset_index(drop=True), Y.loc[inv_idx].reset_index(drop=True)
+
+    # Get baseline F1
+    baseline_result = run_classification(
+        vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
+        Config(data_path=data_path, visible_samples=50, random_seed=42),
+        methods=[]
+    )
+    baseline_f1 = baseline_result['metrics']['f1']
+    logger.info(f"Baseline F1: {baseline_f1:.4f}\n")
+
+    # Generate all parameter combinations
+    param_names = list(param_grid.keys())
+    param_values = list(param_grid.values())
+    all_param_combinations = list(product(*param_values))
+
+    # Create all tasks: (method, params) combinations
+    all_tasks = []
+    for method in methods_list:
+        for params in all_param_combinations:
+            all_tasks.append((method, params))
+
+    # Phase 1: Grid search with F1 tracing
+    def evaluate_with_f1_tracing(task_info):
+        method, params = task_info
+        try:
+            # Create config with report_each_round_f1=True
+            config = Config(
+                data_path=data_path,
+                visible_samples=50,
+                random_seed=42,
+                report_each_round_f1=True,
+                **{param_names[i]: params[i] for i in range(len(param_names))}
+            )
+
+            # Run experiment
+            result = run_classification(
+                vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
+                config, methods=method
+            )
+
+            f1_history = result.get('f1_history', [])
+            assert f1_history, f"No F1 history for method {'+'.join(method)} with params {params}"
+
+            # Find best round
+            best_round_idx = int(np.argmax(f1_history))  # 0-indexed
+            best_f1 = f1_history[best_round_idx]
+            best_n_rounds = best_round_idx + 1  # Convert to 1-indexed
+
+            return {
+                'method': method,
+                'method_name': '+'.join(method),
+                'params': {param_names[i]: params[i] for i in range(len(param_names))},
+                'f1_history': f1_history,
+                'best_f1': best_f1,
+                'best_n_rounds': best_n_rounds,
+                'final_f1': result['metrics']['f1'],
+                'precision': result['metrics']['precision'],
+                'recall': result['metrics']['recall'],
+                'train_size': result['train_size']
+            }
+        except Exception as e:
+            logger.warning(f"Task failed for method {'+'.join(method)} with params {params}: {e}")
+            return None
+
+    # Run Phase 1
+    logger.info(f"Phase 1: Testing {len(all_tasks)} combinations with F1 tracing...\n")
+
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(evaluate_with_f1_tracing)(task)
+        for task in tqdm(all_tasks, desc="Phase 1: F1 Grid Search", unit="task")
+    )
+
+    # Filter out failed results
+    phase1_results = [r for r in results if r is not None]
+
+    # Find best config for each method
+    method_best_configs = {}
+    for method in methods_list:
+        method_name = '+'.join(method)
+        method_results = [r for r in phase1_results if r['method_name'] == method_name]
+
+        if not method_results:
+            logger.warning(f"No successful results for method {method_name}")
+            continue
+
+        # Find result with highest best_f1
+        best = max(method_results, key=lambda x: x['best_f1'])
+        method_best_configs[method_name] = best
+
+        logger.info(f"\nBest config for {method_name}:")
+        logger.info(f"  Best F1: {best['best_f1']:.4f} at round {best['best_n_rounds']}")
+        logger.info(f"  Parameters:")
+        for k, v in best['params'].items():
+            logger.info(f"    {k}: {v}")
+
+    # Phase 2: Risk evaluation for best configs
+    logger.info(f"\n{'='*80}")
+    logger.info(f"Phase 2: Computing risk traces for best configurations...\n")
+
+    risk_results = {}
+
+    for method_name, best_config in method_best_configs.items():
+        try:
+            # Create config with best_n_rounds and report_each_round_risk=True
+            config_params = best_config['params'].copy()
+            config_params['n_rounds'] = best_config['best_n_rounds']
+            config_params['report_each_round_risk'] = True
+
+            config = Config(
+                data_path=data_path,
+                visible_samples=50,
+                random_seed=42,
+                **config_params
+            )
+
+            # Run experiment
+            result = run_classification(
+                vis_X.copy(), vis_Y.copy(), inv_X.copy(), inv_Y.copy(),
+                config, methods=best_config['method']
+            )
+
+            risk_history = result.get('risk_history', [])
+
+            risk_results[method_name] = {
+                'best_config': best_config,
+                'risk_history': risk_history,
+                'final_metrics': {
+                    'f1': result['metrics']['f1'],
+                    'precision': result['metrics']['precision'],
+                    'recall': result['metrics']['recall']
+                }
+            }
+
+            logger.info(f"\nRisk trace for {method_name}:")
+            for round_idx, risk in enumerate(risk_history):
+                logger.info(f"  Round {round_idx + 1}: {risk:.4f}")
+
+        except Exception as e:
+            logger.error(f"Risk computation failed for {method_name}: {e}")
+
+    # Prepare summary
+    summary = {
+        'workload': workload_name,
+        'timestamp': datetime.now().isoformat(),
+        'baseline_f1': baseline_f1,
+        'methods': {}
+    }
+
+    for method_name, risk_result in risk_results.items():
+        best_config = risk_result['best_config']
+        summary['methods'][method_name] = {
+            'best_parameters': best_config['params'],
+            'best_n_rounds': best_config['best_n_rounds'],
+            'best_f1': best_config['best_f1'],
+            'f1_trace': best_config['f1_history'],
+            'risk_trace': risk_result['risk_history'],
+            'final_metrics': risk_result['final_metrics']
+        }
+
+    # Print final summary
+    logger.info(f"\n{'='*80}")
+    logger.info(f"OPTIMIZED GRID SEARCH COMPLETE: {workload_name}")
+    logger.info(f"{'='*80}")
+
+    for method_name, method_data in summary['methods'].items():
+        logger.info(f"\n{method_name}:")
+        logger.info(f"  Best F1: {method_data['best_f1']:.4f} (round {method_data['best_n_rounds']})")
+        logger.info(f"  Improvement: {(method_data['best_f1'] - baseline_f1) / baseline_f1 * 100:+.2f}%")
+        logger.info(f"  Best parameters:")
+        for k, v in method_data['best_parameters'].items():
+            if k != 'n_rounds':  # Don't print n_rounds in best params
+                logger.info(f"    {k}: {v}")
+        logger.info(f"  Final F1: {method_data['final_metrics']['f1']:.4f}")
+        logger.info(f"  Final P: {method_data['final_metrics']['precision']:.4f}")
+        logger.info(f"  Final R: {method_data['final_metrics']['recall']:.4f}")
+
+    logger.info(f"\n{'='*80}\n")
+
+    # Save to file if specified
+    if output_file:
+        with open(output_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+        logger.info(f"Results saved to: {output_file}\n")
+
+    return summary
+
+
+def run_optimized_grid_search(workload_name: str, data_path: str,
+                               grid_type: str = 'comprehensive', n_jobs: int = -1,
+                               output_file: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Convenience function to run optimized grid search with predefined parameter grids.
+
+    Args:
+        workload_name: Name of the workload (e.g., 'medical.Q1')
+        data_path: Path to the data file
+        grid_type: Type of parameter grid ('quick', 'comprehensive', 'severe_imbalance', etc.)
+        n_jobs: Number of parallel jobs
+        output_file: Path to save results (optional)
+
+    Returns:
+        Summary dictionary with best configs and traces
+    """
+    # Define parameter grids
+    param_grids = {
+        'quick': {
+            'geo_k_neighbors': [5, 10],
+            'geo_initial_weight': [0.5, 0.8],
+            'geo_decision_boundary': [0.4, 0.5],
+            'max_samples_per_round': [10, 20],
+            'n_rounds': [10]  # Upper bound
+        },
+        'comprehensive': {
+            'geo_k_neighbors': [5, 10, 15, 20],
+            'geo_initial_weight': [0.1, 0.3, 0.5, 0.7, 0.9],
+            'geo_decision_boundary': [0.1, 0.3, 0.5, 0.7, 0.9],
+            'max_samples_per_round': [10, 20, 30, 40, 50],
+            'n_rounds': [20]  # Upper bound
+        },
+        'severe_imbalance': {
+            'geo_k_neighbors': [5, 10, 15],
+            'geo_initial_weight': [0.5, 0.7, 0.9],
+            'geo_decision_boundary': [0.3, 0.4, 0.5],
+            'max_samples_per_round': [10, 15, 20],
+            'n_rounds': [10]  # Upper bound
+        },
+        'balanced': {
+            'geo_k_neighbors': [5, 10, 15],
+            'geo_initial_weight': [0.3, 0.5, 0.7],
+            'geo_decision_boundary': [0.4, 0.5, 0.6],
+            'max_samples_per_round': [15, 25, 35],
+            'n_rounds': [10]  # Upper bound
+        },
+        'high_baseline': {
+            'geo_k_neighbors': [5, 10],
+            'geo_initial_weight': [0.3, 0.5],
+            'geo_decision_boundary': [0.5, 0.6],
+            'max_samples_per_round': [20, 30, 40],
+            'n_rounds': [10]  # Upper bound
+        }
+    }
+
+    # Define methods to test
+    methods_list = [
+        ['ST_Conf'],
+        ['ST_Geo'],
+        ['ST_ConfGeo'],
+        ['FS', 'ST_Conf'],
+        ['FS', 'ST_Geo'],
+        ['FS', 'ST_ConfGeo'],
+    ]
+
+    if grid_type not in param_grids:
+        raise ValueError(f"Unknown grid_type: {grid_type}. Choose from: {list(param_grids.keys())}")
+
+    param_grid = param_grids[grid_type]
+
+    return optimized_grid_search(
+        workload_name=workload_name,
+        data_path=data_path,
+        param_grid=param_grid,
+        methods_list=methods_list,
+        n_jobs=n_jobs,
+        output_file=output_file
+    )
+
+
 def grid_search_workloads(n_jobs: int = -1):
     """
     Run grid search on multiple workloads with predefined parameter grids.
@@ -1304,18 +1674,17 @@ def run_predefined_workloads():
             visible_samples=50,
             random_seed=42,
             geo_k_neighbors=10,
-            geo_initial_weight=0.7,
-            geo_decision_boundary=0.3,
-            max_samples_per_round=10,
-            n_rounds=4,
+            geo_initial_weight=0.5,
+            geo_decision_boundary=0.4,
+            max_samples_per_round=20,
+            n_rounds=10,
             report_each_round_f1=True,
-            report_each_round_risk=True,
             methods=[
                 # [],
-                # ['ST_Conf'],
+                # ['ST_Geo'],
                 # ['ST_ConfGeo'],
-                # ['FS', 'ST_Conf'],
-                ['FS', 'ST_ConfGeo']
+                ['FS', 'ST_Geo'],
+                # ['FS', 'ST_ConfGeo']
             ]
         )),
         # ("medical_Q3", Config(
@@ -1431,8 +1800,36 @@ if __name__ == "__main__":
     # Check if any command-line arguments are provided (excluding script name)
     args = parse_args()
 
+    # Check for --optimized-grid flag
+    if args.optimized_grid:
+        # Parse workload:grid_type format
+        parts = args.optimized_grid.split(':')
+        workload_name = parts[0]
+        grid_type = parts[1] if len(parts) > 1 else 'quick'
+
+        # Map workload name to data path
+        workload_paths = {
+            'medical.Q1': 'data/medical/.ckpt/NOPXY__Q1_full.csv',
+            'medical.Q3': 'data/medical/.ckpt/NOPXY__Q3_full.csv',
+            'medical.Q8': 'data/medical/.ckpt/NOPXY__Q8_full.csv',
+        }
+
+        if workload_name not in workload_paths:
+            logger.error(f"Unknown workload: {workload_name}. Choose from: {list(workload_paths.keys())}")
+            sys.exit(1)
+
+        data_path = workload_paths[workload_name]
+        logger.info(f"Running optimized grid search for {workload_name} with grid type '{grid_type}'...\n")
+
+        run_optimized_grid_search(
+            workload_name=workload_name,
+            data_path=data_path,
+            grid_type=grid_type,
+            n_jobs=args.n_jobs,
+            output_file=args.grid_output
+        )
     # Check for --grid-search flag
-    if args.grid_search:
+    elif args.grid_search:
         logger.info("Running grid search on all workloads...\n")
         grid_search_workloads(n_jobs=args.n_jobs)
     elif len(sys.argv) == 1 or (len(sys.argv) > 1 and '--workload' not in sys.argv):
