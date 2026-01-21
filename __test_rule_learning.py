@@ -245,19 +245,37 @@ def _compute_round_f1(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame
     return float(f1_score(all_Y_true, all_Y_pred))
 
 
+def _compute_round_risk(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                        inv_Y: Optional[pd.Series], features: List[str], config: Config) -> float:
+    """Compute risk value for current round.
+
+    TODO: Implement actual risk computation logic.
+    This is a placeholder that returns a dummy risk value.
+    """
+    if inv_Y is None:
+        raise ValueError("inv_Y must be provided to compute risk value")
+
+    # TODO: Implement actual risk computation
+    # Placeholder: returns a dummy risk value based on round number
+    # You should replace this with your actual risk computation logic
+    return 0.5  # Placeholder risk value
+
+
 def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
                              features: List[str], config: Config, inv_Y: Optional[pd.Series] = None) -> tuple:
     """Apply self-training to augment training data using confidence scores.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history, risk_history) where inv_X maintains its original index.
                f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
+               risk_history is a list of risk values per round (empty if report_each_round_risk is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
     rng = np.random.default_rng(config.random_seed)
     f1_history = []
+    risk_history = []
 
     logger.info(f"  [Self-Training] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -295,11 +313,17 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
+        # Compute risk value for this round if enabled
+        if config.report_each_round_risk and inv_Y is not None:
+            risk = _compute_round_risk(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            risk_history.append(risk)
+            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f}")
+
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X, f1_history
+    return vis_X, vis_Y, inv_X, f1_history, risk_history
 
 
 def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
@@ -310,13 +334,15 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
     using k-NN distances weighted by feature importance.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history, risk_history) where inv_X maintains its original index.
                f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
+               risk_history is a list of risk values per round (empty if report_each_round_risk is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
     f1_history = []
+    risk_history = []
 
     logger.info(f"  [Self-Training: Geo-Only] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -352,11 +378,17 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
+        # Compute risk value for this round if enabled
+        if config.report_each_round_risk and inv_Y is not None:
+            risk = _compute_round_risk(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            risk_history.append(risk)
+            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f}")
+
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X, f1_history
+    return vis_X, vis_Y, inv_X, f1_history, risk_history
 
 
 def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
@@ -364,13 +396,15 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
     """Apply self-training combining confidence scores and geometric k-NN.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history, risk_history) where inv_X maintains its original index.
                f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
+               risk_history is a list of risk values per round (empty if report_each_round_risk is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
     f1_history = []
+    risk_history = []
 
     logger.info(f"  [Self-Training: Geometric] Pos={vis_Y.sum()}, Neg={len(vis_Y) - vis_Y.sum()}")
 
@@ -418,11 +452,17 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
+        # Compute risk value for this round if enabled
+        if config.report_each_round_risk and inv_Y is not None:
+            risk = _compute_round_risk(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            risk_history.append(risk)
+            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f}")
+
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
 
-    return vis_X, vis_Y, inv_X, f1_history
+    return vis_X, vis_Y, inv_X, f1_history, risk_history
 
 
 def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
@@ -430,8 +470,9 @@ def apply_self_training(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFra
     """Dispatch to appropriate self-training method based on config.
 
     Returns:
-        tuple: (vis_X, vis_Y, inv_X, f1_history) where inv_X maintains its original index.
+        tuple: (vis_X, vis_Y, inv_X, f1_history, risk_history) where inv_X maintains its original index.
                f1_history is a list of F1 scores per round (empty if report_each_round_f1 is False).
+               risk_history is a list of risk values per round (empty if report_each_round_risk is False).
                The caller can use inv_X.index to sync inv_Y.
     """
     if config.self_training_mode == 'Conf':
@@ -508,6 +549,7 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
 
     # Step 2: Self-training (if enabled)
     f1_history = []
+    risk_history = []
     if any(m.startswith('ST') for m in methods):
         # Determine self-training mode from methods list
         st_mode = config.self_training_mode
@@ -520,7 +562,7 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
         original_mode = config.self_training_mode
         config.self_training_mode = st_mode
 
-        vis_X, vis_Y, inv_X, f1_history = apply_self_training(
+        vis_X, vis_Y, inv_X, f1_history, risk_history = apply_self_training(
             vis_X, vis_Y, inv_X, features, config, inv_Y
         )
 
@@ -553,7 +595,8 @@ def run_classification(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFram
         'features': features,
         'time': elapsed,
         'train_size': final_train_size,
-        'f1_history': f1_history
+        'f1_history': f1_history,
+        'risk_history': risk_history
     }
 
 
