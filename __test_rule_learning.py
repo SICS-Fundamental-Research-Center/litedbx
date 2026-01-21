@@ -71,9 +71,159 @@ def apply_feature_selection(vis_X: pd.DataFrame, vis_Y: pd.Series, config: Confi
     return features
 
 
+# =============================================================================
+# Helper functions for self-training
+# =============================================================================
+def _compute_feature_weights(vis_X_proc: pd.DataFrame, features: List[str],
+                             vis_Y: pd.Series, config: Config) -> np.ndarray:
+    """Compute feature importance weights."""
+    clf_temp = train_classifier(vis_X_proc[features], vis_Y, config)
+    feature_importances = clf_temp.feature_importances_
+
+    feature_weights = np.ones(len(features))
+    for i, feat in enumerate(features):
+        if feat in vis_X_proc.columns:
+            idx = list(vis_X_proc.columns).index(feat)
+            if idx < len(feature_importances):
+                feature_weights[i] = np.sqrt(feature_importances[idx])
+    return feature_weights
+
+
+def _compute_knn_distances(vis_X_weighted: np.ndarray, inv_X_weighted: np.ndarray,
+                           vis_Y: pd.Series, k_neighbors: int) -> tuple:
+    """Compute k-NN distances to positive and negative classes."""
+    from sklearn.neighbors import NearestNeighbors
+
+    pos_idx = vis_Y[vis_Y == 1].index
+    neg_idx = vis_Y[vis_Y == 0].index
+
+    if len(pos_idx) == 0 or len(neg_idx) == 0:
+        return None, None
+
+    pos_samples = vis_X_weighted[pos_idx]
+    neg_samples = vis_X_weighted[neg_idx]
+
+    n_neighbors = min(k_neighbors, len(pos_idx), len(neg_idx))
+    knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
+    knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
+
+    dist_pos, _ = knn_pos.kneighbors(inv_X_weighted)
+    dist_neg, _ = knn_neg.kneighbors(inv_X_weighted)
+
+    return dist_pos, dist_neg
+
+
+def _distances_to_geo_prob(dist_pos: np.ndarray, dist_neg: np.ndarray) -> np.ndarray:
+    """Convert k-NN distances to geometric probabilities."""
+    epsilon = 1e-6
+    geo_score_pos = 1.0 / (dist_pos.mean(axis=1) + epsilon)
+    geo_score_neg = 1.0 / (dist_neg.mean(axis=1) + epsilon)
+    total_score = geo_score_pos + geo_score_neg
+    return geo_score_pos / total_score
+
+
+def _prepare_weighted_features(vis_X_proc: pd.DataFrame, inv_X_proc: pd.DataFrame,
+                                features: List[str], vis_Y: pd.Series, config: Config) -> tuple:
+    """Prepare normalized and feature-weighted datasets for geometric methods."""
+    from sklearn.preprocessing import StandardScaler
+
+    feature_weights = _compute_feature_weights(vis_X_proc, features, vis_Y, config)
+
+    scaler = StandardScaler()
+    vis_X_norm = scaler.fit_transform(vis_X_proc[features])
+    inv_X_norm = scaler.transform(inv_X_proc[features])
+
+    vis_X_weighted = vis_X_norm * feature_weights
+    inv_X_weighted = inv_X_norm * feature_weights
+
+    return vis_X_weighted, inv_X_weighted
+
+
+def _compute_geometric_predictions(vis_X_proc: pd.DataFrame, inv_X_proc: pd.DataFrame,
+                                    features: List[str], vis_Y: pd.Series, config: Config) -> tuple:
+    """Compute predictions and probabilities using geometric k-NN method."""
+    vis_X_weighted, inv_X_weighted = _prepare_weighted_features(vis_X_proc, inv_X_proc, features, vis_Y, config)
+
+    dist_pos, dist_neg = _compute_knn_distances(vis_X_weighted, inv_X_weighted, vis_Y, config.geo_k_neighbors)
+    if dist_pos is None or dist_neg is None:
+        return None, None, None
+
+    geo_prob_pos = _distances_to_geo_prob(dist_pos, dist_neg)
+    predictions = (geo_prob_pos >= config.geo_decision_boundary).astype(int)
+    confidence = np.abs(geo_prob_pos - config.geo_decision_boundary)
+
+    return predictions, geo_prob_pos, confidence
+
+
+def _select_samples_confidence(predictions: np.ndarray, conf_mask_pos: np.ndarray,
+                                conf_mask_neg: np.ndarray, high_conf_mask: np.ndarray,
+                                config: Config, rng: np.random.Generator) -> np.ndarray:
+    """Select samples using confidence thresholding with random selection."""
+    if config.balance_classes:
+        pos_idx = np.where(conf_mask_pos)[0]
+        neg_idx = np.where(conf_mask_neg)[0]
+
+        if len(pos_idx) == 0 or len(neg_idx) == 0:
+            n = min(high_conf_mask.sum(), config.max_samples_per_round)
+            return rng.choice(np.where(high_conf_mask)[0], n, replace=False)
+        else:
+            n_per_class = min(len(pos_idx), len(neg_idx), config.max_samples_per_round // 2)
+            if n_per_class == 0:
+                n_per_class = min(len(pos_idx), len(neg_idx))
+            selected_pos = rng.choice(pos_idx, n_per_class, replace=False)
+            selected_neg = rng.choice(neg_idx, n_per_class, replace=False)
+            return np.concatenate([selected_pos, selected_neg])
+    else:
+        n = min(high_conf_mask.sum(), config.max_samples_per_round)
+        return rng.choice(np.where(high_conf_mask)[0], n, replace=False)
+
+
+def _select_samples_balanced(predictions: np.ndarray, conf_scores: np.ndarray,
+                             config: Config) -> np.ndarray:
+    """Select samples with optional class balancing based on confidence scores."""
+    pos_pred_idx = np.where(predictions == 1)[0]
+    neg_pred_idx = np.where(predictions == 0)[0]
+
+    if config.balance_classes:
+        if len(pos_pred_idx) == 0 or len(neg_pred_idx) == 0:
+            available_idx = pos_pred_idx if len(pos_pred_idx) > 0 else neg_pred_idx
+            n = min(len(available_idx), config.max_samples_per_round)
+            if n == 0:
+                return np.array([])
+            return available_idx[np.argsort(conf_scores[available_idx])[-n:]]
+        else:
+            n_per_class = min(len(pos_pred_idx), len(neg_pred_idx), config.max_samples_per_round // 2)
+            if n_per_class == 0:
+                n_per_class = min(len(pos_pred_idx), len(neg_pred_idx))
+            selected_pos = pos_pred_idx[np.argsort(conf_scores[pos_pred_idx])[-n_per_class:]]
+            selected_neg = neg_pred_idx[np.argsort(conf_scores[neg_pred_idx])[-n_per_class:]]
+            return np.concatenate([selected_pos, selected_neg])
+    else:
+        n = min(len(predictions), config.max_samples_per_round)
+        return np.argsort(conf_scores)[-n:]
+
+
+def _update_datasets(vis_X: pd.DataFrame, vis_Y: pd.Series, vis_X_proc: pd.DataFrame,
+                     inv_X: pd.DataFrame, inv_X_proc: pd.DataFrame,
+                     selected: np.ndarray, predictions: np.ndarray,
+                     log_labels: bool = False) -> tuple:
+    """Update datasets by moving selected samples from invisible to visible."""
+    vis_X_new = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
+    vis_Y_new = pd.concat([vis_Y, pd.Series(predictions[selected], dtype=vis_Y.dtype)], ignore_index=True).astype(vis_Y.dtype)
+    vis_X_proc_new = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
+    inv_X_new = inv_X.drop(inv_X.index[selected])
+    inv_X_proc_new = inv_X_proc.drop(inv_X_proc.index[selected])
+
+    if log_labels:
+        new_labels = pd.Series(predictions[selected], dtype=vis_Y.dtype)
+        logger.info(f"  Adding {len(new_labels)} new labels: {new_labels.value_counts().to_dict()}")
+
+    return vis_X_new, vis_Y_new, vis_X_proc_new, inv_X_new, inv_X_proc_new
+
+
 def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                                    features: List[str], config: Config) -> tuple:
-    """Apply self-training to augment training data.
+                             features: List[str], config: Config) -> tuple:
+    """Apply self-training to augment training data using confidence scores.
 
     Returns:
         tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
@@ -92,6 +242,7 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
         probas = clf.predict_proba(inv_X_proc[features])[:, 1]
         predictions = clf.predict(inv_X_proc[features])
 
+        # Apply confidence threshold and select samples
         conf_mask_pos = (probas >= config.confidence_threshold)
         conf_mask_neg = (probas <= (1 - config.confidence_threshold))
         high_conf_mask = conf_mask_pos | conf_mask_neg
@@ -100,31 +251,13 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
             logger.info("  No samples above threshold. Stopping.")
             break
 
-        # Select samples
-        if config.balance_classes:
-            pos_idx = np.where(conf_mask_pos)[0]
-            neg_idx = np.where(conf_mask_neg)[0]
+        selected = _select_samples_confidence(predictions, conf_mask_pos, conf_mask_neg,
+                                               high_conf_mask, config, rng)
 
-            if len(pos_idx) == 0 or len(neg_idx) == 0:
-                n = min(high_conf_mask.sum(), config.max_samples_per_round)
-                selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
-            else:
-                n_per_class = min(len(pos_idx), len(neg_idx), config.max_samples_per_round // 2)
-                if n_per_class == 0:
-                    n_per_class = min(len(pos_idx), len(neg_idx))
-                selected_pos = rng.choice(pos_idx, n_per_class, replace=False)
-                selected_neg = rng.choice(neg_idx, n_per_class, replace=False)
-                selected = np.concatenate([selected_pos, selected_neg])
-        else:
-            n = min(high_conf_mask.sum(), config.max_samples_per_round)
-            selected = rng.choice(np.where(high_conf_mask)[0], n, replace=False)
-
-        # Update datasets 
-        vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
-        vis_Y = pd.concat([vis_Y, pd.Series(predictions[selected])], ignore_index=True)
-        vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
-        inv_X = inv_X.drop(inv_X.index[selected])
-        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected])
+        # Update datasets
+        vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc = _update_datasets(
+            vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc, selected, predictions
+        )
 
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
@@ -134,8 +267,8 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
 
 
 def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                          features: List[str], config: Config) -> tuple:
-    """Apply geometric self-training using ONLY clustering (k-NN distances), no confidence scores.
+                            features: List[str], config: Config) -> tuple:
+    """Apply geometric self-training using ONLY k-NN distances, no confidence scores.
 
     This method selects samples based purely on geometric proximity to labeled samples
     using k-NN distances weighted by feature importance.
@@ -144,9 +277,6 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
         tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
                The caller can use inv_X.index to sync inv_Y.
     """
-    from sklearn.neighbors import NearestNeighbors
-    from sklearn.preprocessing import StandardScaler
-
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
 
@@ -155,101 +285,26 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
     for round_idx in range(config.n_rounds):
         logger.info(f"  Round {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
 
-        # Get feature importances from current classifier
-        clf_temp = train_classifier(vis_X_proc[features], vis_Y, config)
-        feature_importances = clf_temp.feature_importances_
+        # Compute geometric predictions
+        predictions, _, confidence = _compute_geometric_predictions(
+            vis_X_proc, inv_X_proc, features, vis_Y, config
+        )
 
-        # Create feature weights based on importance
-        feature_weights = np.ones(len(features))
-        for i, feat in enumerate(features):
-            if feat in vis_X_proc.columns:
-                idx = list(vis_X_proc.columns).index(feat)
-                if idx < len(feature_importances):
-                    feature_weights[i] = np.sqrt(feature_importances[idx])
-
-        # Normalize features
-        scaler = StandardScaler()
-        vis_X_norm = scaler.fit_transform(vis_X_proc[features])
-        inv_X_norm = scaler.transform(inv_X_proc[features])
-
-        # Apply feature importance weights
-        vis_X_weighted = vis_X_norm * feature_weights
-        inv_X_weighted = inv_X_norm * feature_weights
-
-        # Separate visible samples by class
-        pos_idx = vis_Y[vis_Y == 1].index
-        neg_idx = vis_Y[vis_Y == 0].index
-
-        if len(pos_idx) == 0 or len(neg_idx) == 0:
+        if predictions is None:
             logger.info("  Not enough samples of both classes. Stopping.")
             break
 
-        # Compute k-NN distances to each class
-        pos_samples = vis_X_weighted[pos_idx]
-        neg_samples = vis_X_weighted[neg_idx]
+        # Select samples with highest geometric confidence
+        selected = _select_samples_balanced(predictions, confidence, config)
 
-        n_neighbors = min(config.geo_k_neighbors, len(pos_idx), len(neg_idx))
-        knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
-        knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
+        if len(selected) == 0:
+            logger.info("  No samples available. Stopping.")
+            break
 
-        dist_pos, _ = knn_pos.kneighbors(inv_X_weighted)
-        dist_neg, _ = knn_neg.kneighbors(inv_X_weighted)
-
-        # Calculate geometric scores: inverse of average distance
-        # Closer to positive class → higher positive score
-        # Closer to negative class → higher negative score
-        epsilon = 1e-6
-        geo_score_pos = 1.0 / (dist_pos.mean(axis=1) + epsilon)
-        geo_score_neg = 1.0 / (dist_neg.mean(axis=1) + epsilon)
-
-        # Convert scores to probabilities using softmax-like normalization
-        total_score = geo_score_pos + geo_score_neg
-        geo_prob_pos = geo_score_pos / total_score
-
-        # Make predictions based PURELY on geometric proximity
-        predictions = (geo_prob_pos >= config.geo_decision_boundary).astype(int)
-
-        # Select samples with HIGHEST geometric confidence
-        # Geometric confidence = distance from decision boundary
-        geo_confidence = np.abs(geo_prob_pos - config.geo_decision_boundary)
-
-        if config.balance_classes:
-            # Separate by predicted class
-            pos_pred_idx = np.where(predictions == 1)[0]
-            neg_pred_idx = np.where(predictions == 0)[0]
-
-            if len(pos_pred_idx) == 0 or len(neg_pred_idx) == 0:
-                # If only one class predicted, select from that class
-                available_idx = pos_pred_idx if len(pos_pred_idx) > 0 else neg_pred_idx
-                n = min(len(available_idx), config.max_samples_per_round)
-                if n == 0:
-                    logger.info("  No samples available. Stopping.")
-                    break
-                selected = available_idx[np.argsort(geo_confidence[available_idx])[-n:]]
-                logger.info(f"  Selected: {n} samples (one class only)")
-            else:
-                # Balance classes: select equal number from each
-                n_per_class = min(len(pos_pred_idx), len(neg_pred_idx), config.max_samples_per_round // 2)
-                if n_per_class == 0:
-                    n_per_class = min(len(pos_pred_idx), len(neg_pred_idx))
-                # Select samples with HIGHEST geometric confidence within each class
-                selected_pos = pos_pred_idx[np.argsort(geo_confidence[pos_pred_idx])[-n_per_class:]]
-                selected_neg = neg_pred_idx[np.argsort(geo_confidence[neg_pred_idx])[-n_per_class:]]
-                selected = np.concatenate([selected_pos, selected_neg])
-                logger.info(f"  Selected: {len(selected_pos)} pos + {len(selected_neg)} neg")
-        else:
-            n = min(len(inv_X), config.max_samples_per_round)
-            selected = np.argsort(geo_confidence)[-n:]
-            logger.info(f"  Selected: {n} samples")
-
-        # Update datasets (do NOT reset index for inv_X/inv_X_proc)
-        vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
-        new_labels = pd.Series(predictions[selected], dtype=vis_Y.dtype)
-        logger.info(f"  Adding {len(new_labels)} new labels: {new_labels.value_counts().to_dict()}")
-        vis_Y = pd.concat([vis_Y, new_labels], ignore_index=True).astype(vis_Y.dtype)
-        vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
-        inv_X = inv_X.drop(inv_X.index[selected])
-        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected])
+        # Update datasets
+        vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc = _update_datasets(
+            vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc, selected, predictions, log_labels=True
+        )
 
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
@@ -259,16 +314,13 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
 
 
 def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                                   features: List[str], config: Config) -> tuple:
-    """Apply geometric self-training using k-NN and feature importance weighting.
+                                 features: List[str], config: Config) -> tuple:
+    """Apply self-training combining confidence scores and geometric k-NN.
 
     Returns:
         tuple: (vis_X, vis_Y, inv_X) where inv_X maintains its original index.
                The caller can use inv_X.index to sync inv_Y.
     """
-    from sklearn.neighbors import NearestNeighbors
-    from sklearn.preprocessing import StandardScaler
-
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
 
@@ -277,111 +329,38 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
     for round_idx in range(config.n_rounds):
         logger.info(f"  Round {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
 
-        # Get feature importances from classifier
-        clf_temp = train_classifier(vis_X_proc[features], vis_Y, config)
-        feature_importances = clf_temp.feature_importances_
-
-        # Create feature mapping (handle case where features might be subset)
-        feature_weights = np.ones(len(features))
-        for i, feat in enumerate(features):
-            if feat in vis_X_proc.columns:
-                idx = list(vis_X_proc.columns).index(feat)
-                if idx < len(feature_importances):
-                    feature_weights[i] = np.sqrt(feature_importances[idx])
-
-        # Normalize features
-        scaler = StandardScaler()
-        vis_X_norm = scaler.fit_transform(vis_X_proc[features])
-        inv_X_norm = scaler.transform(inv_X_proc[features])
-
-        # Apply feature importance weights
-        vis_X_weighted = vis_X_norm * feature_weights
-        inv_X_weighted = inv_X_norm * feature_weights
-
-        # Train classifier for predictions
+        # Get classifier predictions
         clf = train_classifier(vis_X_proc[features], vis_Y, config)
         probas = clf.predict_proba(inv_X_proc[features])[:, 1]
 
-        # Separate visible samples by class
-        pos_idx = vis_Y[vis_Y == 1].index
-        neg_idx = vis_Y[vis_Y == 0].index
+        # Get geometric predictions
+        _, geo_prob_pos, _ = _compute_geometric_predictions(
+            vis_X_proc, inv_X_proc, features, vis_Y, config
+        )
 
-        if len(pos_idx) == 0 or len(neg_idx) == 0:
+        if geo_prob_pos is None:
             logger.info("  Not enough samples of both classes. Stopping.")
             break
 
-        # Compute nearest neighbors for geometric consistency
-        pos_samples = vis_X_weighted[pos_idx]
-        neg_samples = vis_X_weighted[neg_idx]
-
-        # Find k-nearest neighbors (k = min(config.geo_k_neighbors, minority class size))
-        n_neighbors = min(config.geo_k_neighbors, len(pos_idx), len(neg_idx))
-        knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
-        knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
-
-        dist_pos, _ = knn_pos.kneighbors(inv_X_weighted)
-        dist_neg, _ = knn_neg.kneighbors(inv_X_weighted)
-
-        # Compute geometric scores: inverse of average distance
-        epsilon = 1e-6
-        geo_score_pos = 1.0 / (dist_pos.mean(axis=1) + epsilon)
-        geo_score_neg = 1.0 / (dist_neg.mean(axis=1) + epsilon)
-
-        # Normalize scores
-        total_score = geo_score_pos + geo_score_neg
-        geo_prob_pos = geo_score_pos / total_score
-
         # Combine classifier probability with geometric probability
-        # Geometric weight decreases over rounds (more reliance on classifier as it improves)
         geo_weight = config.geo_initial_weight * (1 - round_idx / config.n_rounds)
         combined_prob = geo_weight * geo_prob_pos + (1 - geo_weight) * probas
 
         # Get predictions based on combined probability
         predictions = (combined_prob >= config.geo_decision_boundary).astype(int)
+        confidence = np.abs(combined_prob - config.geo_decision_boundary)
 
-        # Select samples with highest confidence (distance from decision boundary)
-        # For geometric method, we select top-k instead of using strict threshold
-        conf_scores = np.abs(combined_prob - config.geo_decision_boundary)
+        # Select samples with highest confidence
+        selected = _select_samples_balanced(predictions, confidence, config)
 
-        # TODO: Improve balancing logic
-        # TODO; HUMAN IN THE LOOP
-        if config.balance_classes:
-            # Separate by predicted class
-            pos_pred_idx = np.where(predictions == 1)[0]
-            neg_pred_idx = np.where(predictions == 0)[0]
-
-            if len(pos_pred_idx) == 0 or len(neg_pred_idx) == 0:
-                # If only one class predicted, select from that class
-                available_idx = pos_pred_idx if len(pos_pred_idx) > 0 else neg_pred_idx
-                n = min(len(available_idx), config.max_samples_per_round)
-                if n == 0:
-                    logger.info("  No samples available. Stopping.")
-                    break
-                selected = available_idx[np.argsort(conf_scores[available_idx])[-n:]]
-                logger.info(f"  Selected: {n} samples (one class only)")
-            else:
-                # Balance classes: select equal number from each
-                n_per_class = min(len(pos_pred_idx), len(neg_pred_idx), config.max_samples_per_round // 2)
-                if n_per_class == 0:
-                    n_per_class = min(len(pos_pred_idx), len(neg_pred_idx))
-                # Select samples with highest confidence within each class
-                selected_pos = pos_pred_idx[np.argsort(conf_scores[pos_pred_idx])[-n_per_class:]]
-                selected_neg = neg_pred_idx[np.argsort(conf_scores[neg_pred_idx])[-n_per_class:]]
-                selected = np.concatenate([selected_pos, selected_neg])
-                logger.info(f"  Selected: {len(selected_pos)} pos + {len(selected_neg)} neg")
-        else:
-            n = min(len(inv_X), config.max_samples_per_round)
-            selected = np.argsort(conf_scores)[-n:]
-            logger.info(f"  Selected: {n} samples")
+        if len(selected) == 0:
+            logger.info("  No samples available. Stopping.")
+            break
 
         # Update datasets
-        vis_X = pd.concat([vis_X, inv_X.iloc[selected]], ignore_index=True)
-        new_labels = pd.Series(predictions[selected], dtype=vis_Y.dtype)
-        logger.info(f"  Adding {len(new_labels)} new labels: {new_labels.value_counts().to_dict()}")
-        vis_Y = pd.concat([vis_Y, new_labels], ignore_index=True).astype(vis_Y.dtype)
-        vis_X_proc = pd.concat([vis_X_proc, inv_X_proc.iloc[selected]], ignore_index=True)
-        inv_X = inv_X.drop(inv_X.index[selected])
-        inv_X_proc = inv_X_proc.drop(inv_X_proc.index[selected])
+        vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc = _update_datasets(
+            vis_X, vis_Y, vis_X_proc, inv_X, inv_X_proc, selected, predictions, log_labels=True
+        )
 
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
