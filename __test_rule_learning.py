@@ -10,7 +10,7 @@ import logging
 import time
 import argparse
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 import sys
 
 # Setup logging
@@ -245,20 +245,165 @@ def _compute_round_f1(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame
     return float(f1_score(all_Y_true, all_Y_pred))
 
 
-def _compute_round_risk(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
-                        inv_Y: Optional[pd.Series], features: List[str], config: Config) -> float:
-    """Compute risk value for current round.
+def _compute_loss(pi: float, true_label: int, predicted_label: int) -> float:
+    """Compute loss for a single prediction.
 
-    TODO: Implement actual risk computation logic.
-    This is a placeholder that returns a dummy risk value.
+    Args:
+        pi: Proportion of positive samples in visible set
+        true_label: Actual label (0 or 1)
+        predicted_label: Predicted label (0 or 1)
+
+    Returns:
+        Loss value (0 if correct, otherwise weighted penalty)
+    """
+    if true_label == predicted_label:
+        return 0.0
+
+    max_pi = max(pi, 1 - pi)
+
+    if true_label == 1 and predicted_label == 0:
+        # False negative
+        return max_pi / pi if pi > 0 else float('inf')
+    else:
+        # False positive (true_label == 0, predicted_label == 1)
+        return max_pi / (1 - pi) if pi < 1 else float('inf')
+
+
+def _compute_round_risk_base(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                              inv_Y: Optional[pd.Series], features: List[str], config: Config,
+                              predict_fn: Callable, **predict_fn_kwargs) -> float:
+    """Base risk computation function that uses a provided prediction function.
+
+    Risk is computed by evicting each visible sample one at a time,
+    training on the remaining samples, and predicting the evicted sample.
+
+    Args:
+        vis_X: Current visible features (BEFORE adding new samples)
+        vis_Y: Current visible labels (BEFORE adding new samples)
+        inv_X: Current invisible features (unused, for interface compatibility)
+        inv_Y: Current invisible labels (for validation only)
+        features: List of feature names to use
+        config: Configuration object
+        predict_fn: Function that takes (vis_X_remaining, vis_Y_remaining, evicted_X_proc,
+                                       features, config, **predict_fn_kwargs) and returns prediction
+        **predict_fn_kwargs: Additional keyword arguments to pass to predict_fn
+
+    Returns:
+        Total risk value (sum of individual losses)
     """
     if inv_Y is None:
         raise ValueError("inv_Y must be provided to compute risk value")
 
-    # TODO: Implement actual risk computation
-    # Placeholder: returns a dummy risk value based on round number
-    # You should replace this with your actual risk computation logic
-    return 0.5  # Placeholder risk value
+    if len(vis_X) == 0:
+        return 0.0
+
+    vis_X_proc = preprocess_features(vis_X)
+
+    # Calculate pi once for the current vis_X
+    pi = vis_Y.sum() / len(vis_Y)
+    total_risk = 0.0
+
+    # Evict each sample one at a time
+    for idx in range(len(vis_X)):
+        # Split vis_X into remaining and evicted
+        vis_X_remaining = vis_X_proc.drop(index=vis_X_proc.index[idx])
+        vis_Y_remaining = vis_Y.drop(index=vis_Y.index[idx])
+
+        evicted_X_proc = vis_X_proc.iloc[[idx]]
+        evicted_Y = vis_Y.iloc[idx]
+
+        # Skip if remaining samples don't have both classes
+        if vis_Y_remaining.sum() == 0 or vis_Y_remaining.sum() == len(vis_Y_remaining):
+            continue
+
+        # Use the provided prediction function
+        try:
+            evicted_pred = predict_fn(vis_X_remaining, vis_Y_remaining, evicted_X_proc,
+                                      features, config, **predict_fn_kwargs)
+            if evicted_pred is None:
+                continue
+        except Exception:
+            # Skip if prediction fails
+            continue
+
+        # Calculate loss
+        loss = _compute_loss(pi, int(evicted_Y), evicted_pred)
+        total_risk += loss
+
+    Gamma = max(pi, 1-pi) / min(pi, 1-pi) if min(pi, 1-pi) > 0 else float('inf')
+    delta = 0.5
+    workload_size = 1
+    total_risk += Gamma * np.sqrt(
+        np.log(2 * workload_size / delta) / (2 * len(vis_X))
+    )
+
+    return total_risk
+
+
+def _predict_with_classifier(vis_X_remaining: pd.DataFrame, vis_Y_remaining: pd.Series,
+                             evicted_X_proc: pd.DataFrame, features: List[str],
+                             config: Config, **kwargs) -> int:
+    """Prediction function using classifier only."""
+    clf = train_classifier(vis_X_remaining[features], vis_Y_remaining, config)
+    return int(clf.predict(evicted_X_proc[features])[0])
+
+
+def _predict_with_geometric(vis_X_remaining: pd.DataFrame, vis_Y_remaining: pd.Series,
+                            evicted_X_proc: pd.DataFrame, features: List[str],
+                            config: Config, **kwargs) -> Optional[int]:
+    """Prediction function using geometric k-NN only."""
+    predictions, _, _ = _compute_geometric_predictions(
+        vis_X_remaining, evicted_X_proc, features, vis_Y_remaining, config
+    )
+    return int(predictions[0]) if predictions is not None else None
+
+
+def _predict_with_combined(vis_X_remaining: pd.DataFrame, vis_Y_remaining: pd.Series,
+                           evicted_X_proc: pd.DataFrame, features: List[str],
+                           config: Config, round_idx: int = 0, **kwargs) -> Optional[int]:
+    """Prediction function combining classifier and geometric."""
+    # Get classifier prediction
+    clf = train_classifier(vis_X_remaining[features], vis_Y_remaining, config)
+    proba = clf.predict_proba(evicted_X_proc[features])[0, 1]
+
+    # Get geometric prediction
+    _, geo_prob_pos, _ = _compute_geometric_predictions(
+        vis_X_remaining, evicted_X_proc, features, vis_Y_remaining, config
+    )
+
+    if geo_prob_pos is None:
+        return None
+
+    geo_prob = geo_prob_pos[0]
+
+    # Combine classifier probability with geometric probability
+    geo_weight = config.geo_initial_weight * (1 - round_idx / config.n_rounds)
+    combined_prob = geo_weight * geo_prob + (1 - geo_weight) * proba
+
+    # Get prediction based on combined probability
+    return int(combined_prob >= config.geo_decision_boundary)
+
+
+def _compute_round_risk_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                              inv_Y: Optional[pd.Series], features: List[str], config: Config) -> float:
+    """Compute risk value for confidence-based self-training."""
+    return _compute_round_risk_base(vis_X, vis_Y, inv_X, inv_Y, features, config,
+                                     _predict_with_classifier)
+
+
+def _compute_round_risk_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                             inv_Y: Optional[pd.Series], features: List[str], config: Config) -> float:
+    """Compute risk value for geometric-only self-training."""
+    return _compute_round_risk_base(vis_X, vis_Y, inv_X, inv_Y, features, config,
+                                     _predict_with_geometric)
+
+
+def _compute_round_risk_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
+                                  inv_Y: Optional[pd.Series], features: List[str],
+                                  config: Config, round_idx: int) -> float:
+    """Compute risk value for combined confidence + geometric self-training."""
+    return _compute_round_risk_base(vis_X, vis_Y, inv_X, inv_Y, features, config,
+                                     _predict_with_combined, round_idx=round_idx)
 
 
 def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.DataFrame,
@@ -281,6 +426,13 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
 
     for round_idx in range(config.n_rounds):
         logger.info(f"  Round {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
+
+        # Compute risk value for this round if enabled
+        if config.report_each_round_risk and inv_Y is not None:
+            risk = _compute_round_risk_conf(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            risk_history.append(risk)
+            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f} Size of vis_X: {len(vis_X)}")
+
 
         clf = train_classifier(vis_X_proc[features], vis_Y, config)
         probas = clf.predict_proba(inv_X_proc[features])[:, 1]
@@ -313,12 +465,6 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
-        # Compute risk value for this round if enabled
-        if config.report_each_round_risk and inv_Y is not None:
-            risk = _compute_round_risk(vis_X, vis_Y, inv_X, inv_Y, features, config)
-            risk_history.append(risk)
-            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f}")
-
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
@@ -349,6 +495,12 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
     for round_idx in range(config.n_rounds):
         logger.info(f"  Round {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
 
+        # Compute risk value for this round if enabled
+        if config.report_each_round_risk and inv_Y is not None:
+            risk = _compute_round_risk_geo(vis_X, vis_Y, inv_X, inv_Y, features, config)
+            risk_history.append(risk)
+            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f} Size of vis_X: {len(vis_X)}")
+
         # Compute geometric predictions
         predictions, _, confidence = _compute_geometric_predictions(
             vis_X_proc, inv_X_proc, features, vis_Y, config
@@ -378,12 +530,6 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
-        # Compute risk value for this round if enabled
-        if config.report_each_round_risk and inv_Y is not None:
-            risk = _compute_round_risk(vis_X, vis_Y, inv_X, inv_Y, features, config)
-            risk_history.append(risk)
-            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f}")
-
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
             break
@@ -410,6 +556,12 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
 
     for round_idx in range(config.n_rounds):
         logger.info(f"  Round {round_idx + 1}/{config.n_rounds} | Vis: {len(vis_X)} Inv: {len(inv_X)}")
+
+        # Compute risk value for this round if enabled
+        if config.report_each_round_risk and inv_Y is not None:
+            risk = _compute_round_risk_conf_geo(vis_X, vis_Y, inv_X, inv_Y, features, config, round_idx)
+            risk_history.append(risk)
+            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f} Size of vis_X: {len(vis_X)}")
 
         # Get classifier predictions
         clf = train_classifier(vis_X_proc[features], vis_Y, config)
@@ -451,12 +603,6 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
             f1 = _compute_round_f1(vis_X, vis_Y, inv_X, inv_Y, features, config)
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
-
-        # Compute risk value for this round if enabled
-        if config.report_each_round_risk and inv_Y is not None:
-            risk = _compute_round_risk(vis_X, vis_Y, inv_X, inv_Y, features, config)
-            risk_history.append(risk)
-            logger.info(f"  Round {round_idx + 1} Risk: {risk:.4f}")
 
         if len(inv_X) == 0:
             logger.info("  No more invisible samples. Stopping.")
@@ -1030,7 +1176,7 @@ def grid_search_workloads(n_jobs: int = -1):
             'geo_initial_weight': [0.1, 0.3, 0.5, 0.7, 0.9],
             'geo_decision_boundary': [0.1, 0.3, 0.5, 0.7, 0.9],
             'max_samples_per_round': [10, 20, 30, 40, 50],
-            'n_rounds': [4, 6, 8, 10, 12, 14, 16]
+            'n_rounds': [5]
         }
 
     }
@@ -1163,11 +1309,12 @@ def run_predefined_workloads():
             max_samples_per_round=10,
             n_rounds=4,
             report_each_round_f1=True,
+            report_each_round_risk=True,
             methods=[
-                [],
-                ['ST_Conf'],
-                ['ST_ConfGeo'],
-                ['FS', 'ST_Conf'],
+                # [],
+                # ['ST_Conf'],
+                # ['ST_ConfGeo'],
+                # ['FS', 'ST_Conf'],
                 ['FS', 'ST_ConfGeo']
             ]
         )),
