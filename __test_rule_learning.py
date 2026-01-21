@@ -1162,37 +1162,12 @@ def grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[A
         'all_results': all_results
     }
 
-
 def optimized_grid_search(workload_name: str, data_path: str, param_grid: Dict[str, List[Any]],
                            methods_list: List[List[str]], metric: str = 'f1',
                            n_jobs: int = -1, output_file: Optional[str] = None) -> Dict[str, Any]:
     """
-    Optimized grid search that uses n_rounds as upper bound and analyzes F1 traces.
-
-    Strategy:
-    1. Run all parameter combinations with report_each_round_f1=True
-    2. For each method, find best config (params + best_n_round from F1 trace)
-    3. Re-run best configs with report_each_round_risk=True
-    4. Export results to summary file
-
-    Args:
-        workload_name: Name of the workload (e.g., 'medical.Q1')
-        data_path: Path to the data file
-        param_grid: Dictionary of parameters to search (n_rounds should have single value as UB)
-            {
-                'geo_k_neighbors': [5, 10, 15],
-                'geo_initial_weight': [0.3, 0.6, 0.8],
-                'geo_decision_boundary': [0.4, 0.5, 0.6],
-                'max_samples_per_round': [10, 20, 30],
-                'n_rounds': [10]  # Single value = upper bound
-            }
-        methods_list: List of method combinations to test [['FS', 'ST_Conf'], ['ST_ConfGeo'], ...]
-        metric: Metric to optimize ('f1', 'precision', 'recall')
-        n_jobs: Number of parallel jobs
-        output_file: Path to save results summary (optional)
-
-    Returns:
-        Dictionary with best configs, F1 traces, and risk traces for each method
+    Optimized grid search with parallelized Phase 1 (F1 tracing)
+    and parallelized Phase 2 (risk tracing).
     """
     from itertools import product
     from datetime import datetime
@@ -1317,13 +1292,10 @@ def optimized_grid_search(workload_name: str, data_path: str, param_grid: Dict[s
         for k, v in best['params'].items():
             logger.info(f"    {k}: {v}")
 
-    # Phase 2: Risk evaluation for best configs
-    logger.info(f"\n{'='*80}")
-    logger.info(f"Phase 2: Computing risk traces for best configurations...\n")
-
-    risk_results = {}
-
-    for method_name, best_config in method_best_configs.items():
+    # ------------------------------------------------------------------
+    # Phase 2: Risk evaluation (PARALLELIZED)
+    # ------------------------------------------------------------------
+    def evaluate_with_risk(method_name, best_config):
         try:
             # Create config with best_n_rounds and report_each_round_risk=True
             config_params = best_config['params'].copy()
@@ -1360,9 +1332,42 @@ def optimized_grid_search(workload_name: str, data_path: str, param_grid: Dict[s
                 logger.info(f"  Round {round_idx + 1}: {risk:.4f}")
 
         except Exception as e:
-            logger.error(f"Risk computation failed for {method_name}: {e}")
+            logger.error(f"Phase 2 failed for {method_name}: {e}")
+            return None
 
-    # Prepare summary
+    logger.info(f"\n{'='*80}")
+    logger.info("Phase 2: Computing risk traces for best configurations...\n")
+
+    phase2_tasks = list(method_best_configs.items())
+
+    phase2_results = Parallel(n_jobs=n_jobs)(
+        delayed(evaluate_with_risk)(method_name, best_config)
+        for method_name, best_config in tqdm(
+            phase2_tasks,
+            desc="Phase 2: Risk Evaluation",
+            unit="method"
+        )
+    )
+
+    risk_results = {
+        r['method_name']: {
+            'best_config': r['best_config'],
+            'risk_history': r['risk_history'],
+            'final_metrics': r['final_metrics']
+        }
+        for r in phase2_results
+        if r is not None
+    }
+
+    # Logging after parallel execution
+    for method_name, r in risk_results.items():
+        logger.info(f"\nRisk trace for {method_name}:")
+        for i, risk in enumerate(r['risk_history']):
+            logger.info(f"  Round {i + 1}: {risk:.4f}")
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
     summary = {
         'workload': workload_name,
         'timestamp': datetime.now().isoformat(),
@@ -1370,37 +1375,37 @@ def optimized_grid_search(workload_name: str, data_path: str, param_grid: Dict[s
         'methods': {}
     }
 
-    for method_name, risk_result in risk_results.items():
-        best_config = risk_result['best_config']
+    for method_name, r in risk_results.items():
+        best = r['best_config']
         summary['methods'][method_name] = {
-            'best_parameters': best_config['params'],
-            'best_n_rounds': best_config['best_n_rounds'],
-            'best_f1': best_config['best_f1'],
-            'f1_trace': best_config['f1_history'],
-            'risk_trace': risk_result['risk_history'],
-            'final_metrics': risk_result['final_metrics']
+            'best_parameters': best['params'],
+            'best_n_rounds': best['best_n_rounds'],
+            'best_f1': best['best_f1'],
+            'f1_trace': best['f1_history'],
+            'risk_trace': r['risk_history'],
+            'final_metrics': r['final_metrics']
         }
 
-    # Print final summary
     logger.info(f"\n{'='*80}")
     logger.info(f"OPTIMIZED GRID SEARCH COMPLETE: {workload_name}")
     logger.info(f"{'='*80}")
 
-    for method_name, method_data in summary['methods'].items():
+    for method_name, m in summary['methods'].items():
         logger.info(f"\n{method_name}:")
-        logger.info(f"  Best F1: {method_data['best_f1']:.4f} (round {method_data['best_n_rounds']})")
-        logger.info(f"  Improvement: {(method_data['best_f1'] - baseline_f1) / baseline_f1 * 100:+.2f}%")
-        logger.info(f"  Best parameters:")
-        for k, v in method_data['best_parameters'].items():
-            if k != 'n_rounds':  # Don't print n_rounds in best params
+        logger.info(f"  Best F1: {m['best_f1']:.4f} (round {m['best_n_rounds']})")
+        logger.info(
+            f"  Improvement: {(m['best_f1'] - baseline_f1) / baseline_f1 * 100:+.2f}%"
+        )
+        logger.info("  Best parameters:")
+        for k, v in m['best_parameters'].items():
+            if k != 'n_rounds':
                 logger.info(f"    {k}: {v}")
-        logger.info(f"  Final F1: {method_data['final_metrics']['f1']:.4f}")
-        logger.info(f"  Final P: {method_data['final_metrics']['precision']:.4f}")
-        logger.info(f"  Final R: {method_data['final_metrics']['recall']:.4f}")
+        logger.info(f"  Final F1: {m['final_metrics']['f1']:.4f}")
+        logger.info(f"  Final P: {m['final_metrics']['precision']:.4f}")
+        logger.info(f"  Final R: {m['final_metrics']['recall']:.4f}")
 
     logger.info(f"\n{'='*80}\n")
 
-    # Save to file if specified
     if output_file:
         with open(output_file, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -1435,12 +1440,19 @@ def run_optimized_grid_search(workload_name: str, data_path: str,
             'n_rounds': [10]  # Upper bound
         },
         'comprehensive': {
-            'geo_k_neighbors': [5, 10, 15, 20],
-            'geo_initial_weight': [0.1, 0.3, 0.5, 0.7, 0.9],
-            'geo_decision_boundary': [0.1, 0.3, 0.5, 0.7, 0.9],
-            'max_samples_per_round': [10, 20, 30, 40, 50],
+            'geo_k_neighbors': [10],
+            'geo_initial_weight': [0.5],
+            'geo_decision_boundary': [0.1],
+            'max_samples_per_round': [40],
             'n_rounds': [20]  # Upper bound
         },
+        # 'comprehensive': {
+        #     'geo_k_neighbors': [5, 10, 15, 20],
+        #     'geo_initial_weight': [0.1, 0.3, 0.5, 0.7, 0.9],
+        #     'geo_decision_boundary': [0.1, 0.3, 0.5, 0.7, 0.9],
+        #     'max_samples_per_round': [10, 20, 30, 40, 50],
+        #     'n_rounds': [20]  # Upper bound
+        # },
         'severe_imbalance': {
             'geo_k_neighbors': [5, 10, 15],
             'geo_initial_weight': [0.5, 0.7, 0.9],
@@ -1466,11 +1478,11 @@ def run_optimized_grid_search(workload_name: str, data_path: str,
 
     # Define methods to test
     methods_list = [
-        ['ST_Conf'],
-        ['ST_Geo'],
-        ['ST_ConfGeo'],
-        ['FS', 'ST_Conf'],
-        ['FS', 'ST_Geo'],
+        # ['ST_Conf'],
+        # ['ST_Geo'],
+        # ['ST_ConfGeo'],
+        # ['FS', 'ST_Conf'],
+        # ['FS', 'ST_Geo'],
         ['FS', 'ST_ConfGeo'],
     ]
 
@@ -1675,16 +1687,16 @@ def run_predefined_workloads():
             random_seed=42,
             geo_k_neighbors=10,
             geo_initial_weight=0.5,
-            geo_decision_boundary=0.4,
-            max_samples_per_round=20,
-            n_rounds=10,
+            geo_decision_boundary=0.1,
+            max_samples_per_round=40,
+            n_rounds=1,
             report_each_round_f1=True,
             methods=[
                 # [],
                 # ['ST_Geo'],
                 # ['ST_ConfGeo'],
-                ['FS', 'ST_Geo'],
-                # ['FS', 'ST_ConfGeo']
+                # ['FS', 'ST_Geo'],
+                ['FS', 'ST_ConfGeo']
             ]
         )),
         # ("medical_Q3", Config(
