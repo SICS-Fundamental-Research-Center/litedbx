@@ -418,6 +418,11 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
+
+    inv_X_proc_orig = inv_X_proc.copy()
+    vis_Y_orig = vis_Y.copy()
+    inv_Y_orig = inv_Y.copy() if inv_Y is not None else None
+
     rng = np.random.default_rng(config.random_seed)
     f1_history = []
     risk_history = []
@@ -460,22 +465,11 @@ def apply_self_training_conf(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Da
 
         # Compute F1 score for this round if enabled
         if config.report_each_round_f1 and inv_Y is not None:
-            # Sync inv_Y with inv_X after dropping selected samples
-            current_inv_Y = inv_Y.iloc[selected].reset_index(drop=True)
-            inv_Y = inv_Y.drop(inv_Y.index[selected])
+            clf = train_classifier(vis_X_proc[features], vis_Y, config)
+            predications = clf.predict(inv_X_proc_orig[features])
 
-            # Use only original visible samples (exclude pseudo-labeled samples)
-            vis_X_orig = vis_X.iloc[:orig_vis_size]
-            vis_Y_orig = vis_Y.iloc[:orig_vis_size]
-
-            # Add pseudo-labeled samples back to invisible set for evaluation
-            vis_X_pseudo = vis_X.iloc[orig_vis_size:]
-            vis_Y_pseudo = vis_Y.iloc[orig_vis_size:]
-
-            inv_X_eval = pd.concat([inv_X, vis_X_pseudo], ignore_index=True)
-            inv_Y_eval = pd.concat([inv_Y, vis_Y_pseudo], ignore_index=True)
-
-            f1 = _compute_round_f1(vis_X_orig, vis_Y_orig, inv_X_eval, inv_Y_eval, features, config)
+            assert inv_Y_orig is not None, "inv_Y_orig must be provided to compute F1 score"
+            f1 = evaluate_predictions(vis_Y_orig, inv_Y_orig, predications)["f1"]
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
@@ -501,6 +495,11 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
+
+    inv_X_proc_orig = inv_X_proc.copy()
+    vis_Y_orig = vis_Y.copy()
+    inv_Y_orig = inv_Y.copy() if inv_Y is not None else None
+
     f1_history = []
     risk_history = []
 
@@ -541,20 +540,11 @@ def apply_self_training_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: pd.Dat
 
         # Compute F1 score for this round if enabled
         if config.report_each_round_f1 and inv_Y is not None:
-            inv_Y = inv_Y.drop(inv_Y.index[selected])
+            clf = train_classifier(vis_X_proc[features], vis_Y, config)
+            predications = clf.predict(inv_X_proc_orig[features])
 
-            # Use only original visible samples (exclude pseudo-labeled samples)
-            vis_X_orig = vis_X.iloc[:orig_vis_size]
-            vis_Y_orig = vis_Y.iloc[:orig_vis_size]
-
-            # Add pseudo-labeled samples back to invisible set for evaluation
-            vis_X_pseudo = vis_X.iloc[orig_vis_size:]
-            vis_Y_pseudo = vis_Y.iloc[orig_vis_size:]
-
-            inv_X_eval = pd.concat([inv_X, vis_X_pseudo], ignore_index=True)
-            inv_Y_eval = pd.concat([inv_Y, vis_Y_pseudo], ignore_index=True)
-
-            f1 = _compute_round_f1(vis_X_orig, vis_Y_orig, inv_X_eval, inv_Y_eval, features, config)
+            assert inv_Y_orig is not None, "inv_Y_orig must be provided to compute F1 score"
+            f1 = evaluate_predictions(vis_Y_orig, inv_Y_orig, predications)["f1"]
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
@@ -577,6 +567,11 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
     """
     vis_X_proc = preprocess_features(vis_X)
     inv_X_proc = preprocess_features(inv_X)
+
+    inv_X_proc_orig = inv_X_proc.copy()
+    vis_Y_orig = vis_Y.copy()
+    inv_Y_orig = inv_Y.copy() if inv_Y is not None else None
+
     f1_history = []
     risk_history = []
 
@@ -629,20 +624,11 @@ def apply_self_training_conf_geo(vis_X: pd.DataFrame, vis_Y: pd.Series, inv_X: p
 
         # Compute F1 score for this round if enabled
         if config.report_each_round_f1 and inv_Y is not None:
-            inv_Y = inv_Y.drop(inv_Y.index[selected])
+            clf = train_classifier(vis_X_proc[features], vis_Y, config)
+            predications = clf.predict(inv_X_proc_orig[features])
 
-            # Use only original visible samples (exclude pseudo-labeled samples)
-            vis_X_orig = vis_X.iloc[:orig_vis_size]
-            vis_Y_orig = vis_Y.iloc[:orig_vis_size]
-
-            # Add pseudo-labeled samples back to invisible set for evaluation
-            vis_X_pseudo = vis_X.iloc[orig_vis_size:]
-            vis_Y_pseudo = vis_Y.iloc[orig_vis_size:]
-
-            inv_X_eval = pd.concat([inv_X, vis_X_pseudo], ignore_index=True)
-            inv_Y_eval = pd.concat([inv_Y, vis_Y_pseudo], ignore_index=True)
-
-            f1 = _compute_round_f1(vis_X_orig, vis_Y_orig, inv_X_eval, inv_Y_eval, features, config)
+            assert inv_Y_orig is not None, "inv_Y_orig must be provided to compute F1 score"
+            f1 = evaluate_predictions(vis_Y_orig, inv_Y_orig, predications)["f1"]
             f1_history.append(f1)
             logger.info(f"  Round {round_idx + 1} F1: {f1:.4f}")
 
@@ -1439,20 +1425,20 @@ def run_optimized_grid_search(workload_name: str, data_path: str,
             'max_samples_per_round': [10, 20],
             'n_rounds': [10]  # Upper bound
         },
-        'comprehensive': {
-            'geo_k_neighbors': [10],
-            'geo_initial_weight': [0.5],
-            'geo_decision_boundary': [0.1],
-            'max_samples_per_round': [40],
-            'n_rounds': [20]  # Upper bound
-        },
         # 'comprehensive': {
-        #     'geo_k_neighbors': [5, 10, 15, 20],
-        #     'geo_initial_weight': [0.1, 0.3, 0.5, 0.7, 0.9],
-        #     'geo_decision_boundary': [0.1, 0.3, 0.5, 0.7, 0.9],
-        #     'max_samples_per_round': [10, 20, 30, 40, 50],
+        #     'geo_k_neighbors': [10],
+        #     'geo_initial_weight': [0.5],
+        #     'geo_decision_boundary': [0.1],
+        #     'max_samples_per_round': [40],
         #     'n_rounds': [20]  # Upper bound
         # },
+        'comprehensive': {
+            'geo_k_neighbors': [5, 10, 15, 20],
+            'geo_initial_weight': [0.1, 0.3, 0.5, 0.7, 0.9],
+            'geo_decision_boundary': [0.1, 0.3, 0.5, 0.7, 0.9],
+            'max_samples_per_round': [10, 20, 30, 40, 50],
+            'n_rounds': [20]  # Upper bound
+        },
         'severe_imbalance': {
             'geo_k_neighbors': [5, 10, 15],
             'geo_initial_weight': [0.5, 0.7, 0.9],
@@ -1689,7 +1675,7 @@ def run_predefined_workloads():
             geo_initial_weight=0.5,
             geo_decision_boundary=0.1,
             max_samples_per_round=40,
-            n_rounds=1,
+            n_rounds=2,
             report_each_round_f1=True,
             methods=[
                 # [],
