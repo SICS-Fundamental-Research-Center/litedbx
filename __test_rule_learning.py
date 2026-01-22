@@ -1303,7 +1303,8 @@ def optimized_grid_search(workload_name: str, data_path: str, param_grid: Dict[s
 
             risk_history = result.get('risk_history', [])
 
-            risk_results[method_name] = {
+            return {
+                'method_name': method_name,
                 'best_config': best_config,
                 'risk_history': risk_history,
                 'final_metrics': {
@@ -1312,10 +1313,6 @@ def optimized_grid_search(workload_name: str, data_path: str, param_grid: Dict[s
                     'recall': result['metrics']['recall']
                 }
             }
-
-            logger.info(f"\nRisk trace for {method_name}:")
-            for round_idx, risk in enumerate(risk_history):
-                logger.info(f"  Round {round_idx + 1}: {risk:.4f}")
 
         except Exception as e:
             logger.error(f"Phase 2 failed for {method_name}: {e}")
@@ -1671,11 +1668,11 @@ def run_predefined_workloads():
             data_path="data/medical/.ckpt/NOPXY__Q1_full.csv",
             visible_samples=50,
             random_seed=42,
-            geo_k_neighbors=10,
-            geo_initial_weight=0.5,
-            geo_decision_boundary=0.1,
-            max_samples_per_round=40,
-            n_rounds=2,
+            geo_k_neighbors=5,
+            geo_initial_weight=0.1,
+            geo_decision_boundary=0.7,
+            max_samples_per_round=10,
+            n_rounds=9,
             report_each_round_f1=True,
             methods=[
                 # [],
