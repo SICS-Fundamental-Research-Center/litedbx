@@ -1,0 +1,69 @@
+parallelism: 20
+
+
+timeout: 30
+max_retries: 10
+max_tokens: 16384
+top_p: 1.0
+temperature: 0.0
+random_seed: 42
+
+
+# Pricing policy reference: https://bailian.console.aliyun.com/cn-beijing/?spm=5176.12818093.resourceCenter.5.3be92cc9JrmbLU&tab=doc#/doc/?type=model&url=2840914
+
+REMOTE_MODELS:
+  Text:
+    - model: openai/Qwen3-235B-A22B
+      api_key: BLSC_API_KEY
+      api_base: BLSC_ENDPOINT
+      input_cost: 0.28  # USD (2 CNY) / 1M tokens
+      output_cost: 1.12  # USD (8 CNY) / 1M tokens
+      output_cost_thinking: 2.8  # USD (20 CNY) / 1M tokens
+    - model: dashscope/glm-4.7
+      api_key: DASHSCOPE_API_KEY
+      api_base: DASHSCOPE_ENDPOINT
+      input_cost: 0.42  # USD (3 CNY) / 1M tokens
+      output_cost: 1.68  # USD (14 CNY) / 1M tokens
+      output_cost_thinking: 1.68  # USD (14 CNY) / 1M tokens
+    - model: dashscope/qwen3-max
+      api_key: DASHSCOPE_API_KEY
+      api_base: DASHSCOPE_ENDPOINT
+      input_cost: 0.35  # USD (2.5 CNY) / 1M tokens
+      output_cost: 1.4  # USD (10 CNY) / 1M tokens
+      output_cost_thinking: 1.4  # USD (10 CNY) / 1M tokens
+  Image:
+    - model: openai/Qwen3-VL-235B-A22B-Thinking  # Only support thinking 
+      api_key: BLSC_API_KEY
+      api_base: BLSC_ENDPOINT
+      input_cost: 0.28  # USD (2 CNY) / 1M tokens
+      output_cost: 2.8  # USD (20 CNY) / 1M tokens
+      output_cost_thinking: 2.8  # USD (20 CNY) / 1M tokens
+    - model: openai/Qwen3-VL-235B-A22B-Instruct  # DO NOT support thinking 
+      api_key: BLSC_API_KEY
+      api_base: BLSC_ENDPOINT
+      input_cost: 0.28  # USD (2 CNY) / 1M tokens
+      output_cost: 1.12  # USD (8 CNY) / 1M tokens
+      output_cost_thinking: 1.12  # USD (8 CNY) / 1M tokens
+    - model: dashscope/qwen3-vl-plus
+      api_key: DASHSCOPE_API_KEY
+      api_base: DASHSCOPE_ENDPOINT
+      input_cost: 0.14  # USD (1 CNY) / 1M tokens
+      output_cost: 1.4  # USD (10 CNY) / 1M tokens
+      output_cost_thinking: 1.4  # USD (10 CNY) / 1M tokens
+
+LOCAL_MODELS:
+  Text:
+    - model: hosted_vllm//ssd_data/models/llama3-8b-instruct
+      api_key: "*"
+      api_base: http://localhost:8000/v1
+    - model: hosted_vllm//ssd_data/models/Qwen3-4B-Instruct-2507
+      api_key: "*"
+      api_base: http://localhost:8001/v1
+  Image:
+    - model: hosted_vllm//ssd_data/models/Qwen3-VL-8B-Instruct
+      api_key: "*"
+      api_base: http://localhost:8002/v1
+    - model: hosted_vllm//ssd_data/models/llava-v1___6-mistral-7b-hf
+      api_key: "*"
+      api_base: http://localhost:8003/v1
+    
