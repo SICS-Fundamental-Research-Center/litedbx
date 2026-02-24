@@ -53,17 +53,35 @@ REMOTE_MODELS:
 
 LOCAL_MODELS:
   Text:
+    - model: hosted_vllm//ssd_data/models/Qwen3-30B-A3B-Instruct-2507-FP8
+      api_key: "*"
+      api_base: http://localhost:8004/v1
+      input_cost: 0
+      output_cost: 0 
+      output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/llama3-8b-instruct
       api_key: "*"
       api_base: http://localhost:8000/v1
+      input_cost: 0
+      output_cost: 0 
+      output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/Qwen3-4B-Instruct-2507
       api_key: "*"
       api_base: http://localhost:8001/v1
+      input_cost: 0
+      output_cost: 0 
+      output_cost_thinking: 0
   Image:
     - model: hosted_vllm//ssd_data/models/Qwen3-VL-8B-Instruct
       api_key: "*"
       api_base: http://localhost:8002/v1
+      input_cost: 0
+      output_cost: 0 
+      output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/llava-v1___6-mistral-7b-hf
       api_key: "*"
       api_base: http://localhost:8003/v1
+      input_cost: 0
+      output_cost: 0 
+      output_cost_thinking: 0
     

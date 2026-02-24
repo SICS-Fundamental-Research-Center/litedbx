@@ -19,5 +19,8 @@ class LdbWorker:
         for q_name, df in self.workload.sigma_satisfied_data.items():
             logger.info(f"Sigma retrieval for query '{q_name}' resulted in {len(df["data"].df)} rows.")
 
-        # Phase (1.2): Initialize the feature space.
-        await self.workload.init_coresets(enable_refinement=True, debug=debug)
+        # Phase (2.1): Initialize the feature space and prepare the coreset.
+        await self.workload.init_coresets(enable_refinement=False, debug=debug)
+
+        # Phase (2.2): Materialize the remaining part.
+        await self.workload.populate_unlabeled_data()

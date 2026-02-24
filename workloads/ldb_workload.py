@@ -81,6 +81,16 @@ class LdbWorkload:
                     n_bad_cases=n_bad_cases,
                 )    
 
+    async def populate_unlabeled_data(self):
+        for q_name, spec in self.feature_spaces.items():
+            self.unlabeled_data[q_name]["data"].df = await self._materialize_features(
+                    q_name=q_name,
+                    tag="unlabeled_full",
+                    data=self.unlabeled_data[q_name]["data"],
+                    feature_specs=spec,
+                    is_remote=False
+                )
+
 
     async def _refine_feature_space(self, q_name: str, sem_cq: SemCQ,
                                     max_iter: int = 3, f1_threshold: float = 0.01,
@@ -308,7 +318,9 @@ class LdbWorkload:
         return feature_space
 
 
-    async def _materialize_features(self, q_name: str, tag: str, data: LdbData, feature_specs: list[PopulationSpec]) -> pd.DataFrame:
+    async def _materialize_features(self, q_name: str, tag: str, data: LdbData, 
+                                    feature_specs: list[PopulationSpec],
+                                    is_remote: bool=True) -> pd.DataFrame:
         ckpt_path = self.CKPT_path / f"{q_name}_{tag}.csv"
 
         if ckpt_path.exists():
@@ -320,6 +332,7 @@ class LdbWorkload:
             df_cp[spec.target_col] = await data._sem_map(
                 spec=spec,
                 llm_client=self.llm_client,
+                is_remote=is_remote
             )
 
         df_cp.to_csv(ckpt_path, index=False)

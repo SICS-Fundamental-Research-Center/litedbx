@@ -59,8 +59,8 @@ class LdbLLMClient:
     def __init__(self):
         self.client = litellm
         self.client_struct = instructor.from_litellm(
-            litellm.completion, mode=Mode.TOOLS)
-        self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.TOOLS)
+            litellm.completion, mode=Mode.JSON)
+        self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.JSON)
 
         with open(Path(__file__).parent / "config.yaml") as f:
             self.config = yaml.safe_load(f)

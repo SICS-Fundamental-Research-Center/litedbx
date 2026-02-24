@@ -78,7 +78,8 @@ class LdbData:
 
 
     async def _sem_map(
-            self, spec: PopulationSpec, llm_client: LdbLLMClient, is_remote: bool=True) -> pd.Series:
+            self, spec: PopulationSpec, llm_client: LdbLLMClient, 
+            is_remote: bool=True) -> pd.Series:
         response_model = None
         if spec.feature_type == "int":
             response_model = IntFeatureResponse
