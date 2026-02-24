@@ -24,7 +24,7 @@ class LdbWorkload:
         self.b_rew = config["b_rew"]
         self.b_fs = config["b_fs"]
 
-        self.sigma_satistied_data = {}
+        self.sigma_satisfied_data = {}
         self.labeled_data = {}
         self.unlabeled_data = {}
         self.coresets = {}
@@ -40,26 +40,27 @@ class LdbWorkload:
             data = self.ldb_data.sigma_retrieve(sem_cq.Sigma, reset_index=True)
             labels = self._build_ground_truth_labels(data, q_name, sem_cq.selected, debug=debug)
 
-            self.sigma_satistied_data[q_name] = {
+            self.sigma_satisfied_data[q_name] = {
                 "data": data,
                 "labels": labels,
             }
 
     
-    async def initialize_feature_space(self, enable_refinement: bool = False, debug: bool = False,
-                                       max_refine_iter: int = 3, f1_threshold: float = 0.01,
-                                       n_bad_cases: int = 5):
-
-        # Acquire labeled set.
-        self._acquire_human_label(debug=debug)
+    async def init_coresets(self, enable_refinement: bool = False, debug: bool = False,
+                            max_refine_iter: int = 3, f1_threshold: float = 0.01,
+                            n_bad_cases: int = 5):
 
         for q_name, sem_cq in self.queries.items():
+            # Acquire labeled set.
+            self._acquire_human_label(q_name=q_name, debug=debug)
+
             # Acquire initial feature space.
             self.feature_spaces[q_name] = self._init_feature_space(q_name, sem_cq)
+
             # Populate feature values for the acquired feature space.
             result_df = await self._materialize_features(
                 q_name=q_name,
-                tag="labeled",
+                tag="labeled_full",
                 data=self.labeled_data[q_name]["data"],
                 feature_specs=self.feature_spaces[q_name],
             )
@@ -72,7 +73,7 @@ class LdbWorkload:
 
             # Refine the feature space if enabled.
             if enable_refinement:
-                await self.refine_feature_space(
+                await self._refine_feature_space(
                     q_name=q_name,
                     sem_cq=sem_cq,
                     max_iter=max_refine_iter,
@@ -81,9 +82,9 @@ class LdbWorkload:
                 )    
 
 
-    async def refine_feature_space(self, q_name: str, sem_cq: SemCQ,
-                                     max_iter: int = 3, f1_threshold: float = 0.01,
-                                     n_bad_cases: int = 5):
+    async def _refine_feature_space(self, q_name: str, sem_cq: SemCQ,
+                                    max_iter: int = 3, f1_threshold: float = 0.01,
+                                    n_bad_cases: int = 5):
         # Record the previous-round F1-score.
         prev_f1 = pred_and_eval(
             self.labeled_data[q_name]["data"].get_data_for_clf(), 
@@ -154,19 +155,19 @@ class LdbWorkload:
                 self.feature_spaces[q_name].extend(features_to_add)
                 logger.info(f"Adding {len(features_to_add)} new features")
 
-                # Materialize only the new features and merge
+                # Materialize only the new features and merge (directly cover the previous version)
                 new_feature_specs = features_to_add
                 self.coresets[q_name]["data"].df = await self._materialize_features(
                     q_name=q_name,
-                    tag=f"refine_iter{iteration+1}",
+                    tag="labeled_full",
                     data=self.coresets[q_name]["data"],
                     feature_specs=new_feature_specs,
                 )
             else:
                 logger.info(f"No new features to add in this iteration.")
 
-            # Cache refined feature space
-            ckpt_path = self.CKPT_path / f"refined_feature_space_{q_name}_iter{iteration+1}.json"
+            # Cache refined feature space (directly cover the previous refined feature space)
+            ckpt_path = self.CKPT_path / f"{q_name}_feature_space.json"
             ckpt_data = {
                 q_name: [spec.model_dump() for spec in self.feature_spaces[q_name]]
             }
@@ -237,33 +238,33 @@ class LdbWorkload:
         return labels
 
 
-    def _acquire_human_label(self, debug: bool = False):
-        for q_name, dfs in self.sigma_satistied_data.items():
-            data = dfs["data"]
-            labels = dfs["labels"]
+    def _acquire_human_label(self, q_name: str, debug: bool = False):
 
-            labeled_indices = data.df.sample(n=self.b_lab, random_state=self.random_seed).index
-            remaining_indices = data.df.index.difference(labeled_indices)
+        data = self.sigma_satisfied_data[q_name]["data"]
+        labels = self.sigma_satisfied_data[q_name]["labels"]
 
-            self.labeled_data[q_name] = {
-                "data": LdbData(
-                    df=data.df.loc[labeled_indices].reset_index(drop=True), 
-                    config=data.config),
-                "labels": labels.loc[labeled_indices].reset_index(drop=True),
-            }
-            self.unlabeled_data[q_name] = {
-                "data": LdbData(
-                    df=data.df.loc[remaining_indices].reset_index(drop=True),
-                    config=data.config),
-                "labels": labels.loc[remaining_indices].reset_index(drop=True),
-            }
+        labeled_indices = data.df.sample(n=self.b_lab, random_state=self.random_seed).index
+        remaining_indices = data.df.index.difference(labeled_indices)
 
-            if debug:
-                logger.debug(f"Acquired labels for {self.scenario}.{q_name}: {self.labeled_data[q_name]['labels'].sum()} positive labels / {len(self.labeled_data[q_name]['data'].df)} labeled samples. Selectivity: {self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}")
+        self.labeled_data[q_name] = {
+            "data": LdbData(
+                df=data.df.loc[labeled_indices].reset_index(drop=True), 
+                config=data.config),
+            "labels": labels.loc[labeled_indices].reset_index(drop=True),
+        }
+        self.unlabeled_data[q_name] = {
+            "data": LdbData(
+                df=data.df.loc[remaining_indices].reset_index(drop=True),
+                config=data.config),
+            "labels": labels.loc[remaining_indices].reset_index(drop=True),
+        }
+
+        if debug:
+            logger.debug(f"Acquired labels for {self.scenario}.{q_name}: {self.labeled_data[q_name]['labels'].sum()} positive labels / {len(self.labeled_data[q_name]['data'].df)} labeled samples. Selectivity: {self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}")
 
 
     def _init_feature_space(self, q_name: str, sem_cq: SemCQ) -> list[PopulationSpec]:
-        ckpt_path = self.CKPT_path / f"init_feature_space_{q_name}.json"
+        ckpt_path = self.CKPT_path / f"{q_name}_feature_space.json"
 
         # Load the cached feature space if it exists
         if ckpt_path.exists():
@@ -308,7 +309,7 @@ class LdbWorkload:
 
 
     async def _materialize_features(self, q_name: str, tag: str, data: LdbData, feature_specs: list[PopulationSpec]) -> pd.DataFrame:
-        ckpt_path = self.CKPT_path / f"init_{q_name}_{tag}_full.csv"
+        ckpt_path = self.CKPT_path / f"{q_name}_{tag}.csv"
 
         if ckpt_path.exists():
             logger.info(f"Loading cached materialized features for query {q_name} with tag {tag} from: {ckpt_path}")
