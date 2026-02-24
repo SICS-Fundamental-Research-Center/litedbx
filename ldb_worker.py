@@ -20,7 +20,14 @@ class LdbWorker:
             logger.info(f"Sigma retrieval for query '{q_name}' resulted in {len(df["data"].df)} rows.")
 
         # Phase (2.1): Initialize the feature space and prepare the coreset.
+        # TODO: Add LLM-generated pseudo-label to the feature space.
+        # TODO: Evaluate the soundness of the LLM-generated pseudo-label.
         await self.workload.init_coresets(enable_refinement=False, debug=debug)
 
         # Phase (2.2): Materialize the remaining part.
+        # TODO: Evaluate the soundness of logits of LLM-generated pseudo-labels.
+        # TODO: If the logits is reliable, try model cascading.
+        # TODO: Try batched prompting (row/col-wise) to accelerate the population.
+        # TODO: Try three-level labelling (negative, not sure, positive).
+        # TODO: Explore the impact of the selectivity.
         await self.workload.populate_unlabeled_data()
