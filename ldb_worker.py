@@ -31,3 +31,6 @@ class LdbWorker:
         # TODO: Try three-level labelling (negative, not sure, positive).
         # TODO: Explore the impact of the selectivity.
         await self.workload.populate_unlabeled_data()
+
+        # Phase (2.3): Expand the coreset.
+        self.workload.expand_coreset()

@@ -1,4 +1,7 @@
-.PHONY: clean
+.PHONY: clean clean_medical
+
+clean_medical:
+	rm -rf .ckpt/medical/*
 
 clean:
-	rm -rf data/medical/.ckpt/*
+	make clean_medical

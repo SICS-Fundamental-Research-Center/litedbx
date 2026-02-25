@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Tuple
 from data_structure import LdbData, SemCQ, PopulationSpec, PopulationSpecs, FeatureRefinementResponse
 from llm import LdbLLMClient, PROMPTS
-from common.utils import pred_and_eval
+from common import pred_and_eval, select_coreset
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ class LdbWorkload:
         self.scenario = scenario
         self.ldb_data = LdbData(data_dir=data_dir)
         self.queries = queries
+        self.config = config
         self.random_seed = config["random_seed"]
         self.b_lab = config["b_lab"]
         self.b_se = config["b_se"]
@@ -91,13 +92,37 @@ class LdbWorkload:
                     is_remote=False
                 )
 
+    
+    def expand_coreset(self):
+        for q_name, coreset in self.coresets.items():
+            labeled_X = coreset["data"].exclude_fk_and_id()
+            labeled_Y = coreset["labels"]
+            unlabeled_X = self.unlabeled_data[q_name]["data"].exclude_fk_and_id()
+
+            selected_X_idx, selected_Y = select_coreset(
+                labeled_X=labeled_X,
+                labeled_Y=labeled_Y,
+                unlabeled_X=unlabeled_X,
+                k_neighbors=self.config.get("k_neighbors", 5),
+            )
+
+            # Update the coreset with the selected samples.
+            selected_X = \
+                self.unlabeled_data[q_name]["data"].df.iloc[selected_X_idx].reset_index(drop=True)
+            self.coresets[q_name]["data"].df = \
+                pd.concat([self.coresets[q_name]["data"].df, selected_X], ignore_index=True)
+            self.coresets[q_name]["labels"] = pd.concat([labeled_Y, selected_Y], ignore_index=True)
+
+            logger.info(f"Expanded coreset for query {q_name}: added {len(selected_X)} samples. New coreset size: {len(self.coresets[q_name]['data'].df)}")
+
+    
 
     async def _refine_feature_space(self, q_name: str, sem_cq: SemCQ,
                                     max_iter: int = 3, f1_threshold: float = 0.01,
                                     n_bad_cases: int = 5):
         # Record the previous-round F1-score.
         prev_f1 = pred_and_eval(
-            self.labeled_data[q_name]["data"].get_data_for_clf(), 
+            self.labeled_data[q_name]["data"].exclude_fk_and_id(), 
             self.labeled_data[q_name]["labels"])['f1']
         f1_score_trace = [prev_f1]
 
@@ -105,7 +130,7 @@ class LdbWorkload:
             logger.info(f"Refinement iteration {iteration + 1}/{max_iter} for {q_name}")
 
             # Evaluate current feature space
-            df_for_clf = self.coresets[q_name]["data"].get_data_for_clf()
+            df_for_clf = self.coresets[q_name]["data"].exclude_fk_and_id()
             labels = self.coresets[q_name]["labels"]
             feedback = pred_and_eval(df_for_clf, labels)
 
@@ -172,6 +197,7 @@ class LdbWorkload:
                     tag="labeled_full",
                     data=self.coresets[q_name]["data"],
                     feature_specs=new_feature_specs,
+                    reuse=False
                 )
             else:
                 logger.info(f"No new features to add in this iteration.")
@@ -320,10 +346,11 @@ class LdbWorkload:
 
     async def _materialize_features(self, q_name: str, tag: str, data: LdbData, 
                                     feature_specs: list[PopulationSpec],
-                                    is_remote: bool=True) -> pd.DataFrame:
+                                    is_remote: bool=True, 
+                                    reuse: bool=True) -> pd.DataFrame:
         ckpt_path = self.CKPT_path / f"{q_name}_{tag}.csv"
 
-        if ckpt_path.exists():
+        if ckpt_path.exists() and reuse:
             logger.info(f"Loading cached materialized features for query {q_name} with tag {tag} from: {ckpt_path}")
             return pd.read_csv(ckpt_path)
 

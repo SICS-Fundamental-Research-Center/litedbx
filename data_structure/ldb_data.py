@@ -32,7 +32,7 @@ class LdbData:
         self.df = self.df.fillna("")
 
 
-    def get_data_for_clf(self):
+    def exclude_fk_and_id(self):
         return self.df.drop(columns=self.id_features + self.foreign_keys)
 
 
@@ -50,7 +50,6 @@ class LdbData:
         if reset_index:
             result = result.reset_index(drop=True)
         return LdbData(df=result, config=self.config)
-
 
     def _cq_map(self, predicate: Predicate) -> pd.Series:
         # Check whether field is within the DataFrame columns

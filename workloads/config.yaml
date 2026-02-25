@@ -3,3 +3,4 @@ b_lab: 50
 b_se: 5
 b_rew: 5
 b_fs: 10
+k_beighbors: 5

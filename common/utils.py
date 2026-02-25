@@ -1,23 +1,67 @@
 import pandas as pd
+import numpy as np
 import logging
-from typing import Tuple
 from sklearn.calibration import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
+from sklearn.preprocessing import StandardScaler
 
 
 logger = logging.getLogger(__name__)
+
+
+def encode_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Encode categorical variables."""
+    df_proc = df.copy()
+    for col in df_proc.select_dtypes(include=['object']).columns:
+        encoded = LabelEncoder().fit_transform(df_proc[col].astype(str))
+        df_proc[col] = pd.Series(encoded, index=df_proc.index, dtype=int)
+    return df_proc
+
+
+def norm_features(df: pd.DataFrame) -> pd.DataFrame:
+    scaler = StandardScaler()
+    df_norm = scaler.fit_transform(df)
+    return pd.DataFrame(df_norm, columns=df.columns, index=df.index)
+
+
+def weight_features(df: pd.DataFrame, feat_importance: pd.DataFrame) -> pd.DataFrame:
+    df_proc = df.copy()
+
+    feature_weight = np.ones(len(df.columns.tolist()))
+    for tup in feat_importance.itertuples():
+        feat, weight = tup[1], tup[2]
+        idx = df.columns.tolist().index(feat)
+        feature_weight[idx] = weight
+
+    df_proc = df_proc * feature_weight
+
+    return df_proc
+
+
+def train_classifier(
+        X: pd.DataFrame, Y: pd.Series,
+        n_estimators=100,
+        max_depth=10) -> RandomForestClassifier:
+
+    clf = RandomForestClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        random_state=42,
+        class_weight='balanced'
+    )
+    clf.fit(X, Y)
+
+    return clf
 
 
 def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:
     # Train enriched classifier (all features)
     logger.info(f"Training enriched classifier with {len(df.columns)} features.")
 
-    df_proc = df.copy()
-    for col in df_proc.select_dtypes(include=['object']).columns:
-        df_proc[col] = LabelEncoder().fit_transform(df_proc[col].astype(str))
+    df_proc = encode_features(df)
 
-    clf = _train_classifier(df_proc, labels)
+    clf = train_classifier(df_proc, labels)
     preds = clf.predict(df_proc)
     f1 = f1_score(labels, preds, zero_division=0)
 
@@ -51,15 +95,3 @@ def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:
         'bad_cases': bad_cases,
     }
     
-
-def _train_classifier(X: pd.DataFrame, Y: pd.Series) -> RandomForestClassifier:
-
-    clf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=10,
-        random_state=42,
-        class_weight='balanced'
-    )
-    clf.fit(X, Y)
-
-    return clf
