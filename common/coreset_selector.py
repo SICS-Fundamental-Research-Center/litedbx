@@ -36,11 +36,10 @@ def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
     # Select select_step negative samples with lowest confs
     selected_neg_indices = predicted_neg_indices[-select_step:]
 
-    # Combine selected indices and sort to maintain original order
+    # Combine selected indices (positives first, then negatives)
     selected_indices = np.concatenate([selected_pos_indices, selected_neg_indices])
-    selected_indices = np.sort(selected_indices)
 
-    # Create the labels
+    # Create labels aligned with the indices (first select_step are positive, rest are negative)
     selected_Y = pd.Series([1] * select_step + [0] * select_step)
 
     return selected_indices, selected_Y
