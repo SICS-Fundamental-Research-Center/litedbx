@@ -93,7 +93,7 @@ class LdbWorkload:
                 )
 
     
-    def expand_coreset(self):
+    def expand_coreset(self, debug: bool = False):
         for q_name, coreset in self.coresets.items():
             labeled_X = coreset["data"].exclude_fk_and_id()
             labeled_Y = coreset["labels"]
@@ -114,6 +114,22 @@ class LdbWorkload:
             self.coresets[q_name]["labels"] = pd.concat([labeled_Y, selected_Y], ignore_index=True)
 
             logger.info(f"Expanded coreset for query {q_name}: added {len(selected_X)} samples. New coreset size: {len(self.coresets[q_name]['data'].df)}")
+
+            if debug:
+                ground_truth_Y = self.unlabeled_data[q_name]["labels"].iloc[selected_X_idx].reset_index(drop=True)
+                TP = ((selected_Y == 1) & (ground_truth_Y == 1)).sum()
+                FP = ((selected_Y == 1) & (ground_truth_Y == 0)).sum()
+                FN = ((selected_Y == 0) & (ground_truth_Y == 1)).sum()
+                TN = ((selected_Y == 0) & (ground_truth_Y == 0)).sum()
+                assert TP + FP + FN + TN == len(selected_Y), "DebugErr: Mismatch in counts of TP, FP, FN, TN."
+                precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+                recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+                F1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                logger.info((
+                    f"Debug evaluation of expanded coreset for query {q_name}: "
+                    f"TP={TP}, FP={FP}, FN={FN}, "
+                    f"Precision={precision:.4f}, Recall={recall:.4f}, F1={F1:.4f}."
+                ))
 
     
 

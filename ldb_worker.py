@@ -33,4 +33,4 @@ class LdbWorker:
         await self.workload.populate_unlabeled_data()
 
         # Phase (2.3): Expand the coreset.
-        self.workload.expand_coreset()
+        self.workload.expand_coreset(debug=True)
