@@ -55,6 +55,32 @@ def train_classifier(
     return clf
 
 
+def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series) -> dict:
+    # Calculate TP, FP, TN, FN
+    TP = ((Y_true == 1) & (Y_pred == 1)).sum()
+    FP = ((Y_true == 0) & (Y_pred == 1)).sum()
+    TN = ((Y_true == 0) & (Y_pred == 0)).sum()
+    FN = ((Y_true == 1) & (Y_pred == 0)).sum()
+
+    assert TP + FP + TN + FN == len(Y_true), (
+        "Sum of TP, FP, TN, FN must equal total samples. "
+        f"Got {TP + FP + TN + FN} samples, expected {len(Y_true)}."
+    )
+
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+    return {
+        'f1': f1,
+        'precision': precision,
+        'recall': recall,
+        'TP': TP,
+        'FP': FP,
+        'TN': TN,
+        'FN': FN,
+    }
+
 def compute_feature_importance(
         X: pd.DataFrame, Y: pd.Series,
         n_estimators=100,

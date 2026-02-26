@@ -11,6 +11,8 @@ from common import (
     select_coreset, 
     compute_feature_importance,
     encode_features,
+    train_classifier,
+    evaluate_classifier,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,18 +128,11 @@ class LdbWorkload:
 
             if debug:
                 ground_truth_Y = self.unlabeled_data[q_name]["labels"].iloc[selected_X_idx].reset_index(drop=True)
-                TP = ((selected_Y == 1) & (ground_truth_Y == 1)).sum()
-                FP = ((selected_Y == 1) & (ground_truth_Y == 0)).sum()
-                FN = ((selected_Y == 0) & (ground_truth_Y == 1)).sum()
-                TN = ((selected_Y == 0) & (ground_truth_Y == 0)).sum()
-                assert TP + FP + FN + TN == len(selected_Y), "DebugErr: Mismatch in counts of TP, FP, FN, TN."
-                precision = TP / (TP + FP) if (TP + FP) > 0 else 0
-                recall = TP / (TP + FN) if (TP + FN) > 0 else 0
-                F1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                eval_results = evaluate_classifier(selected_Y, ground_truth_Y)
                 logger.info((
                     f"Debug evaluation of expanded coreset for query {q_name}: "
-                    f"TP={TP}, FP={FP}, FN={FN}, "
-                    f"Precision={precision:.4f}, Recall={recall:.4f}, F1={F1:.4f}."
+                    f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
+                    f"Precision={eval_results['precision']:.4f}, Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
                 ))
 
     
@@ -170,7 +165,29 @@ class LdbWorkload:
 
         return self.candidate_external_features
 
-    
+
+    def select_schema_and_rewrite_query(self, debug: bool = False):
+
+        best_static_error = float('inf')
+        best_schema = None
+        best_rules = None        
+
+        for i in range(len(self.candidate_external_features)):
+            active_external_features = self.candidate_external_features[:i+1]
+
+            for q_name, _ in self.queries.items():
+
+                # TODO: Propagation labels
+                self._label_propagation(q_name, active_external_features, debug=debug)
+                
+                # TODO: Estimate objective error score.
+
+                # TODO: Estimate subjective error score.
+
+                # Update the best schema and best rules.
+
+                pass
+
 
     async def _refine_feature_space(self, q_name: str, sem_cq: SemCQ,
                                     max_iter: int = 3, f1_threshold: float = 0.01,
@@ -420,3 +437,41 @@ class LdbWorkload:
         df_cp.to_csv(ckpt_path, index=False)
         logger.info(f"Cached materialized features for query {q_name} with tag {tag} to: {ckpt_path}")
         return df_cp
+
+
+    def _label_propagation(self, q_name: str, active_external_features: list[str], debug: bool = False):
+        train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
+        train_Y = self.coresets[q_name]["labels"].astype(int)
+        test_X = self.unlabeled_data[q_name]["data"].select_active_features(active_external_features)
+        test_Y = self.unlabeled_data[q_name]["labels"].astype(int)
+
+        # Encode features and train classifier
+        train_X_proc = encode_features(train_X)
+        test_X_proc = encode_features(test_X)
+        clf = train_classifier(train_X_proc, train_Y)
+
+        # Predict labels for unlabeled data
+        pred_Y = pd.Series(clf.predict(test_X_proc), index=test_Y.index)
+
+        # TODO: perform query translation.
+
+        if debug:
+            # Appendix with ground truth labels.
+            visible_labels = self.labeled_data[q_name]["labels"].astype(int)
+            pred_Y_complete = pd.concat([visible_labels, pred_Y], ignore_index=True)
+            test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
+
+            # Evaluate the label propagation results with ground truth.
+            eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
+            logger.info((
+                f"Debug evaluation of label propagation for query {q_name} with {len(active_external_features)} external features {active_external_features}: "
+                f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
+                f"Precision={eval_results['precision']:.4f}, Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
+            ))
+
+    def _objective_error_estimation(self):
+        pass
+    
+    def _subjective_error_estimation(self):
+        pass
+

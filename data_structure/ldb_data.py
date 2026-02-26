@@ -36,6 +36,11 @@ class LdbData:
         return self.df.drop(columns=self.id_features + self.foreign_keys)
 
 
+    def select_active_features(self, active_external_features: list[str]) -> pd.DataFrame:
+        selected_features = self.base_features + active_external_features
+        return self.df[selected_features]
+
+
     def sigma_retrieve(
             self, Sigma: list[Predicate], reset_index: bool = False) -> 'LdbData':
         # Start with all rows as True (no filter)

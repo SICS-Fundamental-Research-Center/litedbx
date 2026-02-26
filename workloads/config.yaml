@@ -4,3 +4,6 @@ b_se: 5
 b_rew: 5
 b_fs: 10
 k_beighbors: 5
+
+loo_factor: 100
+delta: 0.05  # Theorem 3 holds with probability at least 1 - delta.

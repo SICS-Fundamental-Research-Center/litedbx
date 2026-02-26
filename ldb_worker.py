@@ -37,4 +37,8 @@ class LdbWorker:
 
         # Phase (3.1): Generate the candidate external features for each dataset.
         self.workload.generate_candidate_external_features()
-        
+
+        # Phase (3.2): Select the best schema and return the rewritten query.
+        self.workload.select_schema_and_rewrite_query(debug=True)
+
+
