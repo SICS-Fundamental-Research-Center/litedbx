@@ -55,6 +55,27 @@ def train_classifier(
     return clf
 
 
+def compute_feature_importance(
+        X: pd.DataFrame, Y: pd.Series,
+        n_estimators=100,
+        max_depth=10) -> pd.DataFrame:
+
+    clf = RandomForestClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        random_state=42,
+        class_weight='balanced'
+    )
+    clf.fit(X, Y)
+
+    feat_importances = pd.DataFrame({
+        "feature": X.columns.tolist(),
+        "importance": clf.feature_importances_
+    }).sort_values("importance", ascending=False)
+
+    return feat_importances
+
+
 def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:
     # Train enriched classifier (all features)
     logger.info(f"Training enriched classifier with {len(df.columns)} features.")

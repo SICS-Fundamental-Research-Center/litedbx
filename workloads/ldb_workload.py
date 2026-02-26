@@ -3,9 +3,15 @@ import pandas as pd
 import logging
 from pathlib import Path
 from typing import Tuple
+from collections import defaultdict
 from data_structure import LdbData, SemCQ, PopulationSpec, PopulationSpecs, FeatureRefinementResponse
 from llm import LdbLLMClient, PROMPTS
-from common import pred_and_eval, select_coreset
+from common import (
+    pred_and_eval, 
+    select_coreset, 
+    compute_feature_importance,
+    encode_features,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +37,9 @@ class LdbWorkload:
         self.coresets = {}
 
         self.feature_spaces = {}
+        
+        self.base_schema = self.ldb_data.df.columns.tolist()
+        self.candidate_external_features = []
 
         self.CKPT_path = Path(__file__).parent.parent / ".ckpt" / self.scenario
         self.CKPT_path.mkdir(parents=True, exist_ok=True)
@@ -130,6 +139,36 @@ class LdbWorkload:
                     f"TP={TP}, FP={FP}, FN={FN}, "
                     f"Precision={precision:.4f}, Recall={recall:.4f}, F1={F1:.4f}."
                 ))
+
+    
+    def generate_candidate_external_features(self):
+
+        importance_sum = defaultdict(float)
+
+        for coreset in self.coresets.values():
+            X = encode_features(coreset["data"].exclude_fk_and_id())
+            Y = coreset["labels"].astype(int)
+            for feat, imp in compute_feature_importance(X, Y).itertuples(index=False):
+                importance_sum[feat] += imp
+
+        # Collect external features (excluding base schema)
+        base_set = set(self.base_schema)
+        external_feats = list({
+            spec.target_col
+            for space in self.feature_spaces.values()
+            for spec in space
+            if spec.target_col not in base_set
+        })
+
+        # Sort by importance and select top-k
+        top_feats = sorted(external_feats, key=lambda f: importance_sum.get(f, 0), reverse=True)[:self.b_se]
+
+        # Combine with base schema
+        self.candidate_external_features = top_feats
+
+        logger.info(f"Selected {len(top_feats)} external features: {top_feats}")
+
+        return self.candidate_external_features
 
     
 

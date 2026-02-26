@@ -34,3 +34,7 @@ class LdbWorker:
 
         # Phase (2.3): Expand the coreset.
         self.workload.expand_coreset(debug=True)
+
+        # Phase (3.1): Generate the candidate external features for each dataset.
+        self.workload.generate_candidate_external_features()
+        
