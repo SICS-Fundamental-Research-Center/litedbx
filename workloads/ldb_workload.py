@@ -13,6 +13,8 @@ from common import (
     encode_features,
     train_classifier,
     evaluate_classifier,
+    clf_to_rules,
+    apply_rules,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,8 +179,8 @@ class LdbWorkload:
 
             for q_name, _ in self.queries.items():
 
-                # TODO: Propagation labels
-                self._label_propagation(q_name, active_external_features, debug=debug)
+                # Propagation labels
+                rules, trans_Y = self._label_propagation(q_name, active_external_features, debug=debug)
                 
                 # TODO: Estimate objective error score.
 
@@ -439,7 +441,10 @@ class LdbWorkload:
         return df_cp
 
 
-    def _label_propagation(self, q_name: str, active_external_features: list[str], debug: bool = False):
+    def _label_propagation(self, q_name: str, 
+                           active_external_features: list[str], 
+                           debug: bool = False) -> Tuple[list, pd.Series]:
+
         train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
         train_Y = self.coresets[q_name]["labels"].astype(int)
         test_X = self.unlabeled_data[q_name]["data"].select_active_features(active_external_features)
@@ -453,21 +458,36 @@ class LdbWorkload:
         # Predict labels for unlabeled data
         pred_Y = pd.Series(clf.predict(test_X_proc), index=test_Y.index)
 
-        # TODO: perform query translation.
+        # Perform query translation.
+        rules = clf_to_rules(clf, train_X_proc.columns.tolist(), disjunction_budget=self.b_rew, debug=debug)
+        trans_Y = apply_rules(rules, test_X_proc)
+
 
         if debug:
             # Appendix with ground truth labels.
             visible_labels = self.labeled_data[q_name]["labels"].astype(int)
             pred_Y_complete = pd.concat([visible_labels, pred_Y], ignore_index=True)
             test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
+            trans_Y_complete = pd.concat([visible_labels, trans_Y], ignore_index=True)
 
             # Evaluate the label propagation results with ground truth.
             eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
             logger.info((
-                f"Debug evaluation of label propagation for query {q_name} with {len(active_external_features)} external features {active_external_features}: "
+                f"Evaluation of LP for {q_name} with {len(active_external_features)} external features: "
                 f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
                 f"Precision={eval_results['precision']:.4f}, Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
             ))
+
+            # Evaluate the query translation results with ground truth.
+            eval_results = evaluate_classifier(trans_Y_complete, test_Y_complete)
+            logger.info((
+                f"Evaluation of QT for {q_name} with {len(active_external_features)} external features: "
+                f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
+                f"Precision={eval_results['precision']:.4f}, Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
+            ))
+
+        return rules, trans_Y
+
 
     def _objective_error_estimation(self):
         pass

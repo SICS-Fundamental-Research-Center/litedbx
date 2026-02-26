@@ -142,3 +142,99 @@ def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:
         'bad_cases': bad_cases,
     }
     
+
+def clf_to_rules(
+    clf: RandomForestClassifier,
+    feature_names: list,
+    disjunction_budget: int,
+    debug: bool = False
+) -> list:
+
+    assert len(feature_names) == clf.n_features_in_, "Invalid input feature names."
+
+    candidates = []
+
+    for tree in clf.estimators_:
+        tree_ = tree.tree_
+        children_left = tree_.children_left  # type: ignore[attr-defined]
+        children_right = tree_.children_right  # type: ignore[attr-defined]
+        feature = tree_.feature  # type: ignore[attr-defined]
+        threshold = tree_.threshold  # type: ignore[attr-defined]
+        value = tree_.value  # type: ignore[attr-defined]
+        n_samples = tree_.n_node_samples  # type: ignore[attr-defined]
+
+        def traverse(node_id: int, path: list):
+            # Leaf node
+            if children_left[node_id] == children_right[node_id]:
+                counts = value[node_id][0]
+                pos_count = counts[1]
+                total = n_samples[node_id]
+
+                if pos_count == 0:
+                    return
+
+                confidence = pos_count / total
+                candidates.append((path.copy(), confidence, total))
+                return
+
+            # Internal node - recurse to children
+            feat_name = feature_names[feature[node_id]]
+            thresh = threshold[node_id]
+
+            if children_left[node_id] != -1:
+                path.append((feat_name, thresh, '<='))
+                traverse(children_left[node_id], path)
+                path.pop()
+
+            if children_right[node_id] != -1:
+                path.append((feat_name, thresh, '>'))
+                traverse(children_right[node_id], path)
+                path.pop()
+
+        traverse(0, [])
+
+    # Sort by confidence, then support
+    candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+    # Select top rules
+    selected = candidates[:disjunction_budget]
+    rules = [r for r, _, _ in selected]
+
+    if debug:
+        confs = [c for _, c, _ in selected]
+        supps = [s for _, _, s in selected]
+        logger.info(f"Rule Statistics: n={len(rules)}, "
+                   f"conf=({np.mean(confs):.3f}, {np.min(confs):.3f}-{np.max(confs):.3f}), "
+                   f"supp=({np.mean(supps):.1f}, {np.min(supps):.0f}-{np.max(supps):.0f}), "
+                   f"len={np.mean([len(r) for r in rules]):.1f}")
+
+    return rules
+
+
+def apply_rules(rules: list, df: pd.DataFrame) -> pd.Series:
+    if not rules:
+        return pd.Series(0, index=df.index)
+
+    result = pd.Series(False, index=df.index)
+
+    for rule in rules:
+        assert rule, "Empty rule is not allowed."
+
+        mask = pd.Series(True, index=df.index)
+        for feat_name, thresh, op in rule:
+            if op == '<=':
+                mask &= (df[feat_name] <= thresh)
+            else:
+                mask &= (df[feat_name] > thresh)
+        logger.info(f"Applied: {_visualize_rule(rule)}")
+        logger.info(f"  Rule coverage: {mask.sum()} / {len(df)} samples")
+
+        result |= mask
+
+    return result.astype(int)
+
+
+def _visualize_rule(rule: list) -> str:
+    conditions = [f"{feat} {op} {thresh:.3f}" for feat, thresh, op in rule]
+    return " AND ".join(conditions)
+

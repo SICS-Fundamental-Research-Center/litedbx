@@ -3,15 +3,19 @@ from .utils import (
     compute_feature_importance, 
     encode_features, 
     train_classifier, 
-    evaluate_classifier
+    evaluate_classifier,
+    clf_to_rules,
+    apply_rules,
 )
 from .coreset_selector import select_coreset
 
 __all__ = [
-    'pred_and_eval', 
-    'select_coreset', 
-    'compute_feature_importance', 
-    'encode_features', 
+    "pred_and_eval", 
+    "select_coreset", 
+    "compute_feature_importance", 
+    "encode_features", 
     "train_classifier", 
     "evaluate_classifier",
+    "clf_to_rules",
+    "apply_rules",
 ]
