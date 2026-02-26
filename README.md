@@ -52,6 +52,45 @@ DASHSCOPE_API_KEY=your_dashscope_key_here
 DASHSCOPE_ENDPOINT=thttps://dashscope.aliyuncs.com/compatible-mode/v1/
 ```
 
+### Locally-Hosted Models
+
+For running LLMs locally, use the provided [`servem.sh`](servem.sh) script to serve models with vLLM:
+
+#### Available Models
+
+The script supports pre-configured models:
+
+| Model | Type | Default Port | GPUs | Max Length |
+|-------|------|--------------|------|------------|
+| `llama3-8b` | Text | 8000 | 0 | 8192 |
+| `qwen3-4b` | Text | 8001 | 1 | 32768 |
+| `qwen3-30b` | Text | 8004 | 0,1 | 32768 |
+| `qwen3-vl-8b` | Vision | 8002 | 2,3 | 32768 |
+| `llava-v1.6-7b` | Vision | 8003 | 0,1 | 32768 |
+
+#### Usage
+
+```bash
+# List all available models
+./servem.sh
+
+# Start a specific model (e.g., Qwen3 4B)
+./servem.sh qwen3-4b
+
+# The server will start on the configured port
+# Access the API at: http://localhost:<PORT>/v1
+```
+
+#### Model Configuration
+
+Each model is pre-configured with the following settings:
+- **Tensor Parallelism (TP)**: Automatically enabled for multi-GPU models
+- **GPU Memory Utilization**: Configured per model (0.8-0.9)
+- **Port Management**: Auto-increments if default port is in use
+- **Virtual Environment**: Automatically activates `~/venv/vllm`
+
+To add new models, edit the configuration arrays in [`servem.sh`](servem.sh:75-117).
+
 ### Data Setup
 
 This project uses datasets from [SemBench](https://github.com/SemBench/SemBench). To set up the data:
