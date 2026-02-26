@@ -39,6 +39,7 @@ class LdbWorker:
         self.workload.generate_candidate_external_features()
 
         # Phase (3.2): Select the best schema and return the rewritten query.
-        self.workload.select_schema_and_rewrite_query(debug=True)
+        enriched_features, translated_rules, eval_results = \
+            self.workload.select_schema_and_rewrite_query(debug=True)
 
 

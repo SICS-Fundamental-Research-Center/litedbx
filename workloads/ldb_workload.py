@@ -87,6 +87,9 @@ class LdbWorkload:
                 "labels": self.labeled_data[q_name]["labels"],
             }
 
+            # Update the labeled data.
+            self.labeled_data[q_name]["data"].df = self.coresets[q_name]["data"].df.copy()
+
             # Refine the feature space if enabled.
             if enable_refinement:
                 await self._refine_feature_space(
@@ -170,34 +173,63 @@ class LdbWorkload:
         return self.candidate_external_features
 
 
-    def select_schema_and_rewrite_query(self, debug: bool = False):
+    def select_schema_and_rewrite_query(self, debug: bool = False) -> Tuple[list, list, list]:
 
         best_static_error = float('inf')
-        best_schema = None
-        best_rules = None        
+        best_trans_eval_results = []
+        best_external_features = []
+        best_rules = []        
+
+        pred_eval_results_trace = []
+        trans_eval_results_trace = []
 
         for i in range(len(self.candidate_external_features)):
+
             active_external_features = self.candidate_external_features[:i+1]
+            accumulated_error = 0
+            prediction_eval_results = []
+            translation_eval_results = []
+            translated_rules = []
 
             for q_name, _ in self.queries.items():
-
                 # Propagation labels
-                rules, pred_Y, trans_Y = self._label_propagation(q_name, active_external_features, debug=debug)
+                rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results = \
+                    self._label_propagation(q_name, active_external_features, debug=debug)
+                translated_rules.append(rules)
+                prediction_eval_results.append(pred_eval_results)
+                translation_eval_results.append(trans_eval_results)
                 
                 # Estimate objective error score.
-                L_rew, penalty = self._objective_error_estimation(
+                L_rew, penalty_rew = self._objective_error_estimation(
                     pred_Y, trans_Y, len(active_external_features) + len(self.base_schema))
-                L_obj = L_rew + penalty
+                L_obj = L_rew + penalty_rew
+                accumulated_error += L_obj
                 logger.info((
                     f"Estimated for {q_name} with {i+1} external features: "
-                    f"L_obj = {L_obj} with L_rew={L_rew} and penalty={penalty}."
+                    f"L_obj = {L_obj} with L_rew={L_rew} and penalty={penalty_rew}."
                 ))
 
-                # TODO: Estimate subjective error score.
+                # Estimate subjective error score.
+                L_LOO, penalty_LOO = self._subjective_error_estimation(q_name, active_external_features)
+                L_subj = L_LOO + penalty_LOO
+                accumulated_error += L_subj
+                logger.info((
+                    f"Estimated for {q_name} with {i+1} external features: "
+                    f"L_subj = {L_subj} with L_LOO={L_LOO} and penalty={penalty_LOO}."
+                ))
+            
+            pred_eval_results_trace.append(prediction_eval_results)
+            trans_eval_results_trace.append(translation_eval_results)
 
-                # Update the best schema and best rules.
+            if accumulated_error < best_static_error:
+                best_static_error = accumulated_error
+                best_external_features = active_external_features
+                best_rules = translated_rules
+                best_trans_eval_results = translation_eval_results
 
-                pass
+        return best_external_features, best_rules, best_trans_eval_results
+
+
 
 
     async def _refine_feature_space(self, q_name: str, sem_cq: SemCQ,
@@ -452,7 +484,7 @@ class LdbWorkload:
 
     def _label_propagation(self, q_name: str, 
                            active_external_features: list[str], 
-                           debug: bool = False) -> Tuple[list, pd.Series, pd.Series]:
+                           debug: bool = False) -> Tuple[list, pd.Series, pd.Series, dict, dict]:
 
         train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
         train_Y = self.coresets[q_name]["labels"].astype(int)
@@ -472,30 +504,31 @@ class LdbWorkload:
         trans_Y = apply_rules(rules, test_X_proc)
 
 
-        if debug:
-            # Appendix with ground truth labels.
-            visible_labels = self.labeled_data[q_name]["labels"].astype(int)
-            pred_Y_complete = pd.concat([visible_labels, pred_Y], ignore_index=True)
-            test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
-            trans_Y_complete = pd.concat([visible_labels, trans_Y], ignore_index=True)
+        # Append with ground truth labels.
+        visible_labels = self.labeled_data[q_name]["labels"].astype(int)
+        pred_Y_complete = pd.concat([visible_labels, pred_Y], ignore_index=True)
+        test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
+        trans_Y_complete = pd.concat([visible_labels, trans_Y], ignore_index=True)
 
-            # Evaluate the label propagation results with ground truth.
-            eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
+        # Evaluate the label propagation results with ground truth.
+        pred_eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
+        # Evaluate the query translation results with ground truth.
+        trans_eval_results = evaluate_classifier(trans_Y_complete, test_Y_complete)
+
+        if debug:
             logger.info((
                 f"Evaluation of LP for {q_name} with {len(active_external_features)} external features: "
-                f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
-                f"Precision={eval_results['precision']:.4f}, Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
+                f"TP={pred_eval_results['TP']}, FP={pred_eval_results['FP']}, FN={pred_eval_results['FN']}, "
+                f"Precision={pred_eval_results['precision']:.4f}, Recall={pred_eval_results['recall']:.4f}, F1={pred_eval_results['f1']:.4f}."
             ))
 
-            # Evaluate the query translation results with ground truth.
-            eval_results = evaluate_classifier(trans_Y_complete, test_Y_complete)
             logger.info((
                 f"Evaluation of QT for {q_name} with {len(active_external_features)} external features: "
-                f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
-                f"Precision={eval_results['precision']:.4f}, Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
+                f"TP={trans_eval_results['TP']}, FP={trans_eval_results['FP']}, FN={trans_eval_results['FN']}, "
+                f"Precision={trans_eval_results['precision']:.4f}, Recall={trans_eval_results['recall']:.4f}, F1={trans_eval_results['f1']:.4f}."
             ))
 
-        return rules, pred_Y, trans_Y
+        return rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results
 
 
     def _objective_error_estimation(self, pred_Y: pd.Series, trans_Y: pd.Series, 
@@ -519,9 +552,41 @@ class LdbWorkload:
         return L_rew, penalty
 
 
-        
+    def _subjective_error_estimation(
+            self, q_name: str, 
+            active_external_features: list[str]) -> Tuple[float, float]:
+        X = self.labeled_data[q_name]["data"].select_active_features(active_external_features)
+        Y = self.labeled_data[q_name]["labels"].astype(int)
+        X_encoded = encode_features(X)
 
-    
-    def _subjective_error_estimation(self):
-        pass
+        Y_loo = []
+        Y_true = []
+        loo_step = self.config["loo_step"]
+        for i in range(0, len(X_encoded), loo_step):
+            X_train = X_encoded.drop(index=i)
+            Y_train = Y.drop(index=i)
+            X_test = X_encoded.iloc[[i]]
 
+            clf = train_classifier(X_train, Y_train)
+
+            pred = clf.predict(X_test)[0]
+            Y_loo.append(pred)
+            Y_true.append(Y.iloc[i])
+
+        Y_true_series = pd.Series(Y_true)
+        Y_loo_series = pd.Series(Y_loo)
+
+        # Compute LOO loss score.
+        pi = sum(Y) / len(Y)
+        L_LOO = loss_by_selectivity(Y_true_series, Y_loo_series, pi)
+
+        # Compute the penalty.
+        Gamma_LOO = max(pi, 1-pi) / min(pi, 1-pi)
+        query_size = len(self.queries)
+        data_size = len(Y)
+        delta = self.config["delta"]
+        penalty = Gamma_LOO * math.sqrt(
+            math.log(2 * query_size / delta) / (2 * data_size)
+        )
+
+        return L_LOO, penalty
