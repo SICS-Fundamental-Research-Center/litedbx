@@ -234,6 +234,31 @@ def apply_rules(rules: list, df: pd.DataFrame) -> pd.Series:
     return result.astype(int)
 
 
+def loss_by_selectivity(Y_A: pd.Series, Y_B: pd.Series, pi: float) -> float:
+
+    assert 0 < pi < 1, f"pi must be in (0, 1), got {pi}"
+    assert len(Y_A) == len(Y_B), "Y_A and Y_B must have the same length"
+
+    y_a = np.asarray(Y_A)
+    y_b = np.asarray(Y_B)
+
+    numerator = max(pi, 1 - pi)
+    losses = np.zeros(len(y_a))
+
+    # Case 1: Y_A[i] == 1 and Y_B[i] == 0
+    mask_1_0 = (y_a == 1) & (y_b == 0)
+    losses[mask_1_0] = numerator / pi
+
+    # Case 2: Y_A[i] == 0 and Y_B[i] == 1
+    mask_0_1 = (y_a == 0) & (y_b == 1)
+    losses[mask_0_1] = numerator / (1 - pi)
+
+    # Case 3: Y_A[i] == Y_B[i] (loss is 0, already initialized)
+
+    return float(losses.sum())
+    
+
+
 def _visualize_rule(rule: list) -> str:
     conditions = [f"{feat} {op} {thresh:.3f}" for feat, thresh, op in rule]
     return " AND ".join(conditions)

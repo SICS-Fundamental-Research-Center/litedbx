@@ -6,6 +6,7 @@ from .utils import (
     evaluate_classifier,
     clf_to_rules,
     apply_rules,
+    loss_by_selectivity,
 )
 from .coreset_selector import select_coreset
 
@@ -18,4 +19,5 @@ __all__ = [
     "evaluate_classifier",
     "clf_to_rules",
     "apply_rules",
+    "loss_by_selectivity",
 ]

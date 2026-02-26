@@ -2,6 +2,7 @@ import json
 import pandas as pd
 import logging
 from pathlib import Path
+import math
 from typing import Tuple
 from collections import defaultdict
 from data_structure import LdbData, SemCQ, PopulationSpec, PopulationSpecs, FeatureRefinementResponse
@@ -15,6 +16,7 @@ from common import (
     evaluate_classifier,
     clf_to_rules,
     apply_rules,
+    loss_by_selectivity,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,9 +182,16 @@ class LdbWorkload:
             for q_name, _ in self.queries.items():
 
                 # Propagation labels
-                rules, trans_Y = self._label_propagation(q_name, active_external_features, debug=debug)
+                rules, pred_Y, trans_Y = self._label_propagation(q_name, active_external_features, debug=debug)
                 
-                # TODO: Estimate objective error score.
+                # Estimate objective error score.
+                L_rew, penalty = self._objective_error_estimation(
+                    pred_Y, trans_Y, len(active_external_features) + len(self.base_schema))
+                L_obj = L_rew + penalty
+                logger.info((
+                    f"Estimated for {q_name} with {i+1} external features: "
+                    f"L_obj = {L_obj} with L_rew={L_rew} and penalty={penalty}."
+                ))
 
                 # TODO: Estimate subjective error score.
 
@@ -443,7 +452,7 @@ class LdbWorkload:
 
     def _label_propagation(self, q_name: str, 
                            active_external_features: list[str], 
-                           debug: bool = False) -> Tuple[list, pd.Series]:
+                           debug: bool = False) -> Tuple[list, pd.Series, pd.Series]:
 
         train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
         train_Y = self.coresets[q_name]["labels"].astype(int)
@@ -486,11 +495,32 @@ class LdbWorkload:
                 f"Precision={eval_results['precision']:.4f}, Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
             ))
 
-        return rules, trans_Y
+        return rules, pred_Y, trans_Y
 
 
-    def _objective_error_estimation(self):
-        pass
+    def _objective_error_estimation(self, pred_Y: pd.Series, trans_Y: pd.Series, 
+                                    schema_arity: int) -> Tuple[float, float]:
+        pi = sum(pred_Y) / len(pred_Y)
+        
+        # Compute rewriting loss.
+        L_rew = loss_by_selectivity(pred_Y, trans_Y, pi)
+
+        # Compute the penalty.
+        Gamma_rew = max(pi, 1-pi) / min(pi, 1-pi)
+        d_VC = self.b_rew * schema_arity * math.log(self.b_rew)
+        selected_data_size = len(pred_Y) + self.b_lab
+        query_size = len(self.queries)
+        delta = self.config["delta"]
+        penalty = Gamma_rew * math.sqrt(
+            (d_VC * math.log(selected_data_size) + math.log(2 * query_size / delta)) / 
+            selected_data_size
+        )
+
+        return L_rew, penalty
+
+
+        
+
     
     def _subjective_error_estimation(self):
         pass
