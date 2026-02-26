@@ -1,9 +1,11 @@
 from time import time
-import asyncio
 import logging
 import sys
-from workloads import medical_workloads
-
+from workloads import medical
+from ldb_engine import LdbEngine
+import asyncio
+    
+ENABLE_DEBUG=True
 
 if __name__ == "__main__":
     # Configure logging
@@ -15,26 +17,20 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    workloads = ["Q3"]
+    queries = [
+        "Q1", 
+        # "Q3", 
+        # "Q8"
+    ]
+    workload = medical.get_workload(queries=queries)
 
-    ldb_engine = medical_workloads.build_query_engine(
-        workloads=workloads,
-        feature_enrich_budget=3,
-        query_rewrite_budget=3,
-        hitl_budget=50,
-    )
+    ldb_engine = LdbEngine(workload)
 
     start = time()
 
-    asyncio.run(
-        ldb_engine.apply(
-            queries=workloads,
-            enable_proxies=False
-        )
-    )
+    asyncio.run(ldb_engine.execute(debug=ENABLE_DEBUG))
 
     end = time()
+
     logger.info(f"Total execution time: {end - start} seconds")
-
-
 
