@@ -255,7 +255,9 @@ def loss_by_selectivity(Y_A: pd.Series, Y_B: pd.Series, pi: float) -> float:
 
     # Case 3: Y_A[i] == Y_B[i] (loss is 0, already initialized)
 
-    return float(losses.sum())
+    avg_loss = losses.mean()
+
+    return avg_loss
     
 
 
