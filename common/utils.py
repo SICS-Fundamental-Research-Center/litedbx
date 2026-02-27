@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+from typing import Tuple
 from sklearn.calibration import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
@@ -141,75 +142,116 @@ def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:
         'feature_importance': feature_importance,
         'bad_cases': bad_cases,
     }
-    
+
 
 def clf_to_rules(
     clf: RandomForestClassifier,
-    feature_names: list,
+    feature_names: list[str],
     disjunction_budget: int,
+    min_support: int = 5,
+    max_rule_length: int = 6,
+    length_penalty: float = 0.01,
     debug: bool = False
-) -> list:
+) -> list[list[Tuple[str, float, str]]]:
 
-    assert len(feature_names) == clf.n_features_in_, "Invalid input feature names."
+    assert len(feature_names) == clf.n_features_in_, \
+        "Invalid input feature names."
 
     candidates = []
 
     for tree in clf.estimators_:
         tree_ = tree.tree_
-        children_left = tree_.children_left  # type: ignore[attr-defined]
-        children_right = tree_.children_right  # type: ignore[attr-defined]
-        feature = tree_.feature  # type: ignore[attr-defined]
-        threshold = tree_.threshold  # type: ignore[attr-defined]
-        value = tree_.value  # type: ignore[attr-defined]
-        n_samples = tree_.n_node_samples  # type: ignore[attr-defined]
+
+        children_left = tree_.children_left  # type: ignore
+        children_right = tree_.children_right  # type: ignore
+        feature = tree_.feature  # type: ignore
+        threshold = tree_.threshold  # type: ignore
+        value = tree_.value  # type: ignore
+        n_samples = tree_.n_node_samples  # type: ignore
 
         def traverse(node_id: int, path: list):
+
             # Leaf node
             if children_left[node_id] == children_right[node_id]:
+
                 counts = value[node_id][0]
                 pos_count = counts[1]
                 total = n_samples[node_id]
 
+                # ---- Filtering ----
                 if pos_count == 0:
                     return
 
-                confidence = pos_count / total
-                candidates.append((path.copy(), confidence, total))
+                if total < min_support:
+                    return
+
+                if len(path) > max_rule_length:
+                    return
+
+                # ---- Smoothed confidence (Laplace) ----
+                confidence = (pos_count + 1.0) / (total + 2.0)
+
+                # ---- Balanced score ----
+                # favors both precision and coverage
+                score = confidence * total
+
+                # ---- Length penalty ----
+                score -= length_penalty * len(path)
+
+                candidates.append(
+                    (path.copy(), confidence, total, score)
+                )
                 return
 
-            # Internal node - recurse to children
+            # Internal node
             feat_name = feature_names[feature[node_id]]
             thresh = threshold[node_id]
 
+            # left branch: <=
             if children_left[node_id] != -1:
-                path.append((feat_name, thresh, '<='))
+                path.append((feat_name, thresh, "<="))
                 traverse(children_left[node_id], path)
                 path.pop()
 
+            # right branch: >
             if children_right[node_id] != -1:
-                path.append((feat_name, thresh, '>'))
+                path.append((feat_name, thresh, ">"))
                 traverse(children_right[node_id], path)
                 path.pop()
 
         traverse(0, [])
 
-    # Sort by confidence, then support
-    candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    # ---- Sort by score (not pure confidence) ----
+    candidates.sort(key=lambda x: x[3], reverse=True)
 
-    # Select top rules
-    selected = candidates[:disjunction_budget]
-    rules = [r for r, _, _ in selected]
+    # ---- Deduplicate identical rules ----
+    seen = set()
+    unique_candidates = []
+    for rule, conf, supp, score in candidates:
+        key = tuple(rule)
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append((rule, conf, supp, score))
 
-    if debug:
-        confs = [c for _, c, _ in selected]
-        supps = [s for _, _, s in selected]
-        logger.info(f"Rule Statistics: n={len(rules)}, "
-                   f"conf=({np.mean(confs):.3f}, {np.min(confs):.3f}-{np.max(confs):.3f}), "
-                   f"supp=({np.mean(supps):.1f}, {np.min(supps):.0f}-{np.max(supps):.0f}), "
-                   f"len={np.mean([len(r) for r in rules]):.1f}")
+    # ---- Select top rules ----
+    selected = unique_candidates[:disjunction_budget]
+    rules = [r for r, _, _, _ in selected]
+
+    if debug and selected:
+        confs = [c for _, c, _, _ in selected]
+        supps = [s for _, _, s, _ in selected]
+        lens = [len(r) for r in rules]
+
+        print(
+            f"Rule Statistics: n={len(rules)}, "
+            f"conf=({np.mean(confs):.3f}, "
+            f"{np.min(confs):.3f}-{np.max(confs):.3f}), "
+            f"supp=({np.mean(supps):.1f}, "
+            f"{np.min(supps):.0f}-{np.max(supps):.0f}), "
+            f"len=({np.mean(lens):.1f})"
+        )
 
     return rules
-
 
 def apply_rules(rules: list, df: pd.DataFrame, debug: bool = False) -> pd.Series:
     if not rules:
