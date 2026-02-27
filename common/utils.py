@@ -235,7 +235,7 @@ def clf_to_rules(
         traverse(0, [])
 
     # Remove duplicates
-    candidates = list(set(candidates))
+    candidates = sorted(set(candidates), key=lambda r: str(r))
 
     # ------------------------------------------------------------
     # Greedy marginal coverage selection
