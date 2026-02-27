@@ -540,8 +540,8 @@ class LdbWorkload:
         # Append with ground truth labels.
         visible_labels = self.labeled_data[q_name]["labels"].astype(int)
         pred_Y_complete = pd.concat([visible_labels, pred_Y], ignore_index=True)
-        test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
         trans_Y_complete = pd.concat([visible_labels, trans_Y], ignore_index=True)
+        test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
 
         # Evaluate the label propagation results with ground truth.
         pred_eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
