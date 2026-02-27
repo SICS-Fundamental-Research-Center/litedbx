@@ -203,10 +203,10 @@ def clf_to_rules(
     for tree in clf.estimators_:
         tree_ = tree.tree_
 
-        cl = tree_.children_left
-        cr = tree_.children_right
-        feat = tree_.feature
-        thr = tree_.threshold
+        cl = tree_.children_left  # type: ignore 
+        cr = tree_.children_right  # type: ignore
+        feat = tree_.feature  # type: ignore
+        thr = tree_.threshold  # type: ignore
         val = tree_.value
 
         def traverse(node_id: int, path: list):
@@ -269,6 +269,7 @@ def clf_to_rules(
         selected.append(best_rule)
 
         # Remove covered positives
+        assert best_mask is not None, "best_mask should not be None when best_rule is selected."
         uncovered_pos &= ~best_mask
 
         # Remove rule from candidates
