@@ -527,7 +527,9 @@ class LdbWorkload:
         pred_Y = pd.Series(clf.predict(test_X_proc), index=test_Y.index)
 
         # Perform query translation.
-        rules = clf_to_rules(clf, train_X_proc.columns.tolist(), disjunction_budget=self.b_rew, debug=True)
+        rules = clf_to_rules(clf, train_X_proc.columns.tolist(), 
+                             disjunction_budget=self.b_rew, 
+                             y_train=train_Y, debug=True)
         trans_Y = apply_rules(rules, test_X_proc, debug=debug)
 
 

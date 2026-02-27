@@ -148,14 +148,39 @@ def clf_to_rules(
     clf: RandomForestClassifier,
     feature_names: list[str],
     disjunction_budget: int,
-    min_support: int = 5,
-    max_rule_length: int = 6,
-    length_penalty: float = 0.01,
+    y_train: np.ndarray,
     debug: bool = False
 ) -> list[list[Tuple[str, float, str]]]:
 
-    assert len(feature_names) == clf.n_features_in_, \
-        "Invalid input feature names."
+    assert len(feature_names) == clf.n_features_in_
+
+    # ---- Estimate forest statistics ----
+    leaf_sizes = []
+    depths = []
+
+    N = len(y_train)
+    pos_total = np.sum(y_train == 1)
+    pi = pos_total / N
+
+    for tree in clf.estimators_:
+        tree_ = tree.tree_
+        leaf_mask = tree_.children_left == -1  # type: ignore
+        leaf_sizes.extend(tree_.n_node_samples[leaf_mask])  # type: ignore
+        depths.append(tree_.max_depth)  # type: ignore
+
+    avg_leaf_size = np.mean(leaf_sizes)
+    avg_depth = int(np.mean(depths))
+
+    # ---- Adaptive parameters ----
+    min_support = int(max(0.5 * avg_leaf_size, np.sqrt(N) * pi))
+    min_support = max(min_support, 3)
+
+    max_rule_length = min(6, avg_depth)
+
+    # recall emphasis for rare class
+    beta = 1.0 / np.sqrt(max(pi, 1e-6))
+
+    length_penalty = 0.01 * (1 / avg_depth)
 
     candidates = []
 
@@ -166,19 +191,17 @@ def clf_to_rules(
         children_right = tree_.children_right  # type: ignore
         feature = tree_.feature  # type: ignore
         threshold = tree_.threshold  # type: ignore
-        value = tree_.value  # type: ignore
+        value = tree_.value
         n_samples = tree_.n_node_samples  # type: ignore
 
         def traverse(node_id: int, path: list):
 
-            # Leaf node
             if children_left[node_id] == children_right[node_id]:
 
                 counts = value[node_id][0]
                 pos_count = counts[1]
                 total = n_samples[node_id]
 
-                # ---- Filtering ----
                 if pos_count == 0:
                     return
 
@@ -188,32 +211,39 @@ def clf_to_rules(
                 if len(path) > max_rule_length:
                     return
 
-                # ---- Smoothed confidence (Laplace) ----
-                confidence = (pos_count + 1.0) / (total + 2.0)
+                # ---- precision ----
+                precision = (pos_count + 1.0) / (total + 2.0)
 
-                # ---- Balanced score ----
-                # favors both precision and coverage
-                score = confidence * total
+                # ---- recall ----
+                recall = pos_count / pos_total if pos_total > 0 else 0
 
-                # ---- Length penalty ----
+                # ---- F_beta score ----
+                if precision + recall > 0:
+                    f_beta = (
+                        (1 + beta**2) * precision * recall /
+                        (beta**2 * precision + recall)
+                    )
+                else:
+                    f_beta = 0
+
+                score = f_beta * np.log1p(total)
+
+                # slight length regularization
                 score -= length_penalty * len(path)
 
                 candidates.append(
-                    (path.copy(), confidence, total, score)
+                    (path.copy(), precision, total, score)
                 )
                 return
 
-            # Internal node
             feat_name = feature_names[feature[node_id]]
             thresh = threshold[node_id]
 
-            # left branch: <=
             if children_left[node_id] != -1:
                 path.append((feat_name, thresh, "<="))
                 traverse(children_left[node_id], path)
                 path.pop()
 
-            # right branch: >
             if children_right[node_id] != -1:
                 path.append((feat_name, thresh, ">"))
                 traverse(children_right[node_id], path)
@@ -221,20 +251,19 @@ def clf_to_rules(
 
         traverse(0, [])
 
-    # ---- Sort by score (not pure confidence) ----
     candidates.sort(key=lambda x: x[3], reverse=True)
 
-    # ---- Deduplicate identical rules ----
+    # deduplicate
     seen = set()
-    unique_candidates = []
-    for rule, conf, supp, score in candidates:
+    selected = []
+    for rule, prec, supp, score in candidates:
         key = tuple(rule)
         if key not in seen:
             seen.add(key)
-            unique_candidates.append((rule, conf, supp, score))
+            selected.append((rule, prec, supp, score))
+        if len(selected) >= disjunction_budget:
+            break
 
-    # ---- Select top rules ----
-    selected = unique_candidates[:disjunction_budget]
     rules = [r for r, _, _, _ in selected]
 
     if debug and selected:
@@ -243,11 +272,13 @@ def clf_to_rules(
         lens = [len(r) for r in rules]
 
         print(
-            f"Rule Statistics: n={len(rules)}, "
-            f"conf=({np.mean(confs):.3f}, "
-            f"{np.min(confs):.3f}-{np.max(confs):.3f}), "
-            f"supp=({np.mean(supps):.1f}, "
-            f"{np.min(supps):.0f}-{np.max(supps):.0f}), "
+            f"[Adaptive Rules] "
+            f"N={N}, pi={pi:.3f}, "
+            f"min_sup={min_support}, "
+            f"max_len={max_rule_length}, "
+            f"beta={beta:.2f} | "
+            f"conf=({np.mean(confs):.3f}), "
+            f"supp=({np.mean(supps):.1f}), "
             f"len=({np.mean(lens):.1f})"
         )
 
