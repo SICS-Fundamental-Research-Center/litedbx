@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Literal
 from sklearn.neighbors import NearestNeighbors
 from .utils import (
     encode_features,
@@ -12,11 +12,11 @@ from .utils import (
 
 def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
         unlabeled_X: pd.DataFrame,
-        k_neighbors: int=5) -> Tuple[np.ndarray, pd.Series]:
+        k_neighbors: int=5,
+        mode: Literal["balanced", "emperical"] = "emperical") -> Tuple[np.ndarray, pd.Series]:
 
+    # Compute the confidence scores for all unlabeled samples.
     selectivity = sum(labeled_Y) / len(labeled_Y)
-    select_step = int(len(unlabeled_X) * min(selectivity, 1 - selectivity))
-
     confs = est_conf(labeled_X, labeled_Y, unlabeled_X, selectivity, k_neighbors)
 
     # Sort samples by confidence (descending - highest confs first)
@@ -25,22 +25,28 @@ def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
     # Determine how many samples are predicted as positive vs negative
     # Top selectivity * len(unlabeled_X) are predicted as positive
     n_predicted_pos = int(len(unlabeled_X) * selectivity)
-
-    # Indices of predicted positive and negative samples
     predicted_pos_indices = sorted_indices[:n_predicted_pos]
     predicted_neg_indices = sorted_indices[n_predicted_pos:]
 
-    # Select select_step positive samples with highest confs
-    selected_pos_indices = predicted_pos_indices[:select_step]
-
-    # Select select_step negative samples with lowest confs
-    selected_neg_indices = predicted_neg_indices[-select_step:]
+    if mode == "balanced":
+        # Balanced selection: select top select_step from positives and bottom select_step from negatives
+        select_step = int(len(unlabeled_X) * min(selectivity, 1 - selectivity))
+        selected_pos_indices = predicted_pos_indices[:select_step]
+        selected_neg_indices = predicted_neg_indices[-select_step:]
+    elif mode == "emperical":
+        # Selection with emperical distribution: select according to the predicted ratio
+        # TODO: Determine the optimal selection ratio.
+        ratio = 0.2
+        selected_pos_indices = predicted_pos_indices[:int(n_predicted_pos * ratio)]
+        selected_neg_indices = predicted_neg_indices[-int((len(unlabeled_X) - n_predicted_pos) * ratio):]
+    else:
+        raise ValueError(f"Unsupported selection mode: {mode}")
 
     # Combine selected indices (positives first, then negatives)
     selected_indices = np.concatenate([selected_pos_indices, selected_neg_indices])
 
     # Create labels aligned with the indices (first select_step are positive, rest are negative)
-    selected_Y = pd.Series([1] * select_step + [0] * select_step)
+    selected_Y = pd.Series([1] * len(selected_pos_indices) + [0] * len(selected_neg_indices))
 
     return selected_indices, selected_Y
 
