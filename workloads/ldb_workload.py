@@ -438,7 +438,10 @@ class LdbWorkload:
         }
 
         if debug:
-            logger.debug(f"Acquired labels for {self.scenario}.{q_name}: {self.labeled_data[q_name]['labels'].sum()} positive labels / {len(self.labeled_data[q_name]['data'].df)} labeled samples. Selectivity: {self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}")
+            logger.debug((f"Acquired labels for {self.scenario}.{q_name}: "
+                          f"{self.labeled_data[q_name]['labels'].sum()} positive labels / "
+                          f"{len(self.labeled_data[q_name]['data'].df)} labeled samples. Selectivity: "
+                          f"{self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}"))
 
 
     def _init_feature_space(self, q_name: str, sem_cq: SemCQ) -> list[PopulationSpec]:
