@@ -3,13 +3,13 @@ import pandas as pd
 import logging
 from pathlib import Path
 import math
-from typing import Tuple
+from typing import Tuple, Any
 from collections import defaultdict
 from data_structure import LdbData, SemCQ, PopulationSpec, PopulationSpecs, FeatureRefinementResponse
 from llm import LdbLLMClient, PROMPTS
 from common import (
-    pred_and_eval, 
-    select_coreset, 
+    pred_and_eval,
+    select_coreset,
     compute_feature_importance,
     encode_features,
     train_classifier,
@@ -122,6 +122,7 @@ class LdbWorkload:
                 labeled_Y=labeled_Y,
                 unlabeled_X=unlabeled_X,
                 k_neighbors=self.config.get("k_neighbors", 5),
+                mode="emperical",
             )
 
             # Update the coreset with the selected samples.
@@ -173,64 +174,87 @@ class LdbWorkload:
         return self.candidate_external_features
 
 
-    def select_schema_and_rewrite_query(self, debug: bool = False) -> Tuple[list, list, list]:
+    def select_schema_and_rewrite_query(self, debug: bool = False) -> Tuple[dict, dict]:
 
         best_static_error = float('inf')
-        best_trans_eval_results = []
-        best_external_features = []
-        best_rules = []        
-
-        pred_eval_results_trace = []
-        trans_eval_results_trace = []
+        best_statistics = {}   
+        execution_trace = {}
 
         for i in range(len(self.candidate_external_features)):
 
             active_external_features = self.candidate_external_features[:i+1]
             accumulated_error = 0
-            prediction_eval_results = []
-            translation_eval_results = []
-            translated_rules = []
+
+            stats = [
+                "rules", "features", "pred_eval", "trans_eval", "L_rew",
+                "penalty_rew", "L_LOO", "penalty_LOO", "L_obj", "L_subj", "L_static"
+            ]
+
+            execution_results: dict[str, Any] = {stat: {} for stat in stats}
+            execution_results["L_avg"] = float('inf')
 
             for q_name, _ in self.queries.items():
                 # Propagation labels
                 rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results = \
                     self._label_propagation(q_name, active_external_features, debug=debug)
-                translated_rules.append(rules)
-                prediction_eval_results.append(pred_eval_results)
-                translation_eval_results.append(trans_eval_results)
-                
+
                 # Estimate objective error score.
                 L_rew, penalty_rew = self._objective_error_estimation(
                     pred_Y, trans_Y, len(active_external_features) + len(self.base_schema))
                 L_obj = L_rew + penalty_rew
-                accumulated_error += L_obj
 
                 # Estimate subjective error score.
                 L_LOO, penalty_LOO = self._subjective_error_estimation(q_name, active_external_features)
                 L_subj = L_LOO + penalty_LOO
-                accumulated_error += L_subj
-                
+
+                L_static = L_obj + L_subj
+                accumulated_error += L_static
+
+                # Store metrics organized by type
+                execution_results[q_name] = {
+                    "rules": rules,
+                    "features": active_external_features,
+                    "pred_eval": pred_eval_results,
+                    "trans_eval": trans_eval_results,
+                    "L_rew": L_rew,
+                    "penalty_rew": penalty_rew,
+                    "L_LOO": L_LOO,
+                    "penalty_LOO": penalty_LOO,
+                    "L_obj": L_obj,
+                    "L_subj": L_subj,
+                    "L_static": L_static,
+                }
+                execution_results["rules"][q_name] = rules
+                execution_results["features"][q_name] = active_external_features
+                execution_results["pred_eval"][q_name] = pred_eval_results
+                execution_results["trans_eval"][q_name] = trans_eval_results
+                execution_results["L_rew"][q_name] = L_rew
+                execution_results["penalty_rew"][q_name] = penalty_rew
+                execution_results["L_LOO"][q_name] = L_LOO
+                execution_results["penalty_LOO"][q_name] = penalty_LOO
+                execution_results["L_obj"][q_name] = L_obj
+                execution_results["L_subj"][q_name] = L_subj
+                execution_results["L_static"][q_name] = L_static
+
                 if debug:
-                    logger.info((
+                    logger.info(
                         f"Estimated for {q_name} with {i+1} external features: "
-                        f"L_obj = {L_obj} with L_rew={L_rew} and penalty={penalty_rew}."
-                    ))
+                        f"L_obj = {L_obj:.4f} (L_rew={L_rew:.4f}, penalty={penalty_rew:.4f}), "
+                        f"L_subj = {L_subj:.4f} (L_LOO={L_LOO:.4f}, penalty={penalty_LOO:.4f})"
+                    )
 
-                    logger.info((
-                        f"Estimated for {q_name} with {i+1} external features: "
-                        f"L_subj = {L_subj} with L_LOO={L_LOO} and penalty={penalty_LOO}."
-                    ))
-            
-            pred_eval_results_trace.append(prediction_eval_results)
-            trans_eval_results_trace.append(translation_eval_results)
+            average_error = accumulated_error / len(self.queries)
+            execution_results["L_avg"] = average_error
+            execution_trace[i] = execution_results
 
-            if accumulated_error < best_static_error:
-                best_static_error = accumulated_error
-                best_external_features = active_external_features
-                best_rules = translated_rules
-                best_trans_eval_results = translation_eval_results
+            if average_error < best_static_error:
+                best_static_error = average_error
+                best_statistics = execution_results
 
-        return best_external_features, best_rules, best_trans_eval_results
+        # Report the evaluation trace [for debugging and analysis]
+        self._report_evaluation_trace(execution_trace)
+
+        return best_statistics, execution_trace
 
 
 
@@ -593,3 +617,174 @@ class LdbWorkload:
         )
 
         return L_LOO, penalty
+
+
+    def _report_evaluation_trace(self, execution_trace: dict):
+        """
+        Report the evaluation trace with:
+        1. Overview table with flattened metrics
+        2. Best rules per query (highest trans_f1 or lowest L_avg)
+        3. Per-query breakdown of metrics
+        """
+        if not execution_trace:
+            logger.info("No execution trace to report.")
+            return
+
+        # Helper function to format rules concisely
+        def _format_rule(condition):
+            """Format a single rule condition as 'feature op value'"""
+            if len(condition) == 3:
+                feature, value, op = condition
+                # Format value to 2 decimal places
+                if isinstance(value, (int, float)):
+                    value_str = f"{float(value):.2f}"
+                else:
+                    value_str = str(value)
+                return f"{feature} {op} {value_str}"
+            return str(condition)
+
+        def _format_rules(rules):
+            """Format list of rules into readable string"""
+            if not isinstance(rules, list):
+                return str(rules)
+            formatted = []
+            for rule in rules:
+                if isinstance(rule, list) and len(rule) > 0:
+                    # Join conditions with AND
+                    conditions = " AND ".join([_format_rule(c) for c in rule])
+                    formatted.append(f"  IF {conditions}")
+                else:
+                    formatted.append(f"  {rule}")
+            return "\n".join(formatted) if formatted else "  (no rules)"
+
+        # Get all query names
+        all_query_names = set()
+        for results in execution_trace.values():
+            for key in results.keys():
+                if key not in ["rules", "features", "pred_eval", "trans_eval",
+                               "L_rew", "penalty_rew", "L_LOO", "penalty_LOO",
+                               "L_obj", "L_subj", "L_static", "L_avg"]:
+                    all_query_names.add(key)
+
+        # Find best iteration for each query (highest trans_f1) AND global best (lowest L_avg)
+        best_trans_f1_iters = {}  # query_name -> (iter_idx, trans_f1)
+        global_best_iter = min(execution_trace.keys(),
+                              key=lambda i: execution_trace[i].get("L_avg", float('inf')))
+
+        for q_name in all_query_names:
+            best_trans_f1 = -1
+            best_iter_for_trans = None
+
+            for iter_idx, results in execution_trace.items():
+                if "trans_eval" in results and q_name in results["trans_eval"]:
+                    trans_f1 = results["trans_eval"][q_name].get("f1", -1)
+                    if trans_f1 > best_trans_f1:
+                        best_trans_f1 = trans_f1
+                        best_iter_for_trans = iter_idx
+
+            if best_iter_for_trans is not None:
+                best_trans_f1_iters[q_name] = (best_iter_for_trans, best_trans_f1)
+
+        # ========== SECTION 1: OVERVIEW TABLE ==========
+        overview_data = []
+        for iter_idx, results in execution_trace.items():
+            for q_name in all_query_names:
+                row = {
+                    "Iter": iter_idx,
+                    "NFeat": iter_idx + 1,
+                    "Query": q_name,
+                }
+
+                if "pred_eval" in results and q_name in results["pred_eval"]:
+                    pred_eval = results["pred_eval"][q_name]
+                    row["pred_f1"] = f"{pred_eval.get('f1', 0):.2f}"
+                    row["pred_p"] = f"{pred_eval.get('precision', 0):.2f}"
+                    row["pred_r"] = f"{pred_eval.get('recall', 0):.2f}"
+
+                if "trans_eval" in results and q_name in results["trans_eval"]:
+                    trans_eval = results["trans_eval"][q_name]
+                    row["trans_f1"] = f"{trans_eval.get('f1', 0):.2f}"
+                    row["trans_p"] = f"{trans_eval.get('precision', 0):.2f}"
+                    row["trans_r"] = f"{trans_eval.get('recall', 0):.2f}"
+
+                row["L_obj"] = f"{results.get('L_obj', {}).get(q_name, 0):.2f}"
+                row["L_subj"] = f"{results.get('L_subj', {}).get(q_name, 0):.2f}"
+                row["L_static"] = f"{results.get('L_static', {}).get(q_name, 0):.2f}"
+
+                overview_data.append(row)
+
+        df_overview = pd.DataFrame(overview_data)
+        col_order = ["Iter", "NFeat", "Query", "pred_f1", "pred_p", "pred_r",
+                     "trans_f1", "trans_p", "trans_r", "L_obj", "L_subj", "L_static"]
+        col_order = [c for c in col_order if c in df_overview.columns]
+        df_overview = df_overview[col_order]
+
+        print("\n" + "="*100)
+        print("OVERVIEW - Evaluation Metrics per Iteration")
+        print("="*100)
+        print(df_overview.to_string(index=False))
+        print("="*100)
+
+        # ========== SECTION 2: AVERAGE ERROR ==========
+        avg_errors = [{
+            "Iter": i,
+            "NFeat": i + 1,
+            "L_avg": f"{results.get('L_avg', 0):.2f}"
+        } for i, results in execution_trace.items()]
+
+        print("\nAverage Error per Iteration:")
+        print("-" * 40)
+        print(pd.DataFrame(avg_errors).to_string(index=False))
+        print("-" * 40)
+
+        # ========== SECTION 3: BEST RULES PER QUERY ==========
+        print("\n" + "="*100)
+        print("BEST RULES PER QUERY")
+        print("="*100)
+
+        for q_name in sorted(all_query_names):
+            print(f"\n{'='*80}")
+            print(f"Query: {q_name}")
+            print('='*80)
+
+            # Show rules from iteration with highest trans_f1
+            if q_name in best_trans_f1_iters:
+                iter_idx, trans_f1 = best_trans_f1_iters[q_name]
+                results = execution_trace[iter_idx]
+
+                print(f"\n[Highest trans_f1={trans_f1:.2f}] @ Iter {iter_idx} (NFeat={iter_idx + 1})")
+
+                if "features" in results and q_name in results["features"]:
+                    print(f"Features: {results['features'][q_name]}")
+
+                if "rules" in results and q_name in results["rules"]:
+                    rules = results["rules"][q_name]
+                    print("Rules:")
+                    print(_format_rules(rules))
+
+                if "trans_eval" in results and q_name in results["trans_eval"]:
+                    te = results["trans_eval"][q_name]
+                    print(f"Metrics: trans_f1={te.get('f1', 0):.2f}, "
+                          f"L_static={results.get('L_static', {}).get(q_name, 0):.2f}")
+
+            # Show rules from iteration with lowest L_avg (global best)
+            results = execution_trace[global_best_iter]
+            l_avg = results.get("L_avg", 0)
+
+            print(f"\n[Lowest L_avg={l_avg:.2f}] @ Iter {global_best_iter} (NFeat={global_best_iter + 1})")
+
+            if "features" in results and q_name in results["features"]:
+                print(f"Features: {results['features'][q_name]}")
+
+            if "rules" in results and q_name in results["rules"]:
+                rules = results["rules"][q_name]
+                print("Rules:")
+                print(_format_rules(rules))
+
+            if "trans_eval" in results and q_name in results["trans_eval"]:
+                te = results["trans_eval"][q_name]
+                print(f"Metrics: trans_f1={te.get('f1', 0):.2f}, "
+                      f"L_static={results.get('L_static', {}).get(q_name, 0):.2f}")
+
+        print("\n" + "="*100 + "\n")
+
