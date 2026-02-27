@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import Tuple
+from typing import Tuple, List
 from sklearn.calibration import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
@@ -146,143 +146,181 @@ def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:
 
 def clf_to_rules(
     clf: RandomForestClassifier,
-    feature_names: list[str],
+    feature_names: List[str],
     disjunction_budget: int,
     y_train: np.ndarray,
     debug: bool = False
-) -> list[list[Tuple[str, float, str]]]:
+) -> List[List[Tuple[str, float, str]]]:
 
     assert len(feature_names) == clf.n_features_in_
 
-    # ---- Estimate forest statistics ----
-    leaf_sizes = []
-    depths = []
-
+    # ------------------------------------------------------------------
+    # 1. Dataset & forest statistics
+    # ------------------------------------------------------------------
     N = len(y_train)
-    pos_total = np.sum(y_train == 1)
-    pi = pos_total / N
+    pos_total = int(np.sum(y_train == 1))
+    pi = pos_total / max(N, 1)
 
+    leaf_sizes, depths = [], []
     for tree in clf.estimators_:
         tree_ = tree.tree_
-        leaf_mask = tree_.children_left == -1  # type: ignore
-        leaf_sizes.extend(tree_.n_node_samples[leaf_mask])  # type: ignore
-        depths.append(tree_.max_depth)  # type: ignore
+        is_leaf = tree_.children_left == -1
+        leaf_sizes.extend(tree_.n_node_samples[is_leaf])
+        depths.append(tree_.max_depth)
 
     avg_leaf_size = np.mean(leaf_sizes)
-    avg_depth = int(np.mean(depths))
+    avg_depth = max(int(np.mean(depths)), 1)
 
-    # ---- Adaptive parameters ----
-    min_support = int(max(0.5 * avg_leaf_size, np.sqrt(N) * pi))
-    min_support = max(min_support, 3)
-
+    # ------------------------------------------------------------------
+    # 2. Adaptive hyperparameters
+    # ------------------------------------------------------------------
+    min_support = int(max(0.5 * avg_leaf_size, np.sqrt(N) * pi, 3))
     max_rule_length = min(6, avg_depth)
 
-    # recall emphasis for rare class
     beta = 1.0 / np.sqrt(max(pi, 1e-6))
+    length_penalty = 0.01 / avg_depth
 
-    length_penalty = 0.01 * (1 / avg_depth)
+    # ------------------------------------------------------------------
+    # 3. Canonicalization
+    # ------------------------------------------------------------------
+    def canonicalize_rule(path):
+        intervals = {}
 
+        for feat, thresh, op in path:
+            if feat not in intervals:
+                intervals[feat] = [-np.inf, np.inf]
+
+            if op == "<=":
+                intervals[feat][1] = min(intervals[feat][1], thresh)
+            else:  # ">"
+                intervals[feat][0] = max(intervals[feat][0], thresh)
+
+        return tuple(
+            (feat, low, high)
+            for feat, (low, high) in sorted(intervals.items())
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Rule extraction
+    # ------------------------------------------------------------------
     candidates = []
 
     for tree in clf.estimators_:
         tree_ = tree.tree_
 
-        children_left = tree_.children_left  # type: ignore
-        children_right = tree_.children_right  # type: ignore
-        feature = tree_.feature  # type: ignore
-        threshold = tree_.threshold  # type: ignore
-        value = tree_.value
-        n_samples = tree_.n_node_samples  # type: ignore
+        cl = tree_.children_left
+        cr = tree_.children_right
+        feat = tree_.feature
+        thr = tree_.threshold
+        val = tree_.value
+        node_samples = tree_.n_node_samples
 
         def traverse(node_id: int, path: list):
 
-            if children_left[node_id] == children_right[node_id]:
+            if cl[node_id] == cr[node_id]:  # leaf
+                total = node_samples[node_id]
+                pos = val[node_id][0][1]
 
-                counts = value[node_id][0]
-                pos_count = counts[1]
-                total = n_samples[node_id]
-
-                if pos_count == 0:
+                if pos == 0 or total < min_support or len(path) > max_rule_length:
                     return
 
-                if total < min_support:
-                    return
+                precision = (pos + 1.0) / (total + 2.0)
+                recall = pos / pos_total if pos_total else 0.0
 
-                if len(path) > max_rule_length:
-                    return
+                denom = beta**2 * precision + recall
+                f_beta = ((1 + beta**2) * precision * recall / denom) if denom else 0.0
 
-                # ---- precision ----
-                precision = (pos_count + 1.0) / (total + 2.0)
+                score = f_beta * np.log1p(total) - length_penalty * len(path)
 
-                # ---- recall ----
-                recall = pos_count / pos_total if pos_total > 0 else 0
-
-                # ---- F_beta score ----
-                if precision + recall > 0:
-                    f_beta = (
-                        (1 + beta**2) * precision * recall /
-                        (beta**2 * precision + recall)
-                    )
-                else:
-                    f_beta = 0
-
-                score = f_beta * np.log1p(total)
-
-                # slight length regularization
-                score -= length_penalty * len(path)
-
-                candidates.append(
-                    (path.copy(), precision, total, score)
-                )
+                canon = canonicalize_rule(path)
+                candidates.append((canon, score))
                 return
 
-            feat_name = feature_names[feature[node_id]]
-            thresh = threshold[node_id]
+            fname = feature_names[feat[node_id]]
+            threshold = thr[node_id]
 
-            if children_left[node_id] != -1:
-                path.append((feat_name, thresh, "<="))
-                traverse(children_left[node_id], path)
-                path.pop()
+            path.append((fname, threshold, "<="))
+            traverse(cl[node_id], path)
+            path.pop()
 
-            if children_right[node_id] != -1:
-                path.append((feat_name, thresh, ">"))
-                traverse(children_right[node_id], path)
-                path.pop()
+            path.append((fname, threshold, ">"))
+            traverse(cr[node_id], path)
+            path.pop()
 
         traverse(0, [])
 
-    candidates.sort(key=lambda x: x[3], reverse=True)
+    # ------------------------------------------------------------------
+    # 5. Subsumption-aware selection
+    # ------------------------------------------------------------------
+    def subsumes(rule_a, rule_b):
+        """
+        True if rule_a subsumes rule_b.
+        Both are canonical interval tuples:
+        (feature, low, high)
+        """
+        a_dict = {f: (l, h) for f, l, h in rule_a}
+        b_dict = {f: (l, h) for f, l, h in rule_b}
 
-    # deduplicate
-    seen = set()
+        for feat, (low_b, high_b) in b_dict.items():
+            if feat not in a_dict:
+                return False
+            low_a, high_a = a_dict[feat]
+            if low_a > low_b or high_a < high_b:
+                return False
+
+        return True
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+
     selected = []
-    for rule, prec, supp, score in candidates:
-        key = tuple(rule)
-        if key not in seen:
-            seen.add(key)
-            selected.append((rule, prec, supp, score))
+
+    for rule, score in candidates:
+
+        # Skip if already covered by a stronger rule
+        if any(subsumes(sel_rule, rule) for sel_rule, _ in selected):
+            continue
+
+        # Remove weaker rules this rule subsumes
+        selected = [
+            (sel_rule, sel_score)
+            for sel_rule, sel_score in selected
+            if not subsumes(rule, sel_rule)
+        ]
+
+        selected.append((rule, score))
+
         if len(selected) >= disjunction_budget:
             break
 
-    rules = [r for r, _, _, _ in selected]
+    # ------------------------------------------------------------------
+    # 6. Reconstruct readable rules
+    # ------------------------------------------------------------------
+    rules = []
 
-    if debug and selected:
-        confs = [c for _, c, _, _ in selected]
-        supps = [s for _, _, s, _ in selected]
-        lens = [len(r) for r in rules]
+    for rule_intervals, _ in selected:
+        reconstructed = []
+        for feat, low, high in rule_intervals:
+            if low != -np.inf:
+                reconstructed.append((feat, low, ">"))
+            if high != np.inf:
+                reconstructed.append((feat, high, "<="))
+        rules.append(reconstructed)
 
+    # ------------------------------------------------------------------
+    # 7. Debug
+    # ------------------------------------------------------------------
+    if debug and rules:
+        lengths = [len(r) for r in rules]
         print(
             f"[Adaptive Rules] "
-            f"N={N}, pi={pi:.3f}, "
-            f"min_sup={min_support}, "
-            f"max_len={max_rule_length}, "
-            f"beta={beta:.2f} | "
-            f"conf=({np.mean(confs):.3f}), "
-            f"supp=({np.mean(supps):.1f}), "
-            f"len=({np.mean(lens):.1f})"
+            f"N={N}, pi={pi:.3f}, min_sup={min_support}, "
+            f"max_len={max_rule_length}, beta={beta:.2f} | "
+            f"n_rules={len(rules)}, avg_len={np.mean(lengths):.2f}"
         )
 
     return rules
+
+
 
 def apply_rules(rules: list, df: pd.DataFrame, debug: bool = False) -> pd.Series:
     if not rules:
