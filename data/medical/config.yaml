@@ -1,3 +1,3 @@
-base_features: [age,gender,smoking_history,did_family_have_cancer,patient_id]
+base_features: [age,gender,smoking_history,did_family_have_cancer]
 id_features: [patient_id,skin_image_id,xray_id,symptom_id]
 foreign_keys: [image_path,image_path_xray,symptoms]
