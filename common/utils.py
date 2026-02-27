@@ -158,6 +158,7 @@ def clf_to_rules(
     N = len(y_train)
     pos_mask = (y_train == 1)
     neg_mask = (y_train == 0)
+    _lambda = sum(neg_mask) / max(1, sum(pos_mask))
 
     # ------------------------------------------------------------
     # Canonicalization
@@ -245,7 +246,7 @@ def clf_to_rules(
     for _ in range(disjunction_budget):
 
         best_rule = None
-        best_gain = 0
+        best_gain = -1 * np.inf
         best_mask = None
 
         for rule in candidates:
@@ -256,7 +257,7 @@ def clf_to_rules(
             new_neg = np.sum(mask & neg_mask)
 
             # Gain function (tunable)
-            gain = new_pos - 0.5 * new_neg
+            gain = new_pos - _lambda * new_neg
 
             if gain > best_gain:
                 best_gain = gain
@@ -293,7 +294,7 @@ def clf_to_rules(
         rules.append(reconstructed)
 
     if debug:
-        print(f"[Marginal OR Rules] selected={len(rules)}")
+        print(f"[Marginal OR Rules] _lambda={_lambda}, selected={len(rules)}")
 
     return rules
 
