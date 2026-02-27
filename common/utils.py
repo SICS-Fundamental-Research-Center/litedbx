@@ -211,7 +211,7 @@ def clf_to_rules(
     return rules
 
 
-def apply_rules(rules: list, df: pd.DataFrame) -> pd.Series:
+def apply_rules(rules: list, df: pd.DataFrame, debug: bool = False) -> pd.Series:
     if not rules:
         return pd.Series(0, index=df.index)
 
@@ -226,8 +226,9 @@ def apply_rules(rules: list, df: pd.DataFrame) -> pd.Series:
                 mask &= (df[feat_name] <= thresh)
             else:
                 mask &= (df[feat_name] > thresh)
-        logger.info(f"Applied: {_visualize_rule(rule)}")
-        logger.info(f"  Rule coverage: {mask.sum()} / {len(df)} samples")
+        if debug:
+            logger.info(f"Applied: {_visualize_rule(rule)}")
+            logger.info(f"  Rule coverage: {mask.sum()} / {len(df)} samples")
 
         result |= mask
 
