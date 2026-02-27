@@ -148,41 +148,20 @@ def clf_to_rules(
     clf: RandomForestClassifier,
     feature_names: List[str],
     disjunction_budget: int,
+    X_train: np.ndarray,
     y_train: np.ndarray,
     debug: bool = False
 ) -> List[List[Tuple[str, float, str]]]:
 
     assert len(feature_names) == clf.n_features_in_
 
-    # ------------------------------------------------------------------
-    # 1. Dataset & forest statistics
-    # ------------------------------------------------------------------
     N = len(y_train)
-    pos_total = int(np.sum(y_train == 1))
-    pi = pos_total / max(N, 1)
+    pos_mask = (y_train == 1)
+    neg_mask = (y_train == 0)
 
-    leaf_sizes, depths = [], []
-    for tree in clf.estimators_:
-        tree_ = tree.tree_
-        is_leaf = tree_.children_left == -1
-        leaf_sizes.extend(tree_.n_node_samples[is_leaf])
-        depths.append(tree_.max_depth)
-
-    avg_leaf_size = np.mean(leaf_sizes)
-    avg_depth = max(int(np.mean(depths)), 1)
-
-    # ------------------------------------------------------------------
-    # 2. Adaptive hyperparameters
-    # ------------------------------------------------------------------
-    min_support = int(max(0.5 * avg_leaf_size, np.sqrt(N) * pi, 3))
-    max_rule_length = min(6, avg_depth)
-
-    beta = 1.0 / np.sqrt(max(pi, 1e-6))
-    length_penalty = 0.01 / avg_depth
-
-    # ------------------------------------------------------------------
-    # 3. Canonicalization
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # Canonicalization
+    # ------------------------------------------------------------
     def canonicalize_rule(path):
         intervals = {}
 
@@ -192,7 +171,7 @@ def clf_to_rules(
 
             if op == "<=":
                 intervals[feat][1] = min(intervals[feat][1], thresh)
-            else:  # ">"
+            else:
                 intervals[feat][0] = max(intervals[feat][0], thresh)
 
         return tuple(
@@ -200,9 +179,25 @@ def clf_to_rules(
             for feat, (low, high) in sorted(intervals.items())
         )
 
-    # ------------------------------------------------------------------
-    # 4. Rule extraction
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # Evaluate rule coverage on training data
+    # ------------------------------------------------------------
+    def evaluate_rule(rule):
+        mask = np.ones(N, dtype=bool)
+
+        for feat, low, high in rule:
+            idx = feature_names.index(feat)
+
+            if low != -np.inf:
+                mask &= (X_train[:, idx] > low)
+            if high != np.inf:
+                mask &= (X_train[:, idx] <= high)
+
+        return mask
+
+    # ------------------------------------------------------------
+    # Extract candidate rules from forest
+    # ------------------------------------------------------------
     candidates = []
 
     for tree in clf.estimators_:
@@ -213,27 +208,16 @@ def clf_to_rules(
         feat = tree_.feature
         thr = tree_.threshold
         val = tree_.value
-        node_samples = tree_.n_node_samples
 
         def traverse(node_id: int, path: list):
 
             if cl[node_id] == cr[node_id]:  # leaf
-                total = node_samples[node_id]
                 pos = val[node_id][0][1]
-
-                if pos == 0 or total < min_support or len(path) > max_rule_length:
+                if pos == 0:
                     return
 
-                precision = (pos + 1.0) / (total + 2.0)
-                recall = pos / pos_total if pos_total else 0.0
-
-                denom = beta**2 * precision + recall
-                f_beta = ((1 + beta**2) * precision * recall / denom) if denom else 0.0
-
-                score = f_beta * np.log1p(total) - length_penalty * len(path)
-
                 canon = canonicalize_rule(path)
-                candidates.append((canon, score))
+                candidates.append(canon)
                 return
 
             fname = feature_names[feat[node_id]]
@@ -249,74 +233,66 @@ def clf_to_rules(
 
         traverse(0, [])
 
-    # ------------------------------------------------------------------
-    # 5. Subsumption-aware selection
-    # ------------------------------------------------------------------
-    def subsumes(rule_a, rule_b):
-        """
-        True if rule_a subsumes rule_b.
-        Both are canonical interval tuples:
-        (feature, low, high)
-        """
-        a_dict = {f: (l, h) for f, l, h in rule_a}
-        b_dict = {f: (l, h) for f, l, h in rule_b}
+    # Remove duplicates
+    candidates = list(set(candidates))
 
-        for feat, (low_b, high_b) in b_dict.items():
-            if feat not in a_dict:
-                return False
-            low_a, high_a = a_dict[feat]
-            if low_a > low_b or high_a < high_b:
-                return False
-
-        return True
-
-    candidates.sort(key=lambda x: x[1], reverse=True)
-
+    # ------------------------------------------------------------
+    # Greedy marginal coverage selection
+    # ------------------------------------------------------------
     selected = []
+    uncovered_pos = pos_mask.copy()
 
-    for rule, score in candidates:
+    for _ in range(disjunction_budget):
 
-        # Skip if already covered by a stronger rule
-        if any(subsumes(sel_rule, rule) for sel_rule, _ in selected):
-            continue
+        best_rule = None
+        best_gain = 0
+        best_mask = None
 
-        # Remove weaker rules this rule subsumes
-        selected = [
-            (sel_rule, sel_score)
-            for sel_rule, sel_score in selected
-            if not subsumes(rule, sel_rule)
-        ]
+        for rule in candidates:
 
-        selected.append((rule, score))
+            mask = evaluate_rule(rule)
 
-        if len(selected) >= disjunction_budget:
+            new_pos = np.sum(mask & uncovered_pos)
+            new_neg = np.sum(mask & neg_mask)
+
+            # Gain function (tunable)
+            gain = new_pos - 0.5 * new_neg
+
+            if gain > best_gain:
+                best_gain = gain
+                best_rule = rule
+                best_mask = mask
+
+        if best_rule is None or best_gain <= 0:
             break
 
-    # ------------------------------------------------------------------
-    # 6. Reconstruct readable rules
-    # ------------------------------------------------------------------
+        selected.append(best_rule)
+
+        # Remove covered positives
+        uncovered_pos &= ~best_mask
+
+        # Remove rule from candidates
+        candidates.remove(best_rule)
+
+        if np.sum(uncovered_pos) == 0:
+            break
+
+    # ------------------------------------------------------------
+    # Reconstruct readable rules
+    # ------------------------------------------------------------
     rules = []
 
-    for rule_intervals, _ in selected:
+    for rule in selected:
         reconstructed = []
-        for feat, low, high in rule_intervals:
+        for feat, low, high in rule:
             if low != -np.inf:
                 reconstructed.append((feat, low, ">"))
             if high != np.inf:
                 reconstructed.append((feat, high, "<="))
         rules.append(reconstructed)
 
-    # ------------------------------------------------------------------
-    # 7. Debug
-    # ------------------------------------------------------------------
-    if debug and rules:
-        lengths = [len(r) for r in rules]
-        print(
-            f"[Adaptive Rules] "
-            f"N={N}, pi={pi:.3f}, min_sup={min_support}, "
-            f"max_len={max_rule_length}, beta={beta:.2f} | "
-            f"n_rules={len(rules)}, avg_len={np.mean(lengths):.2f}"
-        )
+    if debug:
+        print(f"[Marginal OR Rules] selected={len(rules)}")
 
     return rules
 

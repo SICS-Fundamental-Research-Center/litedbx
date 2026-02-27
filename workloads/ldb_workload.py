@@ -529,7 +529,8 @@ class LdbWorkload:
         # Perform query translation.
         rules = clf_to_rules(clf, train_X_proc.columns.tolist(), 
                              disjunction_budget=self.b_rew, 
-                             y_train=train_Y, debug=True)
+                             X_train=train_X_proc.to_numpy(), y_train=train_Y, 
+                             debug=True)
         trans_Y = apply_rules(rules, test_X_proc, debug=debug)
 
 
