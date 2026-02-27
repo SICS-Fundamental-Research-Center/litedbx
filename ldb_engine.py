@@ -33,13 +33,13 @@ class LdbEngine:
         await self.workload.populate_unlabeled_data()
 
         # Phase (2.3): Expand the coreset.
-        self.workload.expand_coreset(debug=True)
+        self.workload.expand_coreset(debug=False)
 
         # Phase (3.1): Generate the candidate external features for each dataset.
         self.workload.generate_candidate_external_features()
 
         # Phase (3.2): Select the best schema and return the rewritten query.
         enriched_features, translated_rules, eval_results = \
-            self.workload.select_schema_and_rewrite_query(debug=True)
+            self.workload.select_schema_and_rewrite_query(debug=False)
 
 

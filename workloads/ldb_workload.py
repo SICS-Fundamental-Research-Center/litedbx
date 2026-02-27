@@ -204,19 +204,22 @@ class LdbWorkload:
                     pred_Y, trans_Y, len(active_external_features) + len(self.base_schema))
                 L_obj = L_rew + penalty_rew
                 accumulated_error += L_obj
-                logger.info((
-                    f"Estimated for {q_name} with {i+1} external features: "
-                    f"L_obj = {L_obj} with L_rew={L_rew} and penalty={penalty_rew}."
-                ))
 
                 # Estimate subjective error score.
                 L_LOO, penalty_LOO = self._subjective_error_estimation(q_name, active_external_features)
                 L_subj = L_LOO + penalty_LOO
                 accumulated_error += L_subj
-                logger.info((
-                    f"Estimated for {q_name} with {i+1} external features: "
-                    f"L_subj = {L_subj} with L_LOO={L_LOO} and penalty={penalty_LOO}."
-                ))
+                
+                if debug:
+                    logger.info((
+                        f"Estimated for {q_name} with {i+1} external features: "
+                        f"L_obj = {L_obj} with L_rew={L_rew} and penalty={penalty_rew}."
+                    ))
+
+                    logger.info((
+                        f"Estimated for {q_name} with {i+1} external features: "
+                        f"L_subj = {L_subj} with L_LOO={L_LOO} and penalty={penalty_LOO}."
+                    ))
             
             pred_eval_results_trace.append(prediction_eval_results)
             trans_eval_results_trace.append(translation_eval_results)
@@ -501,7 +504,7 @@ class LdbWorkload:
 
         # Perform query translation.
         rules = clf_to_rules(clf, train_X_proc.columns.tolist(), disjunction_budget=self.b_rew, debug=debug)
-        trans_Y = apply_rules(rules, test_X_proc)
+        trans_Y = apply_rules(rules, test_X_proc, debug=debug)
 
 
         # Append with ground truth labels.
