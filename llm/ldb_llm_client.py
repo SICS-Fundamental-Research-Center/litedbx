@@ -58,9 +58,14 @@ class PromptParams:
 class LdbLLMClient:
     def __init__(self):
         self.client = litellm
-        self.client_struct = instructor.from_litellm(
+        self.client_struct_json = instructor.from_litellm(
             litellm.completion, mode=Mode.JSON)
-        self.client_struct_async = instructor.from_litellm(litellm.acompletion, mode=Mode.JSON)
+        self.client_struct_async_json = instructor.from_litellm(
+            litellm.acompletion, mode=Mode.JSON)
+        self.client_struct_tools = instructor.from_litellm(
+            litellm.completion, mode=Mode.TOOLS)
+        self.client_struct_async_tools = instructor.from_litellm(
+            litellm.acompletion, mode=Mode.TOOLS)
 
         with open(Path(__file__).parent / "config.yaml") as f:
             self.config = yaml.safe_load(f)
@@ -100,7 +105,7 @@ class LdbLLMClient:
             model_id: Optional[int] = None,
             enable_token_usage: bool = True,
     ):
-        params, cost_params = self._construct_prompt_params(
+        params, cost_params, mode = self._construct_prompt_params(
             is_remote=is_remote,
             modality=modality,
             prompt=prompt,
@@ -110,7 +115,7 @@ class LdbLLMClient:
         )
 
         if response_model:
-            return self._invoke_structured(params, enable_token_usage, cost_params)
+            return self._invoke_structured(params, enable_token_usage, cost_params, mode)
         else:
             return self._invoke(params, enable_token_usage, cost_params)
 
@@ -127,7 +132,7 @@ class LdbLLMClient:
     ):
         tasks = []
         for idx, data_item in enumerate(data_items):
-            params, cost_params = self._construct_prompt_params(
+            params, cost_params, mode = self._construct_prompt_params(
                 is_remote=is_remote,
                 modality=modality,
                 prompt=prompt,
@@ -136,7 +141,7 @@ class LdbLLMClient:
                 model_index=model_id,
             )
             if response_model:
-                tasks.append(self._ainvoke_structured(idx, params, enable_token_usage, cost_params))
+                tasks.append(self._ainvoke_structured(idx, params, enable_token_usage, cost_params, mode))
             else:
                 tasks.append(self._ainvoke(idx, params, enable_token_usage, cost_params))
 
@@ -154,10 +159,10 @@ class LdbLLMClient:
             data_items: Optional[List[str]] = None,
             response_model: Optional[Type[BaseModel]] = None,
             model_index: Optional[int] = None,
-    ) -> Tuple[PromptParams, dict]:
+    ) -> Tuple[PromptParams, dict, str]:
         if not model_index:
             model_index = 0
-        kwargs, cost_params = \
+        kwargs, cost_params, mode = \
             self._get_model_kw(is_remote=is_remote, modality=modality, model_index=model_index)
         params = PromptParams(kwargs=kwargs)
         params.setup_prompt(prompt)
@@ -166,7 +171,7 @@ class LdbLLMClient:
                 params.add_data_item(data_item, modality=modality)
         if response_model:
             params.structuring(response_model)
-        return params, cost_params
+        return params, cost_params, mode
 
 
     def _get_model_kw(self, is_remote: bool, modality: str, model_index: Optional[int] = None):
@@ -183,6 +188,7 @@ class LdbLLMClient:
             "output_cost": lm_params[model_index].get("output_cost"),
             "output_cost_thinking": lm_params[model_index].get("output_cost_thinking")
         }
+        mode = lm_params[model_index].get("mode", "JSON").upper()
 
         if lm_type == "REMOTE_MODELS":
             lm_params = {
@@ -197,9 +203,10 @@ class LdbLLMClient:
                 "api_base": lm_params[model_index]["api_base"],
             }
 
-        return  dict(lm_params, **self.kwargs), cost_params
+        return  dict(lm_params, **self.kwargs), cost_params, mode
 
-    def _invoke(self, params: PromptParams, enable_token_usage: bool = True, cost_params: Optional[dict] = None):
+    def _invoke(self, params: PromptParams, enable_token_usage: bool = True, 
+                cost_params: Optional[dict] = None):
         resp =  self.client.completion(**params.kwargs)
         if enable_token_usage:
             assert cost_params is not None, "Cost parameters must be provided when token usage tracking is enabled."
@@ -215,9 +222,17 @@ class LdbLLMClient:
                 self.usage_statistics["prompt_cost"] + self.usage_statistics["completion_cost"]
         return resp
 
-    def _invoke_structured(self, params: PromptParams, enable_token_usage: bool = True, cost_params: Optional[dict] = None):
+    def _invoke_structured(self, params: PromptParams, enable_token_usage: bool = True, 
+                           cost_params: Optional[dict] = None, mode: str = "JSON"):
+        _client = None
+        if mode == "JSON":
+            _client = self.client_struct_json
+        elif mode == "TOOLS":
+            _client = self.client_struct_tools
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
         # Call instructor - mode is already set during initialization
-        resp, completion = self.client_struct.create_with_completion(
+        resp, completion = _client.create_with_completion(
             **params.kwargs
         )
         if enable_token_usage:
@@ -234,8 +249,8 @@ class LdbLLMClient:
                 self.usage_statistics["prompt_cost"] + self.usage_statistics["completion_cost"]
         return resp
 
-    async def _ainvoke(
-            self, worker_id, params: PromptParams, enable_token_usage: bool = True, cost_params: Optional[dict] = None):
+    async def _ainvoke(self, worker_id, params: PromptParams, enable_token_usage: bool = True, 
+                       cost_params: Optional[dict] = None):
         attempt = 0
 
         while attempt <= self.max_retries:
@@ -262,15 +277,25 @@ class LdbLLMClient:
                     raise e
                 await asyncio.sleep(min(2**attempt, 30))
 
-    async def _ainvoke_structured(
-            self, worker_id, params: PromptParams, enable_token_usage: bool = True, cost_params: Optional[dict] = None):
+    async def _ainvoke_structured(self, worker_id, params: PromptParams, enable_token_usage: bool = True, 
+                                  cost_params: Optional[dict] = None, mode: str = "JSON"):
+
+        _client = None
+        if mode == "JSON":
+            _client = self.client_struct_async_json
+        elif mode == "TOOLS":
+            _client = self.client_struct_async_tools
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")        
+
+
         attempt = 0
 
         while attempt <= self.max_retries:
             try:
                 async with self.sem:
                     resp, completion = (
-                        await self.client_struct_async.create_with_completion(
+                        await _client.create_with_completion(
                             **params.kwargs
                         )
                     )
@@ -311,14 +336,23 @@ class LdbLLMClient:
 
         prompt = "Does this X-Ray indicate pneumonia? Answer with True or False."
 
-        resp = self.invoke(
+        resp_remote = self.invoke(
             is_remote=True,
-            modality="IMAGE",
+            modality="Image",
             prompt=prompt,
             data_items=["../files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg"],
             response_model=BooleanFeatureResponse,
         )
-        print(f"Response: {resp}")
+        print(f"Remote response: {resp_remote}")
+
+        resp_local = self.invoke(
+            is_remote=False,
+            modality="Image",
+            prompt=prompt,
+            data_items=["../files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg"],
+            response_model=BooleanFeatureResponse,
+        )
+        print(f"Local response: {resp_local}")
 
     async def _atest_invoke(self):
         from data_structure import BooleanFeatureResponse
@@ -327,12 +361,12 @@ class LdbLLMClient:
 
         resp = await self.invoke_parallel(
             is_remote=True,
-            modality="IMAGE",
+            modality="Image",
             prompt=prompt,
             data_items=[["../files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg"]],
             response_model=BooleanFeatureResponse,
         )
-        print(f"Response: {resp}")
+        print(f"Local response: {resp}")
 
 
         

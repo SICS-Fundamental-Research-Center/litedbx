@@ -94,12 +94,12 @@ MODEL_MAX_LEN[qwen3-4b]=32768
 MODEL_TP_SIZE[qwen3-4b]=1
 MODEL_GPU_UTIL[qwen3-4b]=0.9
 
-MODEL_PATHS[qwen3-30b]="/ssd_data/models/Qwen3-30B-A3B-Instruct-2507-FP8"
-MODEL_PORTS[qwen3-30b]=8004
-MODEL_GPUS[qwen3-30b]="0,1"
-MODEL_MAX_LEN[qwen3-30b]=32768
-MODEL_TP_SIZE[qwen3-30b]=2
-MODEL_GPU_UTIL[qwen3-30b]=0.8
+MODEL_PATHS[qwen3-30b-fp8]="/ssd_data/models/Qwen3-30B-A3B-Instruct-2507-FP8"
+MODEL_PORTS[qwen3-30b-fp8]=8004
+MODEL_GPUS[qwen3-30b-fp8]="0,1"
+MODEL_MAX_LEN[qwen3-30b-fp8]=32768
+MODEL_TP_SIZE[qwen3-30b-fp8]=2
+MODEL_GPU_UTIL[qwen3-30b-fp8]=0.8
 
 # Vision model
 MODEL_PATHS[qwen3-vl-8b]="/ssd_data/models/Qwen3-VL-8B-Instruct"
@@ -115,6 +115,13 @@ MODEL_GPUS[llava-v1.6-7b]="0,1"
 MODEL_MAX_LEN[llava-v1.6-7b]=32768
 MODEL_TP_SIZE[llava-v1.6-7b]=2
 MODEL_GPU_UTIL[llava-v1.6-7b]=0.9
+
+MODEL_PATHS[qwen3-vl-30b]="/ssd_data/models/Qwen3-VL-30B-A3B-Instruct"
+MODEL_PORTS[qwen3-vl-30b]=8005
+MODEL_GPUS[qwen3-vl-30b]="0,1,2,3"
+MODEL_MAX_LEN[qwen3-vl-30b]=32768
+MODEL_TP_SIZE[qwen3-vl-30b]=4
+MODEL_GPU_UTIL[qwen3-vl-30b]=0.9
 
 # Function to list available models
 list_models() {

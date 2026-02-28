@@ -2,7 +2,7 @@ parallelism: 20
 
 
 timeout: 30
-max_retries: 10
+max_retries: 1
 max_tokens: 16384
 top_p: 1.0
 temperature: 0.0
@@ -16,18 +16,21 @@ REMOTE_MODELS:
     - model: openai/Qwen3-235B-A22B
       api_key: BLSC_API_KEY
       api_base: BLSC_ENDPOINT
+      mode: TOOLS
       input_cost: 0.28  # USD (2 CNY) / 1M tokens
       output_cost: 1.12  # USD (8 CNY) / 1M tokens
       output_cost_thinking: 2.8  # USD (20 CNY) / 1M tokens
     - model: dashscope/glm-4.7
       api_key: DASHSCOPE_API_KEY
       api_base: DASHSCOPE_ENDPOINT
+      mode: TOOLS
       input_cost: 0.42  # USD (3 CNY) / 1M tokens
       output_cost: 1.68  # USD (14 CNY) / 1M tokens
       output_cost_thinking: 1.68  # USD (14 CNY) / 1M tokens
     - model: dashscope/qwen3-max
       api_key: DASHSCOPE_API_KEY
       api_base: DASHSCOPE_ENDPOINT
+      mode: TOOLS
       input_cost: 0.35  # USD (2.5 CNY) / 1M tokens
       output_cost: 1.4  # USD (10 CNY) / 1M tokens
       output_cost_thinking: 1.4  # USD (10 CNY) / 1M tokens
@@ -35,18 +38,21 @@ REMOTE_MODELS:
     - model: openai/Qwen3-VL-235B-A22B-Thinking  # Only support thinking 
       api_key: BLSC_API_KEY
       api_base: BLSC_ENDPOINT
+      mode: TOOLS
       input_cost: 0.28  # USD (2 CNY) / 1M tokens
       output_cost: 2.8  # USD (20 CNY) / 1M tokens
       output_cost_thinking: 2.8  # USD (20 CNY) / 1M tokens
     - model: openai/Qwen3-VL-235B-A22B-Instruct  # DO NOT support thinking 
       api_key: BLSC_API_KEY
       api_base: BLSC_ENDPOINT
+      mode: TOOLS
       input_cost: 0.28  # USD (2 CNY) / 1M tokens
       output_cost: 1.12  # USD (8 CNY) / 1M tokens
       output_cost_thinking: 1.12  # USD (8 CNY) / 1M tokens
     - model: dashscope/qwen3-vl-plus
       api_key: DASHSCOPE_API_KEY
       api_base: DASHSCOPE_ENDPOINT
+      mode: TOOLS
       input_cost: 0.14  # USD (1 CNY) / 1M tokens
       output_cost: 1.4  # USD (10 CNY) / 1M tokens
       output_cost_thinking: 1.4  # USD (10 CNY) / 1M tokens
@@ -56,30 +62,42 @@ LOCAL_MODELS:
     - model: hosted_vllm//ssd_data/models/Qwen3-30B-A3B-Instruct-2507-FP8
       api_key: "*"
       api_base: http://localhost:8004/v1
+      mode: JSON
       input_cost: 0
       output_cost: 0 
       output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/llama3-8b-instruct
       api_key: "*"
       api_base: http://localhost:8000/v1
+      mode: TOOLS
       input_cost: 0
       output_cost: 0 
       output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/Qwen3-4B-Instruct-2507
       api_key: "*"
       api_base: http://localhost:8001/v1
+      mode: TOOLS
       input_cost: 0
       output_cost: 0 
       output_cost_thinking: 0
   Image:
+    - model: hosted_vllm//ssd_data/models/Qwen3-VL-30B-A3B-Instruct
+      api_key: "*"
+      api_base: http://localhost:8005/v1
+      mode: JSON
+      input_cost: 0
+      output_cost: 0 
+      output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/Qwen3-VL-8B-Instruct
       api_key: "*"
+      mode: TOOLS
       api_base: http://localhost:8002/v1
       input_cost: 0
       output_cost: 0 
       output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/llava-v1___6-mistral-7b-hf
       api_key: "*"
+      mode: TOOLS
       api_base: http://localhost:8003/v1
       input_cost: 0
       output_cost: 0 

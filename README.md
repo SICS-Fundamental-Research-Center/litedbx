@@ -64,9 +64,10 @@ The script supports pre-configured models:
 |-------|------|--------------|------|------------|
 | `llama3-8b` | Text | 8000 | 0 | 8192 |
 | `qwen3-4b` | Text | 8001 | 1 | 32768 |
-| `qwen3-30b` | Text | 8004 | 0,1 | 32768 |
+| `qwen3-30b-fp8` | Text | 8004 | 0,1 | 32768 |
 | `qwen3-vl-8b` | Vision | 8002 | 2,3 | 32768 |
 | `llava-v1.6-7b` | Vision | 8003 | 0,1 | 32768 |
+| `qwen3-vl-30b` | Vision | 8005 | 0,1,2,3 | 32768 |
 
 #### Usage
 
