@@ -463,7 +463,6 @@ class LdbWorkload:
             prompt = PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"].format(
                 MODALITY=sem_pred.modality,
                 DESC=sem_pred.prompt,
-                SAMPLE_DATA="\n".join(sampled_data),
                 SOURCE_COL=field,
                 FEATURE_BUDGET=self.b_fs,
             )
