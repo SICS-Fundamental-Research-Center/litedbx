@@ -712,6 +712,10 @@ class LdbWorkload:
                     row["trans_p"] = f"{trans_eval.get('precision', 0):.2f}"
                     row["trans_r"] = f"{trans_eval.get('recall', 0):.2f}"
 
+                row["L_rew"] = f"{results.get('L_rew', {}).get(q_name, 0):.2f}"
+                row["penalty_rew"] = f"{results.get('penalty_rew', {}).get(q_name, 0):.2f}"
+                row["L_LOO"] = f"{results.get('L_LOO', {}).get(q_name, 0):.2f}"
+                row["penalty_LOO"] = f"{results.get('penalty_LOO', {}).get(q_name, 0):.2f}"
                 row["L_obj"] = f"{results.get('L_obj', {}).get(q_name, 0):.2f}"
                 row["L_subj"] = f"{results.get('L_subj', {}).get(q_name, 0):.2f}"
                 row["L_static"] = f"{results.get('L_static', {}).get(q_name, 0):.2f}"
@@ -720,15 +724,17 @@ class LdbWorkload:
 
         df_overview = pd.DataFrame(overview_data)
         col_order = ["Iter", "NFeat", "Query", "pred_f1", "pred_p", "pred_r",
-                     "trans_f1", "trans_p", "trans_r", "L_obj", "L_subj", "L_static"]
+                     "trans_f1", "trans_p", "trans_r",
+                     "L_rew", "penalty_rew", "L_obj",
+                     "L_LOO", "penalty_LOO", "L_subj", "L_static"]
         col_order = [c for c in col_order if c in df_overview.columns]
         df_overview = df_overview[col_order]
 
-        print("\n" + "="*100)
+        print("\n" + "="*123)
         print("OVERVIEW - Evaluation Metrics per Iteration")
-        print("="*100)
+        print("="*123)
         print(df_overview.to_string(index=False))
-        print("="*100)
+        print("="*123)
 
         # ========== SECTION 2: AVERAGE ERROR ==========
         avg_errors = [{
