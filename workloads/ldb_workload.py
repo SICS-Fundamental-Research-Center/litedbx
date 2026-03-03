@@ -50,6 +50,22 @@ class LdbWorkload:
         self.CKPT_path = Path(__file__).parent.parent / ".ckpt" / self.scenario
         self.CKPT_path.mkdir(parents=True, exist_ok=True)
 
+        self.usage_statistics = {
+            item: {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "prompt_cost": 0.0,
+                "completion_cost": 0.0,
+                "total_cost": 0.0,
+            } for item in [
+                "feature_space_init",
+                "feature_space_refine",
+                "materialize_labeled_full",
+                "materialize_unlabeled_full",
+            ]
+        }
+
     def apply_sigma(self, debug=False):
         for q_name, sem_cq in self.queries.items():
 
@@ -251,9 +267,6 @@ class LdbWorkload:
                 best_static_error = average_error
                 best_statistics = execution_results
 
-        # Report the evaluation trace [for debugging and analysis]
-        self._report_evaluation_trace(execution_trace)
-
         return best_statistics, execution_trace
 
 
@@ -262,6 +275,10 @@ class LdbWorkload:
     async def _refine_feature_space(self, q_name: str, sem_cq: SemCQ,
                                     max_iter: int = 3, f1_threshold: float = 0.01,
                                     n_bad_cases: int = 5):
+        if self._get_ckpt_state(f"{q_name}_feature_space_refined"):
+            logger.info(f"The feature space of {q_name} has already been refined.")
+            return
+
         # Record the previous-round F1-score.
         prev_f1 = pred_and_eval(
             self.labeled_data[q_name]["data"].exclude_fk_and_id(), 
@@ -352,6 +369,11 @@ class LdbWorkload:
             with open(ckpt_path, 'w') as f:
                 json.dump(ckpt_data, f, indent=2)
                 logger.info(f"Cached refined feature space to: {ckpt_path}")
+
+        
+        self._update_statistics("feature_space_refine", self.llm_client.get_usage_statistics())
+        self.llm_client.reset_usage_statistics()
+        self._put_ckpt_state(f"{q_name}_feature_space_refined", True)
 
         logger.info(f"Feature space refinement completed for {q_name}")
         logger.info(f"F1 score trace over iterations: {f1_score_trace}")
@@ -446,12 +468,19 @@ class LdbWorkload:
 
     def _init_feature_space(self, q_name: str, sem_cq: SemCQ) -> list[PopulationSpec]:
         ckpt_path = self.CKPT_path / f"{q_name}_feature_space.json"
+        ckpt_usage_path = self.CKPT_path / f"{q_name}_usage_feature_space.json"
 
-        # Load the cached feature space if it exists
+        # Load the cached feature space and cached usage if it exists
         if ckpt_path.exists():
+            assert ckpt_usage_path.exists(), \
+                f"[Error] Checkpoint for feature space exists but usage statistics is missing for query {q_name}."
             logger.info(f"Loading cached initial feature space for query {q_name}...")
             with open(ckpt_path, 'r') as f:
                 cached_data = json.load(f)
+            logger.info(f"Loading cached usage statistics for initial feature space for query {q_name}...")
+            with open(ckpt_usage_path, 'r') as f:
+                cached_usage = json.load(f)
+                self._update_statistics("feature_space_init", cached_usage)
             return [PopulationSpec(**spec) for spec in cached_data[q_name]]
 
         # Generate initial feature space using LLM.
@@ -476,14 +505,20 @@ class LdbWorkload:
             )
 
             feature_space.extend(llm_response.value)  # type: ignore
+        # Record the usage statistics for this phase.
+        self._update_statistics("feature_space_init", self.llm_client.get_usage_statistics())
+        self.llm_client.reset_usage_statistics()
 
-        # Cache the generated feature space for future use.
+        # Cache the generated feature space and the usage statistics for future use.
         ckpt_data = {
             q_name: [spec.model_dump() for spec in feature_space]
         }
         with open(ckpt_path, 'w') as f:
             json.dump(ckpt_data, f, indent=2)
             logger.info(f"Cached initial feature space for query {q_name} to: {ckpt_path}")
+        with open(ckpt_usage_path, 'w') as f:
+            json.dump(self.usage_statistics["feature_space_init"], f, indent=2)
+            logger.info(f"Cached usage statistics for initial feature space for query {q_name} to: {ckpt_usage_path}")
 
         return feature_space
 
@@ -493,10 +528,18 @@ class LdbWorkload:
                                     is_remote: bool=True, 
                                     reuse: bool=True) -> pd.DataFrame:
         ckpt_path = self.CKPT_path / f"{q_name}_{tag}.csv"
+        ckpt_usage_path = self.CKPT_path / f"{q_name}_usage_{tag}.json"
 
         if ckpt_path.exists() and reuse:
+            assert ckpt_usage_path.exists(), \
+                f"[Error] Checkpoint for materialized features exists but usage statistics is missing for query {q_name} with tag {tag}."
+            materialized_df = pd.read_csv(ckpt_path)
             logger.info(f"Loading cached materialized features for query {q_name} with tag {tag} from: {ckpt_path}")
-            return pd.read_csv(ckpt_path)
+            with open(ckpt_usage_path, "r") as f:
+                cached_usage = json.load(f)
+                self._update_statistics(f"materialize_{tag}", cached_usage)
+            logger.info(f"Loaded cached usage statistics for materializing features for query {q_name} with tag {tag} from: {ckpt_usage_path}")
+            return materialized_df
 
         df_cp = data.df.copy()
         for spec in feature_specs:
@@ -505,9 +548,18 @@ class LdbWorkload:
                 llm_client=self.llm_client,
                 is_remote=is_remote
             )
+        # Record the usage statistics.
+        self._update_statistics(f"materialize_{tag}", self.llm_client.get_usage_statistics())
+        self.llm_client.reset_usage_statistics()
+
+        # Store the usage statistics to the cache.
+        with open(ckpt_usage_path, 'w') as f:
+            json.dump(self.usage_statistics[f"materialize_{tag}"], f, indent=2)
+            logger.info(f"Cached usage statistics for materializing features for query {q_name} with tag {tag} to: {ckpt_usage_path}")
 
         df_cp.to_csv(ckpt_path, index=False)
         logger.info(f"Cached materialized features for query {q_name} with tag {tag} to: {ckpt_path}")
+
         return df_cp
 
 
@@ -622,6 +674,55 @@ class LdbWorkload:
         )
 
         return L_LOO, penalty
+
+
+    def _update_statistics(self, key, value):
+        assert key in self.usage_statistics, f"Invalid statistics key: {key}"
+        for k, v in value.items():
+            self.usage_statistics[key][k] += v
+
+    def _get_ckpt_state(self, key):
+        ckpt_state_path = self.CKPT_path / "state.json"
+        # Create the checkpoint state file if it doesn't exist
+        if not ckpt_state_path.exists():
+            with open(ckpt_state_path, 'w') as f:
+                json.dump({}, f)
+                logger.info(f"Created new checkpoint state file at: {ckpt_state_path}")
+        with open(ckpt_state_path, 'r') as f:
+            state_data = json.load(f)
+        return state_data.get(key, None)
+    
+    def _put_ckpt_state(self, key, value):
+        ckpt_state_path = self.CKPT_path / "state.json"
+        # Create the checkpoint state file if it doesn't exist
+        if not ckpt_state_path.exists():
+            with open(ckpt_state_path, 'w') as f:
+                json.dump({}, f)
+                logger.info(f"Created new checkpoint state file at: {ckpt_state_path}")
+        # Load existing state, update the key, and save it back
+        with open(ckpt_state_path, 'r') as f:
+            state_data = json.load(f)
+        state_data[key] = value
+        with open(ckpt_state_path, 'w') as f:
+            json.dump(state_data, f, indent=2)
+            logger.info(f"Updated checkpoint state for key '{key}' at: {ckpt_state_path}")
+
+
+    def _report_usage_statistics(self):
+        logger.info("=== LLM Usage Statistics ===")
+        for item, stats in self.usage_statistics.items():
+            logger.info((
+                f"{item}: Prompt Tokens={stats['prompt_tokens']}, "
+                f"Completion Tokens={stats['completion_tokens']}, "
+                f"Total Tokens={stats['total_tokens']}, "
+                f"Prompt Cost=${stats['prompt_cost']:.4f}, "
+                f"Completion Cost=${stats['completion_cost']:.4f}, "
+                f"Total Cost=${stats['total_cost']:.4f}"))
+        
+        total_cost = sum(stats['total_cost'] for stats in self.usage_statistics.values())
+        logger.info(f"Total LLM Cost: ${total_cost:.4f}")
+        
+
 
 
     def _report_evaluation_trace(self, execution_trace: dict):

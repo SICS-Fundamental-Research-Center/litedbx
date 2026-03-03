@@ -18,9 +18,9 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
     queries = [
-        "Q1", 
+        # "Q1", 
         # "Q3", 
-        # "Q8"
+        "Q8"
     ]
     workload = medical.get_workload(queries=queries)
 

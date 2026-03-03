@@ -95,6 +95,16 @@ class LdbLLMClient:
     def get_usage_statistics(self):
         return self.usage_statistics
 
+    def reset_usage_statistics(self):
+        self.usage_statistics = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "prompt_cost": 0.0,
+            "completion_cost": 0.0,
+            "total_cost": 0.0,
+        }
+
     def invoke(
             self,
             is_remote: bool,
