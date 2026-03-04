@@ -104,9 +104,6 @@ class LdbWorkload:
                 "labels": self.labeled_data[q_name]["labels"],
             }
 
-            # Update the labeled data.
-            self.labeled_data[q_name]["data"].df = self.coresets[q_name]["data"].df.copy()
-
             # Refine the feature space if enabled.
             if enable_refinement:
                 await self._refine_feature_space(
@@ -116,6 +113,10 @@ class LdbWorkload:
                     f1_threshold=f1_threshold,
                     n_bad_cases=n_bad_cases,
                 )    
+
+            # Update the labeled data.
+            self.labeled_data[q_name]["data"].df = self.coresets[q_name]["data"].df.copy()
+
 
     async def populate_unlabeled_data(self):
         for q_name, spec in self.feature_spaces.items():
@@ -327,6 +328,7 @@ class LdbWorkload:
             # Apply refinements
             features_to_add = llm_response.to_add  # type: ignore
             features_to_remove = set(llm_response.to_remove)  # type: ignore
+            features_to_remove = set([feat for feat in features_to_remove if feat not in self.base_schema])
             if not features_to_add and not features_to_remove:
                 logger.info(f"LLM suggested no changes. Stopping refinement.")
                 break
