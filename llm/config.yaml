@@ -13,20 +13,6 @@ random_seed: 42
 
 REMOTE_MODELS:
   Text:
-    - model: openai/Qwen3-235B-A22B
-      api_key: BLSC_API_KEY
-      api_base: BLSC_ENDPOINT
-      mode: TOOLS
-      input_cost: 0.28  # USD (2 CNY) / 1M tokens
-      output_cost: 1.12  # USD (8 CNY) / 1M tokens
-      output_cost_thinking: 2.8  # USD (20 CNY) / 1M tokens
-    - model: dashscope/glm-4.7
-      api_key: DASHSCOPE_API_KEY
-      api_base: DASHSCOPE_ENDPOINT
-      mode: TOOLS
-      input_cost: 0.42  # USD (3 CNY) / 1M tokens
-      output_cost: 1.68  # USD (14 CNY) / 1M tokens
-      output_cost_thinking: 1.68  # USD (14 CNY) / 1M tokens
     - model: dashscope/qwen3-max
       api_key: DASHSCOPE_API_KEY
       api_base: DASHSCOPE_ENDPOINT
@@ -34,6 +20,34 @@ REMOTE_MODELS:
       input_cost: 0.35  # USD (2.5 CNY) / 1M tokens
       output_cost: 1.4  # USD (10 CNY) / 1M tokens
       output_cost_thinking: 1.4  # USD (10 CNY) / 1M tokens
+    - model: openai/Qwen3-235B-A22B
+      api_key: BLSC_API_KEY
+      api_base: BLSC_ENDPOINT
+      mode: TOOLS
+      input_cost: 0.28  # USD (2 CNY) / 1M tokens
+      output_cost: 1.12  # USD (8 CNY) / 1M tokens
+      output_cost_thinking: 2.8  # USD (20 CNY) / 1M tokens
+    - model: openai/GLM-5
+      api_key: BLSC_API_KEY
+      api_base: BLSC_ENDPOINT
+      mode: JSON
+      input_cost: 0.56  # USD (4 CNY) / 1M tokens
+      output_cost: 2.52  # USD (18 CNY) / 1M tokens
+      output_cost_thinking: 2.52  # USD (18 CNY) / 1M tokens
+    - model: openai/DeepSeek-V3.2
+      api_key: BLSC_API_KEY
+      api_base: BLSC_ENDPOINT
+      mode: JSON
+      input_cost: 0.28  # USD (2 CNY) / 1M tokens
+      output_cost: 0.42  # USD (3 CNY) / 1M tokens
+      output_cost_thinking: 0.42  # USD (3 CNY) / 1M tokens
+    - model: dashscope/glm-4.7
+      api_key: DASHSCOPE_API_KEY
+      api_base: DASHSCOPE_ENDPOINT
+      mode: TOOLS
+      input_cost: 0.42  # USD (3 CNY) / 1M tokens
+      output_cost: 1.68  # USD (14 CNY) / 1M tokens
+      output_cost_thinking: 1.68  # USD (14 CNY) / 1M tokens
   Image:
     - model: openai/Qwen3-VL-235B-A22B-Instruct  # DO NOT support thinking 
       api_key: BLSC_API_KEY
