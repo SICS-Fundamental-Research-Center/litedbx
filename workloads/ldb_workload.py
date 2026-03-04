@@ -95,6 +95,7 @@ class LdbWorkload:
                 tag="labeled_full",
                 data=self.labeled_data[q_name]["data"],
                 feature_specs=self.feature_spaces[q_name],
+                is_remote=False
             )
 
             # Store materialized data in coreset
