@@ -1,16 +1,35 @@
 GEN_FEAT_CANDIDATE_PROMPT = """
 You are an expert in feature engineering for information retrieval and query optimization.
 
-Your task is to identify *explicitly extractable, stable, and query-relevant* features from an unstructured source field.
+Your task is to identify *explicitly extractable, stable, and query-relevant* features from an unstructured source field using contrastive learning.
 
 Context:
 - Source field modality: {MODALITY}
 - Task description: {DESC}
 
-Instructions:
-Based on the context and examples above, propose a set of candidate features that can be reliably extracted from the source field and are likely to improve query accuracy or downstream retrieval performance.
+{PREVIOUS_FEATURES_SECTION}
 
-Return a JSON object with a single key "features", whose value is a LIST  of feature configurations.
+{PERFORMANCE_FEEDBACK_SECTION}
+
+Instructions:
+We provide you with contrastive examples: POSITIVE samples (labeled as satisfying the query) and NEGATIVE samples (labeled as not satisfying the query).
+Your task is to identify features that can effectively distinguish between positive and negative samples.
+
+{INSTRUCTIONS_SECTION}
+
+Return a JSON object with two keys:
+{{
+  "to_add": [  // List of new feature specifications to add
+    {{
+      "source_col": "{SOURCE_COL}",
+      "source_modality": "{MODALITY}",
+      "target_col": "feature_name",
+      "prompt": "extraction prompt",
+      "feature_type": "bool" | "float" | "int"
+    }}
+  ],
+  "to_remove": ["feature_name1", "feature_name2"]  // List of features to remove (empty if no previous features)
+}}
 
 Each feature configuration MUST include the following fields:
 
@@ -37,16 +56,17 @@ Each feature configuration MUST include the following fields:
 
 Constraints:
 - Propose only features that are derivable from the source field alone (no external data).
-- Propose at least 10 but no more than {FEATURE_BUDGET} distinct features.
+- Propose at most {FEATURE_BUDGET} new features per iteration.
 - Prefer features that are:
     • interpretable
     • robust across data variations
     • useful for filtering, ranking, or query rewriting
 - Do NOT include free-text, categorical, or high-cardinality string features.
+{CONSTRAINTS_ADDITIONAL}
 - Output valid JSON only. Do not include explanations or comments.
 
-
-We show the sampled data at below:
+=== Contrastive Learning Data ===
+We show the POSITIVE samples (satisfying the query) and NEGATIVE samples (not satisfying the query) at below:
 """
 
 
@@ -97,61 +117,7 @@ MAKE SURE:
 
 
 
-
-
-REFINE_FEATURE_SPACE_PROMPT = """
-You are an expert in feature engineering for information retrieval and query optimization.
-
-Your task is to refine a feature space based on classifier performance feedback.
-
-=== Context ===
-Task Description: {TASK_DESC}
-Source Field: {SOURCE_FIELD}
-Source Modality: {MODALITY}
-
-=== Current Feature Space ===
-{CURRENT_FEATURES}
-
-=== Performance Feedback ===
-
-1. Feature Importance (sorted by importance):
-{FEATURE_IMPORTANCE}
-
-2. F1 Score:
-   - With current features: {F1_SCORE:.4f}
-   - Improvement to previous features: {F1_IMPROVEMENT:.4f}
-
-=== Instructions ===
-Based on the feedback above, refine the feature space by:
-1. **Adding new features** that could help distinguish the difficult cases shown above
-2. **Removing low-importance features** that contribute little to prediction accuracy
-
-Constraints:
-- Propose at most {FEATURE_BUDGET} new features (for addition)
-- You may suggest removing features with importance < 0.01
-- Features should be extractable from the source field "{SOURCE_FIELD}" ({MODALITY})
-- Output valid JSON only. Do not include explanations or comments.
-
-Return a JSON object with two keys:
-{{
-  "to_add": [  // List of new feature specifications to add
-    {{
-      "source_col": "{SOURCE_FIELD}",
-      "source_modality": "{MODALITY}",
-      "target_col": "feature_name",
-      "prompt": "extraction prompt",
-      "feature_type": "bool" | "float" | "int"
-    }}
-  ],
-  "to_remove": ["feature_name1", "feature_name2"]  // List of features to remove
-}}
-
-The bad cases (most uncertain misclassified samples) are provided at below:
-"""
-
-
 PROMPTS = {
     "GEN_FEAT_CANDIDATE_PROMPT": GEN_FEAT_CANDIDATE_PROMPT,
     "SUGGEST_FEATURES_PROMPT": SUGGEST_FEATURES_PROMPT,
-    "REFINE_FEATURE_SPACE_PROMPT": REFINE_FEATURE_SPACE_PROMPT,
 }

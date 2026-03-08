@@ -2,21 +2,26 @@ import json
 import pandas as pd
 import logging
 from pathlib import Path
-import math
-from typing import Tuple, Any
+from typing import Tuple, Any, cast
 from collections import defaultdict
-from data_structure import LdbData, SemCQ, PopulationSpec, PopulationSpecs, FeatureRefinementResponse
+from data_structure import LdbData, SemCQ, PopulationSpec, FeatureRefinementResponse
 from llm import LdbLLMClient, PROMPTS
 from common import (
-    pred_and_eval,
     select_coreset,
     compute_feature_importance,
     encode_features,
-    train_classifier,
     evaluate_classifier,
-    clf_to_rules,
-    apply_rules,
-    loss_by_selectivity,
+)
+from workloads.workload_utils import (
+    build_contrastive_batch,
+    build_feature_generation_prompt,
+    build_ground_truth_labels,
+    compute_objective_error,
+    compute_subjective_error,
+    report_usage_statistics,
+    report_evaluation_trace,
+    perform_label_propagation,
+    pred_and_eval,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,7 +75,7 @@ class LdbWorkload:
         for q_name, sem_cq in self.queries.items():
 
             data = self.ldb_data.sigma_retrieve(sem_cq.Sigma, reset_index=True)
-            labels = self._build_ground_truth_labels(data, q_name, sem_cq.selected, debug=debug)
+            labels = build_ground_truth_labels(data.df, q_name, sem_cq.selected, self.data_dir, debug=debug)
 
             self.sigma_satisfied_data[q_name] = {
                 "data": data,
@@ -78,44 +83,20 @@ class LdbWorkload:
             }
 
     
-    async def init_coresets(self, enable_refinement: bool = False, debug: bool = False,
-                            max_refine_iter: int = 3, f1_threshold: float = 0.01,
-                            n_bad_cases: int = 5):
+    async def init_coresets(self, debug: bool = False):
 
         for q_name, sem_cq in self.queries.items():
             # Acquire labeled set.
             self._acquire_human_label(q_name=q_name, debug=debug)
 
             # Acquire initial feature space.
-            self.feature_spaces[q_name] = self._init_feature_space(q_name, sem_cq)
-
-            # Populate feature values for the acquired feature space.
-            result_df = await self._materialize_features(
-                q_name=q_name,
-                tag="labeled_full",
-                data=self.labeled_data[q_name]["data"],
-                feature_specs=self.feature_spaces[q_name],
-                is_remote=False
-            )
+            self.feature_spaces[q_name] = await self._init_feature_space(q_name, sem_cq)
 
             # Store materialized data in coreset
             self.coresets[q_name] = {
-                "data": LdbData(df=result_df, config=self.ldb_data.config),
+                "data": LdbData(df=self.labeled_data[q_name]["data"].df, config=self.ldb_data.config),
                 "labels": self.labeled_data[q_name]["labels"],
             }
-
-            # Refine the feature space if enabled.
-            if enable_refinement:
-                await self._refine_feature_space(
-                    q_name=q_name,
-                    sem_cq=sem_cq,
-                    max_iter=max_refine_iter,
-                    f1_threshold=f1_threshold,
-                    n_bad_cases=n_bad_cases,
-                )    
-
-            # Update the labeled data.
-            self.labeled_data[q_name]["data"].df = self.coresets[q_name]["data"].df.copy()
 
 
     async def populate_unlabeled_data(self):
@@ -213,16 +194,35 @@ class LdbWorkload:
 
             for q_name, _ in self.queries.items():
                 # Propagation labels
+                train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
+                train_Y = self.coresets[q_name]["labels"].astype(int)
+                test_X = self.unlabeled_data[q_name]["data"].select_active_features(active_external_features)
+                test_Y = self.unlabeled_data[q_name]["labels"].astype(int)
+                visible_labels = self.labeled_data[q_name]["labels"].astype(int)
+
                 rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results = \
-                    self._label_propagation(q_name, active_external_features, debug=debug)
+                    perform_label_propagation(
+                        train_X, train_Y, test_X, test_Y, visible_labels,
+                        self.b_rew, debug
+                    )
 
                 # Estimate objective error score.
-                L_rew, penalty_rew = self._objective_error_estimation(
-                    pred_Y, trans_Y, len(active_external_features) + len(self.base_schema))
+                L_rew, penalty_rew = compute_objective_error(
+                    pred_Y=pred_Y, trans_Y=trans_Y, b_rew=self.b_rew,
+                    schema_arity=len(active_external_features) + len(self.base_schema),
+                    query_size=len(self.queries),
+                    selected_data_size=len(pred_Y) + self.b_lab,
+                    delta=self.config["delta"])
                 L_obj = L_rew + penalty_rew
 
                 # Estimate subjective error score.
-                L_LOO, penalty_LOO = self._subjective_error_estimation(q_name, active_external_features)
+                L_LOO, penalty_LOO = compute_subjective_error(
+                    X=self.labeled_data[q_name]["data"].select_active_features(active_external_features),
+                    Y=self.labeled_data[q_name]["labels"].astype(int),
+                    query_size=len(self.queries),
+                    data_size=len(self.labeled_data[q_name]["labels"]),
+                    delta=self.config["delta"],
+                    loo_step=self.config["loo_step"])
                 L_subj = L_LOO + penalty_LOO
 
                 L_static = L_obj + L_subj
@@ -272,175 +272,6 @@ class LdbWorkload:
         return best_statistics, execution_trace
 
 
-
-
-    async def _refine_feature_space(self, q_name: str, sem_cq: SemCQ,
-                                    max_iter: int = 3, f1_threshold: float = 0.01,
-                                    n_bad_cases: int = 5):
-        if self._get_ckpt_state(f"{q_name}_feature_space_refined"):
-            logger.info(f"The feature space of {q_name} has already been refined.")
-            return
-
-        # Record the previous-round F1-score.
-        prev_f1 = pred_and_eval(
-            self.labeled_data[q_name]["data"].exclude_fk_and_id(), 
-            self.labeled_data[q_name]["labels"])['f1']
-        f1_score_trace = [prev_f1]
-
-        for iteration in range(max_iter):
-            logger.info(f"Refinement iteration {iteration + 1}/{max_iter} for {q_name}")
-
-            # Evaluate current feature space
-            df_for_clf = self.coresets[q_name]["data"].exclude_fk_and_id()
-            labels = self.coresets[q_name]["labels"]
-            feedback = pred_and_eval(df_for_clf, labels)
-
-            # Check stopping criteria
-            f1_improvement = feedback['f1'] - prev_f1
-            prev_f1 = feedback['f1']
-            f1_score_trace.append(prev_f1)
-            logger.info(f"Iteration {iteration + 1}: F1 improvement = {f1_improvement:.4f}")
-            if iteration > 0 and f1_improvement < f1_threshold:
-                logger.info(f"F1 improvement ({f1_improvement:.4f}) below threshold ({f1_threshold}). Stopping refinement.")
-                break
-
-            # Prepare prompt for LLM
-            # TODO: [WARN] Using this simplified impl, we should turn off the refinement if there are multiple semantic predicates in the CQ.
-            sem_pred = sem_cq.Ps[0]  # Assume single semantic predicate for now
-            prompt, bad_cases = self._prepare_refinement(
-                sem_pred=sem_pred,
-                current_features=self.feature_spaces[q_name],
-                f1_improvement=f1_improvement,
-                feedback=feedback,
-                n_bad_cases=n_bad_cases,
-                original_df=self.labeled_data[q_name]["data"].df,
-            )
-
-            # Call LLM for refinement suggestions
-            llm_response = self.llm_client.invoke(
-                modality=sem_pred.modality,
-                is_remote=True,
-                prompt=prompt,
-                data_items=bad_cases,
-                response_model=FeatureRefinementResponse,
-            )
-
-            # Apply refinements
-            features_to_add = llm_response.to_add  # type: ignore
-            features_to_remove = set(llm_response.to_remove)  # type: ignore
-            features_to_remove = set([feat for feat in features_to_remove if feat not in self.base_schema])
-            if not features_to_add and not features_to_remove:
-                logger.info(f"LLM suggested no changes. Stopping refinement.")
-                break
-
-            # Remove low-importance features
-            if features_to_remove:
-                self.feature_spaces[q_name] = [
-                    spec for spec in self.feature_spaces[q_name]
-                    if spec.target_col not in features_to_remove
-                ]
-                self.coresets[q_name]["data"].df.drop(columns=features_to_remove, inplace=True)
-                logger.info(f"Removed {len(features_to_remove)} features: {features_to_remove}")
-
-            # Add new features
-            if features_to_add:
-                # Check the feature budget before adding
-                available_budget = self.b_fs - len(self.feature_spaces[q_name])
-                if len(features_to_add) > available_budget:
-                    features_to_add = features_to_add[:available_budget]
-                    logger.info(f"Feature budget exceeded. Only adding {available_budget} features.")
-                self.feature_spaces[q_name].extend(features_to_add)
-                logger.info(f"Adding {len(features_to_add)} new features")
-
-                # Materialize only the new features and merge (directly cover the previous version)
-                new_feature_specs = features_to_add
-                self.coresets[q_name]["data"].df = await self._materialize_features(
-                    q_name=q_name,
-                    tag="labeled_full",
-                    data=self.coresets[q_name]["data"],
-                    feature_specs=new_feature_specs,
-                    reuse=False
-                )
-            else:
-                logger.info(f"No new features to add in this iteration.")
-
-            # Cache refined feature space (directly cover the previous refined feature space)
-            ckpt_path = self.CKPT_path / f"{q_name}_feature_space.json"
-            ckpt_data = {
-                q_name: [spec.model_dump() for spec in self.feature_spaces[q_name]]
-            }
-            with open(ckpt_path, 'w') as f:
-                json.dump(ckpt_data, f, indent=2)
-                logger.info(f"Cached refined feature space to: {ckpt_path}")
-
-        
-        self._update_statistics("feature_space_refine", self.llm_client.get_usage_statistics())
-        self.llm_client.reset_usage_statistics()
-        self._put_ckpt_state(f"{q_name}_feature_space_refined", True)
-
-        logger.info(f"Feature space refinement completed for {q_name}")
-        logger.info(f"F1 score trace over iterations: {f1_score_trace}")
-
-
-    def _prepare_refinement(self, sem_pred, current_features: list[PopulationSpec],
-                            f1_improvement: float,
-                            feedback: dict, n_bad_cases: int, 
-                            original_df: pd.DataFrame) -> Tuple[str, list[str]]:
-        """Build the refinement prompt with feedback from classifier evaluation."""
-
-        # Format current features
-        current_features_str = "\n".join([
-            f"  - {spec.target_col} ({spec.feature_type}): {spec.prompt[:100]}..."
-            for spec in current_features
-        ])
-
-        # Format feature importance
-        feature_importance_str = "\n".join([
-            f"  - {feat}: {imp:.4f}"
-            for feat, imp in list(feedback['feature_importance'].items())[:10]  # Top 10
-        ])
-
-        # Format bad cases (most uncertain ones) with original source data
-        bad_cases_df = feedback['bad_cases'].head(n_bad_cases)
-        bad_cases = []
-        for _, row in bad_cases_df.iterrows():
-            original_idx = row['_original_index']
-            bad_cases.append(original_df.loc[original_idx, sem_pred.field])
-
-        return PROMPTS["REFINE_FEATURE_SPACE_PROMPT"].format(
-            TASK_DESC=sem_pred.prompt,
-            SOURCE_FIELD=sem_pred.field,
-            MODALITY=sem_pred.modality,
-            CURRENT_FEATURES=current_features_str,
-            FEATURE_IMPORTANCE=feature_importance_str,
-            F1_SCORE=feedback['f1'],
-            F1_IMPROVEMENT=f1_improvement,
-            FEATURE_BUDGET=self.b_fs,
-        ), bad_cases
-
-
-    def _build_ground_truth_labels(
-            self, data: LdbData, q_name: str, 
-            selected_columns: list[str], debug=False) -> pd.Series:
-        ground_truth_df = pd.read_csv(f"{self.data_dir}/ground_truth/{q_name}.csv")
-        ground_truth_df = ground_truth_df[selected_columns]
-        ground_truth_set = set(tuple(row) for row in ground_truth_df.values)
-
-        labels = data.df[selected_columns].apply(
-            lambda row: tuple(row) in ground_truth_set,
-            axis=1
-        ).reset_index(drop=True)
-
-        if debug:
-            true_rows = data.df[labels][selected_columns]
-            true_rows_set = set(tuple(row) for row in true_rows.values)
-            assert true_rows_set == ground_truth_set, \
-                f"[DebugErr] Fail to build ground truth labels for query {q_name}."
-            logger.debug(f"Ground truth of {self.scenario}.{q_name}: {labels.sum()} positives / {len(labels)} samples. Oracle selectivity: {labels.sum() / len(labels):.4f}")
-
-        return labels
-
-
     def _acquire_human_label(self, q_name: str, debug: bool = False):
 
         data = self.sigma_satisfied_data[q_name]["data"]
@@ -469,14 +300,17 @@ class LdbWorkload:
                           f"{self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}"))
 
 
-    def _init_feature_space(self, q_name: str, sem_cq: SemCQ) -> list[PopulationSpec]:
+    async def _init_feature_space(self, q_name: str, sem_cq: SemCQ) -> list[PopulationSpec]:
         ckpt_path = self.CKPT_path / f"{q_name}_feature_space.json"
         ckpt_usage_path = self.CKPT_path / f"{q_name}_usage_feature_space.json"
+        ckpt_data_path = self.CKPT_path / f"{q_name}_labeled_full.csv"
 
         # Load the cached feature space and cached usage if it exists
         if ckpt_path.exists():
             assert ckpt_usage_path.exists(), \
                 f"[Error] Checkpoint for feature space exists but usage statistics is missing for query {q_name}."
+            assert ckpt_data_path.exists(), \
+                f"[Error] Checkpoint for feature space exists but materialized labeled data is missing for query {q_name}."
             logger.info(f"Loading cached initial feature space for query {q_name}...")
             with open(ckpt_path, 'r') as f:
                 cached_data = json.load(f)
@@ -484,30 +318,129 @@ class LdbWorkload:
             with open(ckpt_usage_path, 'r') as f:
                 cached_usage = json.load(f)
                 self._update_statistics("feature_space_init", cached_usage)
+            with open(ckpt_data_path, 'r') as f:
+                cached_df = pd.read_csv(f)
+                self.labeled_data[q_name]["data"] = LdbData(df=cached_df, config=self.ldb_data.config)
             return [PopulationSpec(**spec) for spec in cached_data[q_name]]
 
-        # Generate initial feature space using LLM.
+        # Initialize feature space
         feature_space = []
+
+        # Process each semantic predicate
         for sem_pred in sem_cq.Ps:
             field = sem_pred.field
-            sampled_data = \
-                self.labeled_data[q_name]["data"].df[field].sample(n=10, random_state=self.random_seed).tolist()
-            prompt = PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"].format(
-                MODALITY=sem_pred.modality,
-                DESC=sem_pred.prompt,
-                SOURCE_COL=field,
-                FEATURE_BUDGET=self.b_fs,
-            )
 
-            llm_response = self.llm_client.invoke(
-                modality=sem_pred.modality,
-                is_remote=True,
-                prompt=prompt,
-                data_items=sampled_data,
-                response_model=PopulationSpecs,
-            )
+            # Divide pos / neg labeled data into batches
+            labels = self.labeled_data[q_name]["labels"]
+            pos_indices = labels[labels == True].index.tolist()
+            neg_indices = labels[labels == False].index.tolist()
 
-            feature_space.extend(llm_response.value)  # type: ignore
+            # Calculate batch size N = min(5, num_pos, num_neg)
+            N = min(5, len(pos_indices), len(neg_indices))
+            assert N > 0, f"No positive or negative samples for query {q_name}, field {field}"
+
+            # Create batches
+            num_pos_batches = (len(pos_indices) + N - 1) // N  # Ceiling division
+            num_neg_batches = (len(neg_indices) + N - 1) // N
+            num_batches = max(num_pos_batches, num_neg_batches)
+
+            logger.info(f"Initializing feature space for {q_name}.{field}: "
+                       f"{len(pos_indices)} pos, {len(neg_indices)} neg, "
+                       f"batch_size={N}, num_batches={num_batches}")
+
+            prev_f1 = None
+            previous_feedback = None
+            iteration = 0
+
+            # Iterate through batches (max 10 iterations or until all batches used)
+            record = set()
+            max_iter_num = 1
+            max_iterations = min(max_iter_num, num_batches)
+            for batch_idx in range(max_iterations):
+                iteration = batch_idx
+                pos_idx = iteration % num_batches
+                neg_idx = iteration % num_batches
+                if (pos_idx, neg_idx) in record:
+                    logger.info(f"Batch combination already processed. Ending iterations.")
+                    break
+                record.add((pos_idx, neg_idx))
+
+                # Get pos/neg batch for this iteration
+                pos_start = pos_idx * N
+                pos_end = min(pos_start + N, len(pos_indices))
+                neg_start = neg_idx * N
+                neg_end = min(neg_start + N, len(neg_indices))
+
+                # Get current batch indices and data
+                current_pos_indices = pos_indices[pos_start:pos_end] 
+                current_neg_indices = neg_indices[neg_start:neg_end]
+                pos_batch_data = self.labeled_data[q_name]["data"].df.loc[current_pos_indices, field].tolist() 
+                neg_batch_data = self.labeled_data[q_name]["data"].df.loc[current_neg_indices, field].tolist()
+
+                # Build data items and metadata
+                data_items, metadata = build_contrastive_batch(
+                    sem_pred, pos_batch_data, neg_batch_data,
+                    current_pos_indices, current_neg_indices, previous_feedback,
+                    self.labeled_data[q_name]["data"].df
+                )
+
+                # Build prompt
+                prompt = build_feature_generation_prompt(
+                    sem_pred, feature_space, previous_feedback, iteration,
+                    self.b_fs, PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"]
+                )
+
+                # Call LLM
+                llm_response = cast(FeatureRefinementResponse, self.llm_client.invoke(
+                    modality=sem_pred.modality,
+                    is_remote=True,
+                    prompt=prompt,
+                    data_items=data_items,
+                    data_items_metadata=metadata,
+                    response_model=FeatureRefinementResponse,
+                ))
+
+                # Apply feature changes
+                features_to_remove = [f for f in llm_response.to_remove if f not in self.base_schema]
+                if features_to_remove:
+                    feature_space[:] = [spec for spec in feature_space if spec.target_col not in features_to_remove]
+                    self.labeled_data[q_name]["data"].df.drop(columns=features_to_remove, inplace=True)
+                
+                if llm_response.to_add:
+                    feature_space.extend(llm_response.to_add)
+                    self.labeled_data[q_name]["data"].df = await self._materialize_features(
+                        q_name=q_name,
+                        tag=f"labeled_full",
+                        data=self.labeled_data[q_name]["data"],
+                        feature_specs=llm_response.to_add,
+                        reuse=False
+                    )
+
+                # Evaluate and enforce budget
+                feedback = pred_and_eval(
+                    self.labeled_data[q_name]["data"].exclude_fk_and_id(),
+                    self.labeled_data[q_name]["labels"]
+                )
+                if len(feature_space) > self.b_fs:
+                    feature_can_be_removed = [k for k, v in feedback["feature_importance"].items() if k not in self.base_schema]
+                    feature_to_be_removed = feature_can_be_removed[-(len(feature_space) - self.b_fs):]
+                    feature_space[:] = [spec for spec in feature_space if spec.target_col not in feature_to_be_removed]
+                    self.labeled_data[q_name]["data"].df.drop(columns=feature_to_be_removed, inplace=True)
+                    logger.info(f"Removed {len(feature_to_be_removed)} features to enforce budget.")
+
+                logger.info(f"Iteration {iteration}: F1={feedback['f1']:.4f}, "
+                           f"Added={len(llm_response.to_add)}, Removed={len(llm_response.to_remove)}")
+
+                # Check stopping criteria: F1 drops > 0.05
+                if prev_f1 is not None:
+                    f1_drop = prev_f1 - feedback['f1']
+                    if f1_drop > 0.05:
+                        logger.info(f"F1 dropped by {f1_drop:.4f} > 0.05. Stopping iteration.")
+                        break
+
+                prev_f1 = feedback['f1']
+                previous_feedback = feedback
+
         # Record the usage statistics for this phase.
         self._update_statistics("feature_space_init", self.llm_client.get_usage_statistics())
         self.llm_client.reset_usage_statistics()
@@ -522,6 +455,8 @@ class LdbWorkload:
         with open(ckpt_usage_path, 'w') as f:
             json.dump(self.usage_statistics["feature_space_init"], f, indent=2)
             logger.info(f"Cached usage statistics for initial feature space for query {q_name} to: {ckpt_usage_path}")
+
+        logger.info(f"Initialized feature space for {q_name}: {len(feature_space)} features")
 
         return feature_space
 
@@ -566,340 +501,16 @@ class LdbWorkload:
         return df_cp
 
 
-    def _label_propagation(self, q_name: str, 
-                           active_external_features: list[str], 
-                           debug: bool = False) -> Tuple[list, pd.Series, pd.Series, dict, dict]:
-
-        train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
-        train_Y = self.coresets[q_name]["labels"].astype(int)
-        test_X = self.unlabeled_data[q_name]["data"].select_active_features(active_external_features)
-        test_Y = self.unlabeled_data[q_name]["labels"].astype(int)
-
-        # Encode features and train classifier
-        train_X_proc = encode_features(train_X)
-        test_X_proc = encode_features(test_X)
-        clf = train_classifier(train_X_proc, train_Y)
-
-        # Predict labels for unlabeled data
-        pred_Y = pd.Series(clf.predict(test_X_proc), index=test_Y.index)
-
-        # Perform query translation.
-        rules = clf_to_rules(clf, train_X_proc.columns.tolist(), 
-                             disjunction_budget=self.b_rew, 
-                             X_train=train_X_proc.to_numpy(), y_train=train_Y, 
-                             debug=True)
-        trans_Y = apply_rules(rules, test_X_proc, debug=debug)
-
-
-        # Append with ground truth labels.
-        visible_labels = self.labeled_data[q_name]["labels"].astype(int)
-        pred_Y_complete = pd.concat([visible_labels, pred_Y], ignore_index=True)
-        trans_Y_complete = pd.concat([visible_labels, trans_Y], ignore_index=True)
-        test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
-
-        # Evaluate the label propagation results with ground truth.
-        pred_eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
-        # Evaluate the query translation results with ground truth.
-        trans_eval_results = evaluate_classifier(trans_Y_complete, test_Y_complete)
-
-        if debug:
-            logger.info((
-                f"Evaluation of LP for {q_name} with {len(active_external_features)} external features: "
-                f"TP={pred_eval_results['TP']}, FP={pred_eval_results['FP']}, FN={pred_eval_results['FN']}, "
-                f"Precision={pred_eval_results['precision']:.4f}, Recall={pred_eval_results['recall']:.4f}, F1={pred_eval_results['f1']:.4f}."
-            ))
-
-            logger.info((
-                f"Evaluation of QT for {q_name} with {len(active_external_features)} external features: "
-                f"TP={trans_eval_results['TP']}, FP={trans_eval_results['FP']}, FN={trans_eval_results['FN']}, "
-                f"Precision={trans_eval_results['precision']:.4f}, Recall={trans_eval_results['recall']:.4f}, F1={trans_eval_results['f1']:.4f}."
-            ))
-
-        return rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results
-
-
-    def _objective_error_estimation(self, pred_Y: pd.Series, trans_Y: pd.Series, 
-                                    schema_arity: int) -> Tuple[float, float]:
-        pi = sum(pred_Y) / len(pred_Y)
-        
-        # Compute rewriting loss.
-        L_rew = loss_by_selectivity(pred_Y, trans_Y, pi)
-
-        # Compute the penalty.
-        Gamma_rew = max(pi, 1-pi) / min(pi, 1-pi)
-        d_VC = self.b_rew * schema_arity * math.log(self.b_rew)
-        selected_data_size = len(pred_Y) + self.b_lab
-        query_size = len(self.queries)
-        delta = self.config["delta"]
-        penalty = Gamma_rew * math.sqrt(
-            (d_VC * math.log(selected_data_size) + math.log(2 * query_size / delta)) / 
-            selected_data_size
-        )
-
-        return L_rew, penalty
-
-
-    def _subjective_error_estimation(
-            self, q_name: str, 
-            active_external_features: list[str]) -> Tuple[float, float]:
-        X = self.labeled_data[q_name]["data"].select_active_features(active_external_features)
-        Y = self.labeled_data[q_name]["labels"].astype(int)
-        X_encoded = encode_features(X)
-
-        Y_loo = []
-        Y_true = []
-        loo_step = self.config["loo_step"]
-        for i in range(0, len(X_encoded), loo_step):
-            X_train = X_encoded.drop(index=i)
-            Y_train = Y.drop(index=i)
-            X_test = X_encoded.iloc[[i]]
-
-            clf = train_classifier(X_train, Y_train)
-
-            pred = clf.predict(X_test)[0]
-            Y_loo.append(pred)
-            Y_true.append(Y.iloc[i])
-
-        Y_true_series = pd.Series(Y_true)
-        Y_loo_series = pd.Series(Y_loo)
-
-        # Compute LOO loss score.
-        pi = sum(Y) / len(Y)
-        L_LOO = loss_by_selectivity(Y_true_series, Y_loo_series, pi)
-
-        # Compute the penalty.
-        Gamma_LOO = max(pi, 1-pi) / min(pi, 1-pi)
-        query_size = len(self.queries)
-        data_size = len(Y)
-        delta = self.config["delta"]
-        penalty = Gamma_LOO * math.sqrt(
-            math.log(2 * query_size / delta) / (2 * data_size)
-        )
-
-        return L_LOO, penalty
-
-
     def _update_statistics(self, key, value):
         assert key in self.usage_statistics, f"Invalid statistics key: {key}"
         for k, v in value.items():
             self.usage_statistics[key][k] += v
 
-    def _get_ckpt_state(self, key):
-        ckpt_state_path = self.CKPT_path / "state.json"
-        # Create the checkpoint state file if it doesn't exist
-        if not ckpt_state_path.exists():
-            with open(ckpt_state_path, 'w') as f:
-                json.dump({}, f)
-                logger.info(f"Created new checkpoint state file at: {ckpt_state_path}")
-        with open(ckpt_state_path, 'r') as f:
-            state_data = json.load(f)
-        return state_data.get(key, None)
-    
-    def _put_ckpt_state(self, key, value):
-        ckpt_state_path = self.CKPT_path / "state.json"
-        # Create the checkpoint state file if it doesn't exist
-        if not ckpt_state_path.exists():
-            with open(ckpt_state_path, 'w') as f:
-                json.dump({}, f)
-                logger.info(f"Created new checkpoint state file at: {ckpt_state_path}")
-        # Load existing state, update the key, and save it back
-        with open(ckpt_state_path, 'r') as f:
-            state_data = json.load(f)
-        state_data[key] = value
-        with open(ckpt_state_path, 'w') as f:
-            json.dump(state_data, f, indent=2)
-            logger.info(f"Updated checkpoint state for key '{key}' at: {ckpt_state_path}")
-
 
     def _report_usage_statistics(self):
-        logger.info("=== LLM Usage Statistics ===")
-        for item, stats in self.usage_statistics.items():
-            logger.info((
-                f"{item}: Prompt Tokens={stats['prompt_tokens']}, "
-                f"Completion Tokens={stats['completion_tokens']}, "
-                f"Total Tokens={stats['total_tokens']}, "
-                f"Prompt Cost=${stats['prompt_cost']:.4f}, "
-                f"Completion Cost=${stats['completion_cost']:.4f}, "
-                f"Total Cost=${stats['total_cost']:.4f}"))
+        report_usage_statistics(self.usage_statistics)
         
-        total_cost = sum(stats['total_cost'] for stats in self.usage_statistics.values())
-        logger.info(f"Total LLM Cost: ${total_cost:.4f}")
-        
-
-
 
     def _report_evaluation_trace(self, execution_trace: dict):
-        """
-        Report the evaluation trace with:
-        1. Overview table with flattened metrics
-        2. Best rules per query (highest trans_f1 or lowest L_avg)
-        3. Per-query breakdown of metrics
-        """
-        if not execution_trace:
-            logger.info("No execution trace to report.")
-            return
-
-        # Helper function to format rules concisely
-        def _format_rule(condition):
-            """Format a single rule condition as 'feature op value'"""
-            if len(condition) == 3:
-                feature, value, op = condition
-                # Format value to 2 decimal places
-                if isinstance(value, (int, float)):
-                    value_str = f"{float(value):.2f}"
-                else:
-                    value_str = str(value)
-                return f"{feature} {op} {value_str}"
-            return str(condition)
-
-        def _format_rules(rules):
-            """Format list of rules into readable string"""
-            if not isinstance(rules, list):
-                return str(rules)
-            formatted = []
-            for rule in rules:
-                if isinstance(rule, list) and len(rule) > 0:
-                    # Join conditions with AND
-                    conditions = " AND ".join([_format_rule(c) for c in rule])
-                    formatted.append(f"  IF {conditions}")
-                else:
-                    formatted.append(f"  {rule}")
-            return "\n".join(formatted) if formatted else "  (no rules)"
-
-        # Get all query names
-        all_query_names = set()
-        for results in execution_trace.values():
-            for key in results.keys():
-                if key not in ["rules", "features", "pred_eval", "trans_eval",
-                               "L_rew", "penalty_rew", "L_LOO", "penalty_LOO",
-                               "L_obj", "L_subj", "L_static", "L_avg"]:
-                    all_query_names.add(key)
-
-        # Find best iteration for each query (highest trans_f1) AND global best (lowest L_avg)
-        best_trans_f1_iters = {}  # query_name -> (iter_idx, trans_f1)
-        global_best_iter = min(execution_trace.keys(),
-                              key=lambda i: execution_trace[i].get("L_avg", float('inf')))
-
-        for q_name in all_query_names:
-            best_trans_f1 = -1
-            best_iter_for_trans = None
-
-            for iter_idx, results in execution_trace.items():
-                if "trans_eval" in results and q_name in results["trans_eval"]:
-                    trans_f1 = results["trans_eval"][q_name].get("f1", -1)
-                    if trans_f1 > best_trans_f1:
-                        best_trans_f1 = trans_f1
-                        best_iter_for_trans = iter_idx
-
-            if best_iter_for_trans is not None:
-                best_trans_f1_iters[q_name] = (best_iter_for_trans, best_trans_f1)
-
-        # ========== SECTION 1: OVERVIEW TABLE ==========
-        overview_data = []
-        for iter_idx, results in execution_trace.items():
-            for q_name in all_query_names:
-                row = {
-                    "Iter": iter_idx,
-                    "NFeat": iter_idx + 1,
-                    "Query": q_name,
-                }
-
-                if "pred_eval" in results and q_name in results["pred_eval"]:
-                    pred_eval = results["pred_eval"][q_name]
-                    row["pred_f1"] = f"{pred_eval.get('f1', 0):.2f}"
-                    row["pred_p"] = f"{pred_eval.get('precision', 0):.2f}"
-                    row["pred_r"] = f"{pred_eval.get('recall', 0):.2f}"
-
-                if "trans_eval" in results and q_name in results["trans_eval"]:
-                    trans_eval = results["trans_eval"][q_name]
-                    row["trans_f1"] = f"{trans_eval.get('f1', 0):.2f}"
-                    row["trans_p"] = f"{trans_eval.get('precision', 0):.2f}"
-                    row["trans_r"] = f"{trans_eval.get('recall', 0):.2f}"
-
-                row["L_rew"] = f"{results.get('L_rew', {}).get(q_name, 0):.2f}"
-                row["penalty_rew"] = f"{results.get('penalty_rew', {}).get(q_name, 0):.2f}"
-                row["L_LOO"] = f"{results.get('L_LOO', {}).get(q_name, 0):.2f}"
-                row["penalty_LOO"] = f"{results.get('penalty_LOO', {}).get(q_name, 0):.2f}"
-                row["L_obj"] = f"{results.get('L_obj', {}).get(q_name, 0):.2f}"
-                row["L_subj"] = f"{results.get('L_subj', {}).get(q_name, 0):.2f}"
-                row["L_static"] = f"{results.get('L_static', {}).get(q_name, 0):.2f}"
-
-                overview_data.append(row)
-
-        df_overview = pd.DataFrame(overview_data)
-        col_order = ["Iter", "NFeat", "Query", "pred_f1", "pred_p", "pred_r",
-                     "trans_f1", "trans_p", "trans_r",
-                     "L_rew", "penalty_rew", "L_obj",
-                     "L_LOO", "penalty_LOO", "L_subj", "L_static"]
-        col_order = [c for c in col_order if c in df_overview.columns]
-        df_overview = df_overview[col_order]
-
-        print("\n" + "="*123)
-        print("OVERVIEW - Evaluation Metrics per Iteration")
-        print("="*123)
-        print(df_overview.to_string(index=False))
-        print("="*123)
-
-        # ========== SECTION 2: AVERAGE ERROR ==========
-        avg_errors = [{
-            "Iter": i,
-            "NFeat": i + 1,
-            "L_avg": f"{results.get('L_avg', 0):.2f}"
-        } for i, results in execution_trace.items()]
-
-        print("\nAverage Error per Iteration:")
-        print("-" * 40)
-        print(pd.DataFrame(avg_errors).to_string(index=False))
-        print("-" * 40)
-
-        # ========== SECTION 3: BEST RULES PER QUERY ==========
-        print("\n" + "="*100)
-        print("BEST RULES PER QUERY")
-        print("="*100)
-
-        for q_name in sorted(all_query_names):
-            print(f"\n{'='*80}")
-            print(f"Query: {q_name}")
-            print('='*80)
-
-            # Show rules from iteration with highest trans_f1
-            if q_name in best_trans_f1_iters:
-                iter_idx, trans_f1 = best_trans_f1_iters[q_name]
-                results = execution_trace[iter_idx]
-
-                print(f"\n[Highest trans_f1={trans_f1:.2f}] @ Iter {iter_idx} (NFeat={iter_idx + 1})")
-
-                if "features" in results and q_name in results["features"]:
-                    print(f"Features: {results['features'][q_name]}")
-
-                if "rules" in results and q_name in results["rules"]:
-                    rules = results["rules"][q_name]
-                    print("Rules:")
-                    print(_format_rules(rules))
-
-                if "trans_eval" in results and q_name in results["trans_eval"]:
-                    te = results["trans_eval"][q_name]
-                    print(f"Metrics: trans_f1={te.get('f1', 0):.2f}, "
-                          f"L_static={results.get('L_static', {}).get(q_name, 0):.2f}")
-
-            # Show rules from iteration with lowest L_avg (global best)
-            results = execution_trace[global_best_iter]
-            l_avg = results.get("L_avg", 0)
-
-            print(f"\n[Lowest L_avg={l_avg:.2f}] @ Iter {global_best_iter} (NFeat={global_best_iter + 1})")
-
-            if "features" in results and q_name in results["features"]:
-                print(f"Features: {results['features'][q_name]}")
-
-            if "rules" in results and q_name in results["rules"]:
-                rules = results["rules"][q_name]
-                print("Rules:")
-                print(_format_rules(rules))
-
-            if "trans_eval" in results and q_name in results["trans_eval"]:
-                te = results["trans_eval"][q_name]
-                print(f"Metrics: trans_f1={te.get('f1', 0):.2f}, "
-                      f"L_static={results.get('L_static', {}).get(q_name, 0):.2f}")
-
-        print("\n" + "="*100 + "\n")
+        report_evaluation_trace(execution_trace)
 

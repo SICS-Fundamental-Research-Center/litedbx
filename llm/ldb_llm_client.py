@@ -28,7 +28,15 @@ class PromptParams:
         self.kwargs["messages"] = [{"role": "user", "content": []}]
         self.add_data_item(prompt, "Text")
 
-    def add_data_item(self, data_item: str, modality: str) -> None:
+    def add_data_item(self, data_item: str, modality: str, metadata: Optional[dict]=None) -> None:
+
+        if metadata is not None:
+            serialized_metadata = \
+                "".join(f"{key.capitalize()}: {value}" for key, value in metadata.items())
+            self.kwargs["messages"][-1]["content"].append(
+                {"type": "text", "text": serialized_metadata}
+            )
+
         if modality == "Image":
             file_path = Path(data_item)
             with file_path.open("rb") as image_file:
@@ -111,6 +119,7 @@ class LdbLLMClient:
             modality: str,
             prompt: str,
             data_items: Optional[List[str]] = None,
+            data_items_metadata: Optional[List[dict]] = None,
             response_model: Optional[Type[BaseModel]] = None,
             model_id: Optional[int] = None,
             enable_token_usage: bool = True,
@@ -120,6 +129,7 @@ class LdbLLMClient:
             modality=modality,
             prompt=prompt,
             data_items=data_items,
+            data_items_metadata=data_items_metadata,
             response_model=response_model,
             model_index=model_id,
         )
@@ -167,6 +177,7 @@ class LdbLLMClient:
             modality: str,
             prompt: str,
             data_items: Optional[List[str]] = None,
+            data_items_metadata: Optional[list[dict]] = None,
             response_model: Optional[Type[BaseModel]] = None,
             model_index: Optional[int] = None,
     ) -> Tuple[PromptParams, dict, str]:
@@ -177,8 +188,11 @@ class LdbLLMClient:
         params = PromptParams(kwargs=kwargs)
         params.setup_prompt(prompt)
         if data_items:
-            for data_item in data_items:
-                params.add_data_item(data_item, modality=modality)
+            metadata =  data_items_metadata \
+                if data_items_metadata is not None \
+                    else [None] * len(data_items)
+            for data_item, data_item_metadata in zip(data_items, metadata):
+                params.add_data_item(data_item, modality=modality, metadata=data_item_metadata)
         if response_model:
             params.structuring(response_model)
         return params, cost_params, mode

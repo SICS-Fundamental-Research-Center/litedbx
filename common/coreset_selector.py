@@ -61,7 +61,7 @@ def est_conf(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
     unlabeled_X_proc = encode_features(unlabeled_X)
 
     # Predication confidence.
-    pred_probas, feat_importance = est_predication_conf(
+    pred_probas, feat_importance = est_prediction_conf(
         labeled_X_proc=labeled_X_proc,
         labeled_Y=labeled_Y,
         unlabeled_X_proc=unlabeled_X_proc,
@@ -83,7 +83,7 @@ def est_conf(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
     return combined_probas
 
 
-def est_predication_conf(
+def est_prediction_conf(
         labeled_X_proc: pd.DataFrame, 
         labeled_Y: pd.Series, 
         unlabeled_X_proc: pd.DataFrame) -> Tuple[np.ndarray, pd.DataFrame]:
