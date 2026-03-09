@@ -278,11 +278,41 @@ class LdbWorkload:
         labels = self.sigma_satisfied_data[q_name]["labels"]
 
         labeled_indices = data.df.sample(n=self.b_lab, random_state=self.random_seed).index
+
+        # Fallback: ensure minority class has at least minority_threshold samples
+        num_pos_sampled = labels.loc[labeled_indices].sum()
+        num_neg_sampled = len(labeled_indices) - num_pos_sampled
+        minority_threshold = max(1, int(0.1 * self.b_lab))
+        if min(num_pos_sampled, num_neg_sampled) < minority_threshold:
+            # Need to resample with minority constraint
+            pos_indices = labels[labels == True].index
+            neg_indices = labels[labels == False].index
+
+            # Allocate budget: minority class gets minority_threshold, majority gets the rest
+            if num_pos_sampled < num_neg_sampled:
+                pos_to_sample = min(minority_threshold, len(pos_indices))
+                neg_to_sample = min(self.b_lab - pos_to_sample, len(neg_indices))
+            else:
+                neg_to_sample = min(minority_threshold, len(neg_indices))
+                pos_to_sample = min(self.b_lab - neg_to_sample, len(pos_indices))
+
+            # Check if we have enough total samples
+            if pos_to_sample + neg_to_sample < self.b_lab:
+                logger.warning(
+                    f"Query {q_name}: Not enough samples to fill budget. "
+                    f"Sampling {pos_to_sample} pos + {neg_to_sample} neg = {pos_to_sample + neg_to_sample} < {self.b_lab}"
+                )
+
+            # Resample with the constraint
+            labeled_pos = pd.Series(pos_indices).sample(n=pos_to_sample, random_state=self.random_seed)
+            labeled_neg = pd.Series(neg_indices).sample(n=neg_to_sample, random_state=self.random_seed)
+            labeled_indices = pd.concat([labeled_pos, labeled_neg])
+
         remaining_indices = data.df.index.difference(labeled_indices)
 
         self.labeled_data[q_name] = {
             "data": LdbData(
-                df=data.df.loc[labeled_indices].reset_index(drop=True), 
+                df=data.df.loc[labeled_indices].reset_index(drop=True),
                 config=data.config),
             "labels": labels.loc[labeled_indices].reset_index(drop=True),
         }
@@ -294,10 +324,10 @@ class LdbWorkload:
         }
 
         if debug:
-            logger.debug((f"Acquired labels for {self.scenario}.{q_name}: "
-                          f"{self.labeled_data[q_name]['labels'].sum()} positive labels / "
-                          f"{len(self.labeled_data[q_name]['data'].df)} labeled samples. Selectivity: "
-                          f"{self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}"))
+            logger.info((f"Acquired labels for {self.scenario}.{q_name}: "
+                         f"{self.labeled_data[q_name]['labels'].sum()} positive labels / "
+                         f"{len(self.labeled_data[q_name]['data'].df)} labeled samples. Selectivity: "
+                         f"{self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}"))
 
 
     async def _init_feature_space(self, q_name: str, sem_cq: SemCQ) -> list[PopulationSpec]:
