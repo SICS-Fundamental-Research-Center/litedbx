@@ -1,0 +1,6 @@
+base_features: [
+  audienceScore,tomatoMeter,rating,ratingContents,releaseDateTheaters,releaseDateStreaming,runtimeMinutes,genre,originalLanguage,director,writer,boxOffice,distributor,soundMix,
+  creationDate,criticName,isTopCritic,originalScore,reviewState,publicatioName,scoreSentiment
+]
+id_features: [id,reviewId,title,reviewUrl]
+foreign_keys: [reviewText]

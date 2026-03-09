@@ -185,7 +185,7 @@ def build_ground_truth_labels(
         true_rows_set = set(tuple(row) for row in true_rows.values)
         assert true_rows_set == ground_truth_set, \
             f"[DebugErr] Fail to build ground truth labels for query {q_name}."
-        logger.debug(f"Ground truth of {q_name}: {labels.sum()} positives / {len(labels)} samples. Oracle selectivity: {labels.sum() / len(labels):.4f}")
+        logger.info(f"Ground truth of {q_name}: {labels.sum()} positives / {len(labels)} samples. Oracle selectivity: {labels.sum() / len(labels):.4f}")
 
     return labels
 

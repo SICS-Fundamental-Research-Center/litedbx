@@ -1,7 +1,10 @@
 from time import time
 import logging
 import sys
-from workloads import medical
+from workloads import (
+    medical,
+    movie
+)
 from ldb_engine import LdbEngine
 import asyncio
     
@@ -17,12 +20,20 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
+    workload = "movie"
     queries = [
-        # "Q1", 
-        # "Q3", 
-        "Q8"
+        "Q1", 
+        # "Q2", 
     ]
-    workload = medical.get_workload(queries=queries)
+
+    workload_mapping = {
+        "medical": medical.get_workload,
+        "movie": movie.get_workload,
+    }
+
+    workload_func = workload_mapping.get(workload)
+    assert workload_func is not None, f"Invalid workload: {workload}"
+    workload = workload_func(queries=queries)
 
     ldb_engine = LdbEngine(workload)
 
