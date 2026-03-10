@@ -83,6 +83,8 @@ def build_feature_generation_prompt(
     iteration: int,
     feature_budget: int,
     prompt_template: str,
+    data_df: pd.DataFrame | None = None,
+    num_samples: int = 3,
 ) -> str:
     """Build prompt for feature generation with conditional sections.
 
@@ -93,11 +95,27 @@ def build_feature_generation_prompt(
         iteration: Current iteration number
         feature_budget: Maximum number of features
         prompt_template: Prompt template string
+        data_df: Optional DataFrame to show current schema and sample data
+        num_samples: Number of sample rows to display
 
     Returns:
         Formatted prompt string
     """
     is_first = iteration == 0 or len(feature_space) == 0
+
+    # Build schema and sample data section
+    schema_sample_section = ""
+    if data_df is not None and not data_df.empty:
+        # List all columns
+        columns_str = ", ".join(data_df.columns.tolist())
+        schema_section = f"=== Current Data Schema ===\nColumns: {columns_str}\n"
+
+        # Show sample data
+        sample_rows = data_df.head(num_samples)
+        sample_data_str = sample_rows.to_string(index=True)
+        sample_section = f"\n=== Sample Data (first {num_samples} rows) ===\n{sample_data_str}\n"
+
+        schema_sample_section = schema_section + sample_section
 
     if is_first:
         return prompt_template.format(
@@ -105,6 +123,7 @@ def build_feature_generation_prompt(
             DESC=sem_pred.prompt,
             SOURCE_COL=sem_pred.field,
             FEATURE_BUDGET=feature_budget,
+            SCHEMA_SAMPLE_SECTION=schema_sample_section,
             PREVIOUS_FEATURES_SECTION="",
             PERFORMANCE_FEEDBACK_SECTION="",
             INSTRUCTIONS_SECTION="Propose an initial set of discriminative features that can effectively distinguish positive from negative samples.",
@@ -140,6 +159,7 @@ def build_feature_generation_prompt(
         DESC=sem_pred.prompt,
         SOURCE_COL=sem_pred.field,
         FEATURE_BUDGET=feature_budget,
+        SCHEMA_SAMPLE_SECTION=schema_sample_section,
         PREVIOUS_FEATURES_SECTION=previous_features_section,
         PERFORMANCE_FEEDBACK_SECTION=performance_feedback_section,
         INSTRUCTIONS_SECTION="Propose features that will improve classification performance based on the feedback above.",

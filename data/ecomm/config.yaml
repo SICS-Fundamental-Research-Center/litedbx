@@ -1,0 +1,3 @@
+base_features: [price,discountedPrice,styleType,visualTag,variantName,myntraRating,catalogAddDate,brandName,ageGroup,gender,baseColour,colour1,colour2,fashionType,season,year,usage,vat,displayCategories,weight,navigationId,masterCategory,subCategory,articleType]
+id_features: [id,productTypeId,articleNumber]
+foreign_keys: [articleAttributes,crossLinks,brandUserProfile,codEnabled,styleImages,lookGoodAlbum,style360Images,isEMIEnabled,otherFlags,articleDisplayAttr,productDescriptors,styleOptions,discountData,colours,productSpecificationEntry,associatedImageProducts,relatedStyleOptions,styleVideoAlbumList,image_path,landingPageUrl,productDisplayName,productNameAndDesc]

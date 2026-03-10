@@ -7,6 +7,8 @@ Context:
 - Source field modality: {MODALITY}
 - Task description: {DESC}
 
+{SCHEMA_SAMPLE_SECTION}
+
 {PREVIOUS_FEATURES_SECTION}
 
 {PERFORMANCE_FEEDBACK_SECTION}

@@ -282,7 +282,7 @@ class LdbWorkload:
         # Fallback: ensure minority class has at least minority_threshold samples
         num_pos_sampled = labels.loc[labeled_indices].sum()
         num_neg_sampled = len(labeled_indices) - num_pos_sampled
-        minority_threshold = max(1, int(0.1 * self.b_lab))
+        minority_threshold = max(1, int(0.05 * self.b_lab))
         if min(num_pos_sampled, num_neg_sampled) < minority_threshold:
             # Need to resample with minority constraint
             pos_indices = labels[labels == True].index
@@ -417,7 +417,8 @@ class LdbWorkload:
                 # Build prompt
                 prompt = build_feature_generation_prompt(
                     sem_pred, feature_space, previous_feedback, iteration,
-                    self.b_fs, PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"]
+                    self.b_fs, PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"],
+                    data_df=self.labeled_data[q_name]["data"].df
                 )
 
                 # Call LLM
