@@ -1,0 +1,3 @@
+base_features: [title]
+id_features: []
+foreign_keys: [url,text]

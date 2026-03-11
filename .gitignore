@@ -19,5 +19,5 @@ files
 todo
 docs
 
-data/*/data_full.csv
-data/*/ground_truth
+data/**/data_full.csv
+data/**/ground_truth

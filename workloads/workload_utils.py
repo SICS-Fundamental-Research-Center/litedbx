@@ -237,6 +237,7 @@ def compute_objective_error(
         Tuple of (L_rew, penalty)
     """
     pi = sum(pred_Y) / len(pred_Y)
+    pi = max(1e-6, min(1 - 1e-6, pi))  # Ensure pi is in (0, 1) to avoid extreme penalties
 
     # Compute rewriting loss
     L_rew = loss_by_selectivity(pred_Y, trans_Y, pi)
@@ -296,6 +297,7 @@ def compute_subjective_error(
 
     # Compute LOO loss score
     pi = sum(Y) / len(Y)
+    pi = max(1e-6, min(1 - 1e-6, pi))  # Ensure pi is in (0, 1) to avoid extreme penalties
     L_LOO = loss_by_selectivity(Y_true_series, Y_loo_series, pi)
 
     # Compute the penalty

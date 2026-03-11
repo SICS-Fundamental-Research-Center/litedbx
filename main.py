@@ -5,6 +5,7 @@ from workloads import (
     medical,
     movie,
     ecomm,
+    mmqa,
 )
 from ldb_engine import LdbEngine
 import asyncio
@@ -21,15 +22,16 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    workload = "ecomm"
+    workload = "mmqa"
     queries = [
-        "Q1", 
+        "Q6c", 
     ]
 
     workload_mapping = {
         "medical": medical.get_workload,
         "movie": movie.get_workload,
         "ecomm": ecomm.get_workload,
+        "mmqa": mmqa.get_workload,
     }
 
     workload_func = workload_mapping.get(workload)
