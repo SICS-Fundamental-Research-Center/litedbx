@@ -65,6 +65,11 @@ Constraints:
     • useful for filtering, ranking, or query rewriting
 - Do NOT include free-text, categorical, or high-cardinality string features.
 {CONSTRAINTS_ADDITIONAL}
+- MUST include a feature that directly answer the task description
+```
+{DESC}
+```
+you should name it using a concise and self-explanatory name. It's prompt can be taken directly from the task description.
 - Output valid JSON only. Do not include explanations or comments.
 
 === Contrastive Learning Data ===

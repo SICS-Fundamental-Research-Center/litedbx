@@ -1,5 +1,5 @@
 random_seed: 42
-b_lab: 5
+b_lab: 50
 b_se: 5
 b_rew: 5
 b_fs: 10

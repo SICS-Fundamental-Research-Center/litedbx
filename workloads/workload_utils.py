@@ -251,6 +251,10 @@ def compute_objective_error(
         selected_data_size
     )
 
+    print(f"penalty: {penalty:.4f}, Gamma_rew: {Gamma_rew:.4f}, d_VC: {d_VC}, selected_data_size: {selected_data_size}, query_size: {query_size}, delta: {delta}")
+    print(f"pi: {pi:.4f}, sum(pred_Y): {sum(pred_Y)}, len(pred_Y): {len(pred_Y)}")
+    print("---" * 10)
+
     return L_rew, penalty
 
 
@@ -559,7 +563,7 @@ def perform_label_propagation(
     # Encode features and train classifier
     train_X_proc = encode_features(train_X)
     test_X_proc = encode_features(test_X)
-    clf = train_classifier(train_X_proc, train_Y)
+    clf = train_classifier(train_X_proc, train_Y, n_estimators=3)
 
     # Predict labels for unlabeled data
     pred_Y = pd.Series(clf.predict(test_X_proc), index=test_Y.index)
