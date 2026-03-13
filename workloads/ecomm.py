@@ -4,7 +4,7 @@ import yaml
 from data_structure import Predicate, SemPredicate, SemCQ
 from .ldb_workload import LdbWorkload
 
-DATASET_PATH = Path(__file__).parent.parent / "data/ecomm"
+DATASET_PATH = Path(__file__).parent.parent / "data/ecomm_sf_2000"
 CURRENT_DIR = Path(__file__).parent
 
 Q1 = SemCQ(
@@ -23,8 +23,25 @@ Q1 = SemCQ(
 ])
 
 
+Q2 = SemCQ(
+    selected=["id"],
+    Sigma=[Predicate("image_path", "!=", "")],
+    Ps=[
+        SemPredicate(
+            field="image_path",
+            modality="Image",
+            succ_cond="The displayed product shows a (pair of) sports shoe(s) and the shoe(s) have the colors yellow and silver",
+            prompt=(
+                "Please determine if the given product shows a (pair of) sports shoe(s) and the shoe(s) have the colors yellow and silver. "
+                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                "Do NOT provide any explanations."
+        ))
+])
+
+
 SEM_QUERIES = {
     "Q1": Q1,
+    "Q2": Q2,
 }
 
 

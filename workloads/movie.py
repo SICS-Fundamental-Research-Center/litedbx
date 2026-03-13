@@ -4,7 +4,7 @@ import yaml
 from data_structure import Predicate, SemPredicate, SemCQ
 from .ldb_workload import LdbWorkload
 
-DATASET_PATH = Path(__file__).parent.parent / "data/movie"
+DATASET_PATH = Path(__file__).parent.parent / "data/movie_sf_2000"
 CURRENT_DIR = Path(__file__).parent
 
 Q1 = SemCQ(
