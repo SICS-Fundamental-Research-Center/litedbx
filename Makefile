@@ -9,6 +9,8 @@ clean_movie_q2:
 clean_ecomm_q1:
 	rm -rf .ckpt/ecomm/Q1*
 
+clean_ecomm_q2:
+	rm -rf .ckpt/ecomm/Q2*
 
 clean_mmqa_q3a:
 	rm -rf .ckpt/mmqa/Q3a*
