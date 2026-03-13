@@ -1,10 +1,13 @@
 import json
 import pandas as pd
+import numpy as np
 import logging
 from pathlib import Path
 from typing import Tuple, Any, cast
 from collections import defaultdict
-from data_structure import LdbData, SemCQ, PopulationSpec, FeatureRefinementResponse
+import pandas.api.types as ptypes
+from data_structure import LdbData, SemCQ, PopulationSpec, FeatureRefinementResponse, Predicate
+from data_structure.llm_resp_templates import PredicateResponses
 from llm import LdbLLMClient, PROMPTS
 from common import (
     select_coreset,
@@ -64,6 +67,7 @@ class LdbWorkload:
                 "completion_cost": 0.0,
                 "total_cost": 0.0,
             } for item in [
+                "sigma_augmentation",
                 "feature_space_init",
                 "feature_space_refine",
                 "materialize_labeled_full",
@@ -81,6 +85,77 @@ class LdbWorkload:
                 "data": data,
                 "labels": labels,
             }
+
+
+    def augment_sigma_and_apply(self):
+        # TODO: Only useful when single-query scenario.
+        """
+        Augment Sigma predicates with additional filters suggested by LLM and apply them.
+
+        Returns:
+            A dictionary mapping query names to whether they can skip to final evaluation.
+            True if can_exact_match, False otherwise.
+        """
+        for q_name, sem_cq in self.queries.items():
+            logger.info(f"Augmenting Sigma for query {q_name}...")
+
+            # Get the data without FK and ID columns
+            data = self.sigma_satisfied_data[q_name]["data"]
+            df_clean = data.exclude_fk_and_id()
+
+            # Collect table information
+            schema_info = self._collect_table_schema(df_clean)
+
+            # Build query description from semantic predicates
+            query_desc = self._build_query_description(sem_cq)
+
+            # Build the prompt
+            prompt = PROMPTS["AUGMENT_SIGMA_PROMPT"].format(
+                query_desc=query_desc,
+                schema_info=schema_info
+            )
+
+            # Call LLM to get suggested predicates
+            llm_response = cast(PredicateResponses, self.llm_client.invoke(
+                is_remote=True,
+                modality="Text",
+                prompt=prompt,
+                response_model=PredicateResponses,
+            ))
+            self._update_statistics("sigma_augmentation", self.llm_client.get_usage_statistics())
+
+            # Convert PredicateResponse to Predicate
+            new_predicates = [
+                Predicate(field=pred.field, op=pred.op, value=pred.value)
+                for pred in llm_response.value
+            ]
+
+            if not new_predicates:
+                logger.info(f"No predicates suggested for query {q_name}")
+                if llm_response.can_exact_match:
+                    logger.info(f"LLM indicates current Sigma can exactly match for query {q_name}")
+                continue
+
+            logger.info(f"LLM suggested {len(new_predicates)} predicates for query {q_name}: {new_predicates}")
+            logger.info(f"Can exact match: {llm_response.can_exact_match}")
+
+            # Apply the new predicates to narrow down the data
+            filtered_data = self.sigma_satisfied_data[q_name]["data"].sigma_retrieve_disjunctive(new_predicates, reset_index=True)
+
+            # Rebuild labels for the filtered data
+            labels = build_ground_truth_labels(
+                filtered_data.df, q_name, sem_cq.selected, self.data_dir, debug=False
+            )
+
+            # Update the sigma_satisfied_data
+            self.sigma_satisfied_data[q_name]["data"] = filtered_data
+            self.sigma_satisfied_data[q_name]["labels"] = labels
+
+            logger.info(
+                f"Successfully applied disjunctive predicates for query {q_name}. "
+                f"Data size: {len(data.df)} -> {len(filtered_data.df)} rows"
+            )
+
 
     
     async def init_coresets(self, debug: bool = False):
@@ -545,4 +620,48 @@ class LdbWorkload:
 
     def _report_evaluation_trace(self, execution_trace: dict):
         report_evaluation_trace(execution_trace)
+
+
+    def _collect_table_schema(self, df: pd.DataFrame) -> str:
+        """Collect and format table schema information for LLM prompt."""
+        schema_lines = []
+
+        for col in df.columns:
+            # Numerical columns
+            if ptypes.is_numeric_dtype(df[col]):
+                col_min = df[col].min()
+                col_max = df[col].max()
+                schema_lines.append(f"- {col} (numerical): range [{col_min}, {col_max}]")
+
+            # Categorical columns (object, category, bool)
+            else:
+                # value_counts() returns results in descending order by default
+                value_counts = df[col].value_counts()
+                top_n = min(20, len(value_counts))
+                top_values = value_counts.head(top_n).index.tolist()
+
+                # Format the values
+                if len(value_counts) > 20:
+                    values_str = ", ".join(str(v) for v in top_values) + f", ... ({len(value_counts)} total unique values)"
+                else:
+                    values_str = ", ".join(str(v) for v in top_values)
+
+                schema_lines.append(f"- {col} (categorical): [{values_str}]")
+
+        return "\n".join(schema_lines)
+
+
+    def _build_query_description(self, sem_cq: SemCQ) -> str:
+        """Build a query description from semantic predicates."""
+        if not sem_cq.Ps:
+            return "No semantic predicates provided."
+
+        descriptions = []
+        for sem_pred in sem_cq.Ps:
+            desc = f"Field: {sem_pred.field}\n"
+            desc += f"Success condition: {sem_pred.succ_cond}\n"
+            desc += f"Prompt: {sem_pred.prompt}"
+            descriptions.append(desc)
+
+        return "\n\n".join(descriptions)
 

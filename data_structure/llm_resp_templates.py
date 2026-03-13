@@ -38,3 +38,12 @@ class FeatureRefinementResponse(BaseModel):
     to_add: list[PopulationSpec]
     to_remove: list[str]
 
+
+class PredicateResponse(BaseModel):
+    field: str
+    op: Literal[">", ">=", "<", "<=", "==", "!="]
+    value: str | int | float | bool
+
+class PredicateResponses(BaseModel):
+    value: list[PredicateResponse]
+    can_exact_match: bool = False

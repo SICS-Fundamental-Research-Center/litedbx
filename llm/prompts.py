@@ -124,7 +124,75 @@ MAKE SURE:
 
 
 
+AUGMENT_SIGMA_PROMPT = """
+You are an expert in query optimization and data filtering.
+
+Your task is to analyze a query and a dataset schema to suggest additional predicates that can narrow down the data range effectively.
+
+=== Query Description ===
+{query_desc}
+
+=== Dataset Schema ===
+The dataset contains the following columns with their value distributions:
+{schema_info}
+
+=== Instructions ===
+
+Based on the query description and the dataset schema, suggest additional predicates (filters) that can help narrow down the data to find relevant records more efficiently.
+
+For numerical columns, you can suggest predicates like:
+- x > n or x >= n (lower bound)
+- x < n or x <= n (upper bound)
+- x == n (exact match)
+
+For categorical columns, you can suggest:
+- x == "CATEGORY" (exact match)
+- x != "CATEGORY" (exclude specific value)
+
+=== IMPORTANT SAFETY REMINDERS ===
+
+1. ONLY return predicates when you are VERY CONFIDENT they will help narrow down the query-relevant data.
+2. It is SAFE to return an EMPTY list if you are not confident.
+3. A WRONG predicate will SIGNIFICANTLY DEGRADE the query quality by filtering out relevant data.
+4. Be conservative - when in doubt, return nothing.
+5. Only suggest predicates that align with the query intent.
+
+=== Exact Match Indicator ===
+
+Additionally, indicate whether applying the suggested predicates will EXACTLY match all desired records (no false positives, no false negatives).
+
+Set `can_exact_match` to True ONLY if:
+- The predicates are sufficient to precisely identify ALL relevant records
+- The predicates will NOT include any irrelevant records
+- You have VERY HIGH confidence in this assessment
+
+Otherwise, set `can_exact_match` to False.
+
+=== Response Format ===
+
+Return a JSON object with the following structure:
+{{
+  "value": [  // List of suggested predicates (can be empty)
+    {{
+      "field": "column_name",
+      "op": ">" | ">=" | "<" | "<=" | "==" | "!=",
+      "value": numeric_value | "string_value" | true | false
+    }}
+  ],
+  "can_exact_match": true | false  // Whether predicates exactly match desired records
+}}
+
+Examples:
+- For numerical: {{"field": "price", "op": ">=", "value": 100}}
+- For categorical: {{"field": "category", "op": "==", "value": "electronics"}}
+- For boolean: {{"field": "is_active", "op": "==", "value": true}}
+
+Output valid JSON only. Do not include explanations or comments.
+"""
+
+
 PROMPTS = {
     "GEN_FEAT_CANDIDATE_PROMPT": GEN_FEAT_CANDIDATE_PROMPT,
     "SUGGEST_FEATURES_PROMPT": SUGGEST_FEATURES_PROMPT,
+    "AUGMENT_SIGMA_PROMPT": AUGMENT_SIGMA_PROMPT,
 }

@@ -56,6 +56,24 @@ class LdbData:
             result = result.reset_index(drop=True)
         return LdbData(df=result, config=self.config)
 
+
+    def sigma_retrieve_disjunctive(
+            self, Sigma: list[Predicate], reset_index: bool = False) -> 'LdbData':
+        # Start with all rows as False (no filter)
+        mask = pd.Series([False] * len(self.df), index=self.df.index)
+
+        # Combine masks for all predicates with OR logic
+        for predicate in Sigma:
+            logger.info(f"Applying predicate: {predicate}")
+            mask |= self._cq_map(predicate)
+
+        result = self.df[mask].copy()
+        if reset_index:
+            result = result.reset_index(drop=True)
+        return LdbData(df=result, config=self.config
+    )
+
+
     def _cq_map(self, predicate: Predicate) -> pd.Series:
         # Check whether field is within the DataFrame columns
         if predicate.field not in self.df.columns:

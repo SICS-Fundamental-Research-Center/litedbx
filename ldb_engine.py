@@ -19,6 +19,9 @@ class LdbEngine:
         for q_name, df in self.workload.sigma_satisfied_data.items():
             logger.info(f"Sigma retrieval for query '{q_name}' resulted in {len(df["data"].df)} rows.")
 
+        # Phase (1.2): Augment Sigma with LLM-suggested predicates
+        self.workload.augment_sigma_and_apply()
+
         # Phase (2.1): Initialize the feature space and prepare the coreset.
         # TODO: Add LLM-generated pseudo-label to the feature space.
         # TODO: Evaluate the soundness of the LLM-generated pseudo-label.
@@ -43,7 +46,7 @@ class LdbEngine:
             self.workload.select_schema_and_rewrite_query(debug=False)
 
         self.workload._report_evaluation_trace(execution_trace)
-        
+
         self.workload._report_usage_statistics()
 
 
