@@ -2,7 +2,7 @@ parallelism: 20
 
 
 timeout: 30
-max_retries: 10
+max_retries: 3
 max_tokens: 16384
 top_p: 1.0
 temperature: 0.0
@@ -95,7 +95,7 @@ LOCAL_MODELS:
       output_cost: 0 
       output_cost_thinking: 0
   Image:
-    - model: hosted_vllm//ssd_data/models/Qwen3-VL-30B-A3B-Instruct
+    - model: hosted_vllm//ssd_data/models/Qwen3-VL-30B-A3B-Instruct-FP8
       api_key: "*"
       api_base: http://localhost:8005/v1
       mode: JSON
