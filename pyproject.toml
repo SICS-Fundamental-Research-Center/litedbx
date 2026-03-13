@@ -9,6 +9,7 @@ dependencies = [
     "instructor>=1.13.0",
     "litellm[proxy]>=1.80.11",
     "pandas>=2.3.3",
+    "pillow>=12.1.1",
     "pyarrow>=23.0.1",
     "scikit-learn>=1.8.0",
     "tqdm>=4.67.1",
