@@ -5,17 +5,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import litellm
+litellm.telemetry = False
 import instructor
 from instructor.mode import Mode
+from instructor.core.hooks import HookName, Hooks
 import asyncio
 from tqdm.asyncio import tqdm_asyncio
 from typing import Optional, List, Dict, Any, Type, Tuple
 from pydantic import BaseModel
-from itertools import groupby
 import base64
 from dotenv import load_dotenv
 import os
 import yaml
+from PIL import Image
+import io
 
 load_dotenv()
 
@@ -39,8 +42,7 @@ class PromptParams:
 
         if modality == "Image":
             file_path = Path(data_item)
-            with file_path.open("rb") as image_file:
-                image = base64.b64encode(image_file.read()).decode("utf-8")
+            image = _encode_image_adaptive(file_path)
             self.kwargs["messages"][-1]["content"].append(
                 {
                     "type": "image_url",
@@ -63,17 +65,63 @@ class PromptParams:
 
 
 
+def _clean_tool_args(response: Any) -> Any:
+    """Clean tool call arguments by stripping whitespace and fixing JSON issues."""
+    if hasattr(response, 'choices') and response.choices:
+        for choice in response.choices:
+            if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
+                for tool_call in choice.message.tool_calls:
+                    if hasattr(tool_call.function, 'arguments') and tool_call.function.arguments:
+                        # Strip leading/trailing whitespace from arguments
+                        args = tool_call.function.arguments.strip()
+                        # Fix Python-style boolean values (True/False) to JSON-style (true/false)
+                        args = args.replace('True', 'true').replace('False', 'false')
+                        tool_call.function.arguments = args
+    return response
+
+
+
+
+def _encode_image_adaptive(file_path: Path):
+    MAX_PIXELS = 448 * 448      # threshold for resizing
+    MAX_DIM = 640               # max width/height after resize
+    JPEG_QUALITY = 85           # high quality to avoid degradation
+
+    with Image.open(file_path) as img:
+        img = img.convert("RGB")
+        w, h = img.size
+        pixels = w * h
+
+        # ---- Case 1: small image -> send original ----
+        if pixels <= MAX_PIXELS:
+            with file_path.open("rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+
+        # ---- Case 2: large image -> resize ----
+        img.thumbnail((MAX_DIM, MAX_DIM), Image.Resampling.LANCZOS)
+
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
 class LdbLLMClient:
     def __init__(self):
         self.client = litellm
+
+        # Create hooks to clean tool call arguments
+        hooks = Hooks()
+        hooks.on(HookName.COMPLETION_RESPONSE, _clean_tool_args)
+
         self.client_struct_json = instructor.from_litellm(
             litellm.completion, mode=Mode.JSON)
         self.client_struct_async_json = instructor.from_litellm(
             litellm.acompletion, mode=Mode.JSON)
         self.client_struct_tools = instructor.from_litellm(
-            litellm.completion, mode=Mode.TOOLS)
+            litellm.completion, mode=Mode.TOOLS, hooks=hooks)
         self.client_struct_async_tools = instructor.from_litellm(
-            litellm.acompletion, mode=Mode.TOOLS)
+            litellm.acompletion, mode=Mode.TOOLS, hooks=hooks)
 
         with open(Path(__file__).parent / "config.yaml") as f:
             self.config = yaml.safe_load(f)
@@ -380,24 +428,68 @@ class LdbLLMClient:
 
     async def _atest_invoke(self):
         from data_structure import BooleanFeatureResponse
+        from time import time
 
-        prompt = "Does this X-Ray indicate pneumonia? Answer with True or False."
+        # prompt = "Does this X-Ray indicate pneumonia? Answer with True or False."
+        # image_ids = [
+        #     204, 241, 529, 105, 591, 
+        #     140, 59, 628, 319, 471,
+        #     434, 361, 324, 409, 138,
+        #     64, 21, 615, 281, 239,
+        # ]
+        # start = time()
+        # data_items = []
+        # for idx, image_id in enumerate(image_ids):
+        #     data_items.append([f"../files/medical/data/raw_data/all_x_rays/{idx}_06_encapsulated_lesions_06 ({image_id}).jpeg"])
+        # resp = await self.invoke_parallel(
+        #     is_remote=False,
+        #     modality="Image",
+        #     prompt=prompt,
+        #     data_items=data_items,
+        #     response_model=BooleanFeatureResponse,
+        # )
+        # end = time()
+        # print(f"Parallel execution time for {len(image_ids)} images: {end - start} seconds")
+        # print(f"Execution results: {resp}")
 
+
+        prompt = "Does the displayed product show a (pair of) sports shoe(s) and the shoe(s) have the colors yellow and silver? Please answer with True or False."
+        image_ids = [
+            1163, 1164, 1165, 1525, 1526,
+            1528, 1529, 1530, 1531, 1532,
+            1533, 1534, 1535, 1536, 1537,
+            1538, 1539, 1540, 1541, 1542,
+        ]
+        start = time()
+        data_items = []
+        for idx, image_id in enumerate(image_ids):
+            data_items.append([f"../files/ecomm/source_data/fashion-dataset/images/{image_id}.jpg"])
         resp = await self.invoke_parallel(
-            is_remote=True,
+            is_remote=False,
             modality="Image",
             prompt=prompt,
-            data_items=[["../files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg"]],
+            data_items=data_items,
             response_model=BooleanFeatureResponse,
         )
-        print(f"Local response: {resp}")
+        end = time()
+        print(f"Parallel execution time for {len(image_ids)} images: {end - start} seconds")
+        print(f"Execution results: {resp}")
+
+        # resp = await self.invoke_parallel(
+        #     is_remote=True,
+        #     modality="Image",
+        #     prompt=prompt,
+        #     data_items=[["../files/medical/data/raw_data/all_x_rays/0_06_encapsulated_lesions_06 (204).jpeg"]],
+        #     response_model=BooleanFeatureResponse,
+        # )
+        # print(f"Local response: {resp}")
 
 
         
 if __name__ == "__main__":
     llm_client = LdbLLMClient()
 
-    llm_client._test_invoke()
-    # asyncio.run(llm_client._atest_invoke())
+    # llm_client._test_invoke()
+    asyncio.run(llm_client._atest_invoke())
 
     print(llm_client.usage_statistics)
