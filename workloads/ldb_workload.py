@@ -444,7 +444,8 @@ class LdbWorkload:
                         tag=f"labeled_full",
                         data=self.labeled_data[q_name]["data"],
                         feature_specs=llm_response.to_add,
-                        reuse=False
+                        reuse=False,
+                        is_remote=False,
                     )
 
                 # Evaluate and enforce budget
