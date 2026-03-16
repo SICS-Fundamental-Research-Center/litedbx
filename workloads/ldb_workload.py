@@ -124,6 +124,10 @@ class LdbWorkload:
 
                 relevant_fields_by_category = fields_response.value
 
+                # Enforce the validity of the response
+                for category, fields in relevant_fields_by_category.items():
+                    relevant_fields_by_category[category] = [f for f in fields if f in df_clean.columns]
+
                 # Log categorized fields
                 total_fields = sum(len(fields) for fields in relevant_fields_by_category.values())
                 logger.info(f"Identified {total_fields} relevant fields across {len(relevant_fields_by_category)} category/categories:")
@@ -468,9 +472,61 @@ class LdbWorkload:
 
             # Calculate batch size N = min(5, num_pos, num_neg)
             N = min(5, len(pos_indices), len(neg_indices))
-            assert N > 0, f"No positive or negative samples for query {q_name}, field {field}"
 
-            # Create batches
+            # Handle case when N=0 (all samples are positive or negative)
+            if N == 0:
+                logger.warning(f"All samples are {'positive' if len(pos_indices) > 0 else 'negative'} "
+                             f"for query {q_name}, field {field}. Using fallback mode with single-class samples.")
+                # Use all available samples with their labels
+                all_indices = pos_indices + neg_indices
+                all_labels = [True] * len(pos_indices) + [False] * len(neg_indices)
+                all_data = self.labeled_data[q_name]["data"].df.loc[all_indices, field].tolist()
+
+                # Build data items and metadata for single-class case
+                data_items = all_data
+                metadata = [
+                    {"label": label, "sample_id": int(idx)}
+                    for label, idx in zip(all_labels, all_indices)
+                ]
+
+                # Build prompt
+                prompt = build_feature_generation_prompt(
+                    sem_pred, feature_space, None, 0,
+                    self.b_fs, PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"],
+                    data_df=self.labeled_data[q_name]["data"].df
+                )
+
+                # Call LLM
+                llm_response = cast(FeatureRefinementResponse, self.llm_client.invoke(
+                    modality=sem_pred.modality,
+                    is_remote=True,
+                    prompt=prompt,
+                    data_items=data_items,
+                    data_items_metadata=metadata,
+                    response_model=FeatureRefinementResponse,
+                ))
+
+                # Apply feature changes
+                features_to_remove = [f for f in llm_response.to_remove if f not in self.base_schema]
+                if features_to_remove:
+                    feature_space[:] = [spec for spec in feature_space if spec.target_col not in features_to_remove]
+                    self.labeled_data[q_name]["data"].df.drop(columns=features_to_remove, inplace=True)
+
+                if llm_response.to_add:
+                    feature_space.extend(llm_response.to_add)
+                    self.labeled_data[q_name]["data"].df = await self._materialize_features(
+                        q_name=q_name,
+                        tag=f"labeled_full",
+                        data=self.labeled_data[q_name]["data"],
+                        feature_specs=llm_response.to_add,
+                        reuse=False,
+                        is_remote=False,
+                    )
+
+                logger.info(f"Fallback mode: Added={len(llm_response.to_add)}, Removed={len(llm_response.to_remove)}")
+                continue  # Skip to next semantic predicate
+
+            # Create batches (normal case with both pos and neg samples)
             num_pos_batches = (len(pos_indices) + N - 1) // N  # Ceiling division
             num_neg_batches = (len(neg_indices) + N - 1) // N
             num_batches = max(num_pos_batches, num_neg_batches)

@@ -24,7 +24,7 @@ if __name__ == "__main__":
 
     workload = "ecomm"
     queries = [
-        "Q2", 
+        "Q1", 
     ]
 
     workload_mapping = {

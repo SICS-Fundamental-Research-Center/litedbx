@@ -98,7 +98,6 @@ class LdbData:
 
             # Apply all predicates in this conjunctive group with AND logic
             for predicate in conjunctive_group:
-                logger.info(f"  Applying predicate: {predicate}")
                 group_mask &= self._cq_map(predicate)
 
             # Combine with overall mask using OR logic

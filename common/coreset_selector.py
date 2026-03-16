@@ -8,6 +8,8 @@ from .utils import (
     norm_features, 
     train_classifier
 )
+import logging
+logger = logging.getLogger(__name__)
 
 
 def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
@@ -97,7 +99,18 @@ def est_prediction_conf(
     #   - random_seed
     clf = train_classifier(X=labeled_X_proc, Y=labeled_Y)
 
-    probas = clf.predict_proba(unlabeled_X_proc)[:, 1]
+    # Handle case when all labels are the same (single class)
+    unique_classes = np.unique(labeled_Y)
+    if len(unique_classes) == 1:
+        # All samples belong to the same class, return uniform probabilities
+        single_class = unique_classes[0]
+        probas = np.full(len(unlabeled_X_proc), single_class, dtype=float)
+        logger.info(f"All labeled samples belong to class {single_class}. "
+                    f"Returning uniform probabilities: {single_class}")
+    else:
+        # Normal case: multiple classes, use predict_proba
+        probas = clf.predict_proba(unlabeled_X_proc)[:, 1]
+
     feat_importances = pd.DataFrame({
         "feature": labeled_X_proc.columns.tolist(),
         "importance": clf.feature_importances_
@@ -131,21 +144,32 @@ def _compute_knn_distances(
         labeled_feats: np.ndarray, unlabeled_feats: np.ndarray,
         labels: pd.Series, k_neighbors: int) -> Tuple[np.ndarray, np.ndarray]:
     """Compute k-NN distances to positive and negative classes."""
+    # Handle NaN values: replace with 0
+    labeled_feats = np.nan_to_num(labeled_feats, nan=0.0)
+    unlabeled_feats = np.nan_to_num(unlabeled_feats, nan=0.0)
+
     pos_idx = labels[labels == 1].index
     neg_idx = labels[labels == 0].index
 
-    assert len(pos_idx) > 0 and len(neg_idx) > 0, \
-        "Both positive and negative samples must be present."
+    n_unlabeled = len(unlabeled_feats)
 
-    pos_samples = labeled_feats[pos_idx]
-    neg_samples = labeled_feats[neg_idx]
+    # Initialize distances with infinity
+    dist_pos = np.full((n_unlabeled, k_neighbors), np.inf)
+    dist_neg = np.full((n_unlabeled, k_neighbors), np.inf)
 
-    n_neighbors = min(k_neighbors, len(pos_idx), len(neg_idx))
-    knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
-    knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
+    # Compute distances to positive samples if available
+    if len(pos_idx) > 0:
+        pos_samples = labeled_feats[pos_idx]
+        n_neighbors = min(k_neighbors, len(pos_idx))
+        knn_pos = NearestNeighbors(n_neighbors=n_neighbors).fit(pos_samples)
+        dist_pos, _ = knn_pos.kneighbors(unlabeled_feats)
 
-    dist_pos, _ = knn_pos.kneighbors(unlabeled_feats)
-    dist_neg, _ = knn_neg.kneighbors(unlabeled_feats)
+    # Compute distances to negative samples if available
+    if len(neg_idx) > 0:
+        neg_samples = labeled_feats[neg_idx]
+        n_neighbors = min(k_neighbors, len(neg_idx))
+        knn_neg = NearestNeighbors(n_neighbors=n_neighbors).fit(neg_samples)
+        dist_neg, _ = knn_neg.kneighbors(unlabeled_feats)
 
     return dist_pos, dist_neg
 

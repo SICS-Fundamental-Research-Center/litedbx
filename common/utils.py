@@ -116,6 +116,13 @@ def clf_to_rules(
     N = len(y_train)
     pos_mask = (y_train == 1)
     neg_mask = (y_train == 0)
+
+    # Fallback: if all samples are of the same class, return empty rule set
+    if len(np.unique(y_train)) == 1:
+        logger.warning(f"All training samples belong to the same class ({y_train[0]}). "
+                      f"Returning empty rule set.")
+        return []
+
     _lambda = sum(neg_mask) / max(1, sum(pos_mask))
 
     # ------------------------------------------------------------
@@ -259,7 +266,7 @@ def clf_to_rules(
 
 def apply_rules(rules: list, df: pd.DataFrame, debug: bool = False) -> pd.Series:
     if not rules:
-        return pd.Series(0, index=df.index)
+        return pd.Series(1, index=df.index)  # Empty rule means accept all tuples.
 
     result = pd.Series(False, index=df.index)
 
