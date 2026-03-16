@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 import logging
 from pathlib import Path
-from typing import Tuple, Any, cast
+from typing import Tuple, Any, cast, Optional
 from collections import defaultdict
 import pandas.api.types as ptypes
 from data_structure import LdbData, SemCQ, PopulationSpec, FeatureRefinementResponse, Predicate
-from data_structure.llm_resp_templates import PredicateResponses
+from data_structure.llm_resp_templates import PredicateResponses, PredicateResponse, RelevantFieldsResponse
 from llm import LdbLLMClient, PROMPTS
 from common import (
     select_coreset,
@@ -88,14 +88,6 @@ class LdbWorkload:
 
 
     def augment_sigma_and_apply(self):
-        # TODO: Only useful when single-query scenario.
-        """
-        Augment Sigma predicates with additional filters suggested by LLM and apply them.
-
-        Returns:
-            A dictionary mapping query names to whether they can skip to final evaluation.
-            True if can_exact_match, False otherwise.
-        """
         for q_name, sem_cq in self.queries.items():
             logger.info(f"Augmenting Sigma for query {q_name}...")
 
@@ -109,38 +101,69 @@ class LdbWorkload:
             # Build query description from semantic predicates
             query_desc = self._build_query_description(sem_cq)
 
-            # Build the prompt
-            prompt = PROMPTS["AUGMENT_SIGMA_PROMPT"].format(
-                query_desc=query_desc,
-                schema_info=schema_info
-            )
 
-            # Call LLM to get suggested predicates
-            llm_response = cast(PredicateResponses, self.llm_client.invoke(
-                is_remote=True,
-                modality="Text",
-                prompt=prompt,
-                response_model=PredicateResponses,
-            ))
-            self._update_statistics("sigma_augmentation", self.llm_client.get_usage_statistics())
+            cache_path = self.CKPT_path / f"{q_name}_prefilter_ucq.json"
+            if cache_path.exists():
+                with open(cache_path, 'r') as f:
+                    cached_results = json.load(f)
+            else:
+                # ========== Step 1: Identify Query-Relevant Fields ==========
+                logger.info(f"Step 1: Identifying query-relevant fields for query {q_name}...")
+                identify_fields_prompt = PROMPTS["IDENTIFY_RELEVANT_FIELDS_PROMPT"].format(
+                    query_desc=query_desc,
+                    schema_info=schema_info
+                )
 
-            # Convert PredicateResponse to Predicate
-            new_predicates = [
-                Predicate(field=pred.field, op=pred.op, value=pred.value)
-                for pred in llm_response.value
-            ]
+                fields_response = cast(RelevantFieldsResponse, self.llm_client.invoke(
+                    is_remote=True,
+                    modality="Text",
+                    prompt=identify_fields_prompt,
+                    response_model=RelevantFieldsResponse,
+                ))
+                self._update_statistics("sigma_augmentation", self.llm_client.get_usage_statistics())
 
-            if not new_predicates:
-                logger.info(f"No predicates suggested for query {q_name}")
-                if llm_response.can_exact_match:
-                    logger.info(f"LLM indicates current Sigma can exactly match for query {q_name}")
-                continue
+                relevant_fields_by_category = fields_response.value
 
-            logger.info(f"LLM suggested {len(new_predicates)} predicates for query {q_name}: {new_predicates}")
-            logger.info(f"Can exact match: {llm_response.can_exact_match}")
+                # Log categorized fields
+                total_fields = sum(len(fields) for fields in relevant_fields_by_category.values())
+                logger.info(f"Identified {total_fields} relevant fields across {len(relevant_fields_by_category)} category/categories:")
+                for category, fields in relevant_fields_by_category.items():
+                    if fields:
+                        logger.info(f"  - {category}: {fields}")
 
-            # Apply the new predicates to narrow down the data
-            filtered_data = self.sigma_satisfied_data[q_name]["data"].sigma_retrieve_disjunctive(new_predicates, reset_index=True)
+                # ========== Step 2: Generate UCQ with High Confidence ==========
+                logger.info(f"Step 2: Generating UCQ for query {q_name}...")
+
+                generate_ucq_prompt = PROMPTS["GENERATE_UCQ_PROMPT"].format(
+                    query_desc=query_desc,
+                    relevant_fields=self._format_relevant_fields(relevant_fields_by_category),
+                    schema_info=schema_info
+                )
+
+                ucq_response = cast(PredicateResponses, self.llm_client.invoke(
+                    is_remote=True,
+                    modality="Text",
+                    prompt=generate_ucq_prompt,
+                    response_model=PredicateResponses,
+                ))
+                self._update_statistics("sigma_augmentation", self.llm_client.get_usage_statistics())
+
+                # Save to cache for reproducibility
+                cached_results = {
+                    "field_resp": relevant_fields_by_category,
+                    "ucq_resp": ucq_response.model_dump(),
+                }
+                with open(cache_path, 'w') as f:
+                    json.dump(cached_results, f, indent=2)
+
+            new_ucq = self._expand_ucq([
+                [PredicateResponse(**pred) for pred in group] \
+                    for group in cached_results["ucq_resp"]["value"]])
+            if not new_ucq:
+                logger.info(f"No UCQ predicates suggested for query {q_name}")
+
+            # Apply the new UCQ to narrow down the data
+            filtered_data = self.sigma_satisfied_data[q_name]["data"].sigma_retrieve_ucq(new_ucq, reset_index=True)
 
             # Rebuild labels for the filtered data
             labels = build_ground_truth_labels(
@@ -152,10 +175,13 @@ class LdbWorkload:
             self.sigma_satisfied_data[q_name]["labels"] = labels
 
             logger.info(
-                f"Successfully applied disjunctive predicates for query {q_name}. "
+                f"Successfully applied UCQ for query {q_name}. "
                 f"Data size: {len(data.df)} -> {len(filtered_data.df)} rows"
             )
 
+            if self.b_lab >= len(filtered_data.df):
+                self.b_lab = len(filtered_data.df) // 2
+                logger.info(f"Adjusted b_lab to {self.b_lab} due to small data size after UCQ application for query {q_name}.")
 
     
     async def init_coresets(self, debug: bool = False):
@@ -664,4 +690,78 @@ class LdbWorkload:
             descriptions.append(desc)
 
         return "\n\n".join(descriptions)
+
+
+    def _expand_ucq(self, ucq_responses: list[list[PredicateResponse]]) -> list[list[Predicate]]:
+        from itertools import product
+
+        expanded_ucq = []
+
+        for group in ucq_responses:
+            if not group:
+                continue
+
+            # Separate predicates by operator and field/value count
+            eq_multi_preds = []  # == with multiple fields or values
+            other_preds = []     # All other predicates
+
+            for pred_resp in group:
+                field_list = pred_resp.field
+                value_list = pred_resp.value
+
+                if pred_resp.op == '==' and (len(field_list) > 1 or len(value_list) > 1):
+                    # For == with multiple fields or values: create alternatives
+                    # Each field-value combination becomes a separate alternative group
+                    alternatives = []
+                    for field in field_list:
+                        for value in value_list:
+                            alternatives.append(
+                                Predicate(field=field, op=pred_resp.op, value=value)
+                            )
+                    eq_multi_preds.append(alternatives)
+
+                elif pred_resp.op == '!=' and (len(field_list) > 1 or len(value_list) > 1):
+                    # For != with multiple fields or values: expand to conjunctive predicates
+                    # All field-value combinations must be true (AND logic within group)
+                    for field in field_list:
+                        for value in value_list:
+                            other_preds.append(
+                                Predicate(field=field, op=pred_resp.op, value=value)
+                            )
+
+                else:
+                    # Single field and single value (or comparison operators with single value)
+                    # Extract the single field and single value
+                    single_field = field_list[0]
+                    single_value = value_list[0]
+                    other_preds.append(
+                        Predicate(field=single_field, op=pred_resp.op, value=single_value)
+                    )
+
+            # Combine eq_multi_preds (alternatives) with other_preds using Cartesian product
+            # eq_multi_preds contains lists of alternatives, and we pick one from each list
+            # Then combine with all other_preds using AND logic
+            if eq_multi_preds:
+                # Generate all combinations of alternatives
+                for combo in product(*eq_multi_preds):
+                    new_group = list(combo) + other_preds
+                    expanded_ucq.append(new_group)
+            else:
+                # No eq_multi_preds, just use other_preds
+                expanded_ucq.append(other_preds)
+
+        return expanded_ucq
+
+
+    def _format_relevant_fields(self, fields_by_semantic_group: dict[str, list[str]]) -> str:
+        if not fields_by_semantic_group:
+            return "No relevant fields identified"
+
+        lines = []
+        for group_name, fields in sorted(fields_by_semantic_group.items()):
+            if fields:
+                fields_str = ", ".join(fields)
+                lines.append(f"- **{group_name}**: {fields_str}")
+
+        return "\n".join(lines) if lines else "No relevant fields identified"
 

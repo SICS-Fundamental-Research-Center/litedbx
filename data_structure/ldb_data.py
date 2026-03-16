@@ -74,6 +74,42 @@ class LdbData:
     )
 
 
+    def sigma_retrieve_ucq(
+            self, Sigma: list[list[Predicate]], reset_index: bool = False) -> 'LdbData':
+        # If Sigma is empty or contains empty groups, return all data
+        if not Sigma or all(not group for group in Sigma):
+            logger.info("UCQ is empty - returning all data")
+            return LdbData(df=self.df.copy(), config=self.config)
+
+        # Start with all rows as False (no match)
+        mask = pd.Series([False] * len(self.df), index=self.df.index)
+
+        # Process each conjunctive group (OR logic between groups)
+        for group_idx, conjunctive_group in enumerate(Sigma):
+            if not conjunctive_group:
+                # Empty group means no filter for this group
+                logger.warning(f"Empty conjunctive group at index {group_idx} - skipping")
+                continue
+
+            logger.info(f"Processing conjunctive group {group_idx}: {conjunctive_group}")
+
+            # Start with all rows as True for this group (AND logic within group)
+            group_mask = pd.Series([True] * len(self.df), index=self.df.index)
+
+            # Apply all predicates in this conjunctive group with AND logic
+            for predicate in conjunctive_group:
+                logger.info(f"  Applying predicate: {predicate}")
+                group_mask &= self._cq_map(predicate)
+
+            # Combine with overall mask using OR logic
+            mask |= group_mask
+
+        result = self.df[mask].copy()
+        if reset_index:
+            result = result.reset_index(drop=True)
+        return LdbData(df=result, config=self.config)
+
+
     def _cq_map(self, predicate: Predicate) -> pd.Series:
         # Check whether field is within the DataFrame columns
         if predicate.field not in self.df.columns:
