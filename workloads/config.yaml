@@ -7,3 +7,5 @@ k_beighbors: 5
 
 loo_step: 10
 delta: 0.05  # Theorem 3 holds with probability at least 1 - delta.
+
+dynamic_setting: [0.8, 1.0]

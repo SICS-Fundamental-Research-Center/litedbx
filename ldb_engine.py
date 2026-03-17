@@ -16,7 +16,7 @@ class LdbEngine:
 
         # Phase (1.1): Preprocessing
         self.workload.apply_sigma(debug=debug)
-        for q_name, df in self.workload.sigma_satisfied_data.items():
+        for q_name, df in self.workload.sigma_satisfied_data[0].items():
             logger.info(f"Sigma retrieval for query '{q_name}' resulted in {len(df["data"].df)} rows.")
 
         # Phase (1.2): Augment Sigma with LLM-suggested predicates
@@ -49,4 +49,5 @@ class LdbEngine:
 
         self.workload._report_usage_statistics()
 
+        # TODO: Incremental compute remaining parts.
 
