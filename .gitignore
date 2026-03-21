@@ -13,6 +13,7 @@ wheels/
 .claude
 .env
 .ckpt
+.data_ckpt
 data_bak*
 files
 

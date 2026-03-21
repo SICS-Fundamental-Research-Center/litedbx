@@ -7,6 +7,37 @@ logger = logging.getLogger(__name__)
 class LdbEngine:
     def __init__(self, workload: LdbWorkload) -> None:
         self.workload = workload
+        self.dynamic_setting = workload.dynamic_setting
+
+
+
+    async def p_eval(self, debug=False):
+        logger.info((
+            "Launching LiteDBX Engine for queries: "
+            f"{list(self.workload.queries.keys())} "
+            f"in scenario: {self.workload.scenario} with "
+            f"dynamic setting: {self.dynamic_setting}."
+        ))
+        logger.info(f"Start PEval with {self.dynamic_setting[0] * 100}%-data partition.")
+
+        """
+        [Phase 1] Preprocessing.
+        """
+        # (1.1) Data preparation.
+        # self.workload.
+
+        # (1.2) Sigma retrieval.
+        self.workload.apply_sigma(debug=debug)
+
+        # (1.3) [Optional] Augment the Sigma with high-confidence 
+        #   LLM-suggested predicates to narrow down the data scale.
+
+    async def inc_eval(self):
+        if len(self.dynamic_setting) <= 1:
+            logger.info("No incremental evaluation setting found. Skipping inc_eval.")
+            return
+
+
 
     async def execute(self, debug=False):
         logger.info((
@@ -43,11 +74,13 @@ class LdbEngine:
 
         # Phase (3.2): Select the best schema and return the rewritten query.
         best_statistics, execution_trace = \
-            self.workload.select_schema_and_rewrite_query(debug=False)
+            self.workload.p_eval(debug=False)
 
         self.workload._report_evaluation_trace(execution_trace)
 
         self.workload._report_usage_statistics()
 
-        # TODO: Incremental compute remaining parts.
+        # Dynamic processing.
+        eval_results = await self.workload.inc_eval(debug=debug)
+        self.workload._report_dynamic_results(eval_results)
 

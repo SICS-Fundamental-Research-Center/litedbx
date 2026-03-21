@@ -15,11 +15,15 @@ logger = logging.getLogger(__name__)
 def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
         unlabeled_X: pd.DataFrame,
         k_neighbors: int=5,
-        mode: Literal["balanced", "emperical"] = "emperical") -> Tuple[np.ndarray, pd.Series]:
+        mode: Literal["balanced", "empirical", "inc"] = "empirical",
+        lb: float=float('inf'), 
+        ub: float=float('-inf')) -> Tuple[np.ndarray, pd.Series, float, float]:
 
     # Compute the confidence scores for all unlabeled samples.
     selectivity = sum(labeled_Y) / len(labeled_Y)
     confs = est_conf(labeled_X, labeled_Y, unlabeled_X, selectivity, k_neighbors)
+    new_lb = confs.min()
+    new_ub = confs.max()
 
     # Sort samples by confidence (descending - highest confs first)
     sorted_indices = np.argsort(-confs)
@@ -35,12 +39,15 @@ def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
         select_step = int(len(unlabeled_X) * min(selectivity, 1 - selectivity))
         selected_pos_indices = predicted_pos_indices[:select_step]
         selected_neg_indices = predicted_neg_indices[-select_step:]
-    elif mode == "emperical":
+    elif mode == "empirical":
         # Selection with emperical distribution: select according to the predicted ratio
         # TODO: Determine the optimal selection ratio.
         ratio = 0.2
         selected_pos_indices = predicted_pos_indices[:int(n_predicted_pos * ratio)]
         selected_neg_indices = predicted_neg_indices[-int((len(unlabeled_X) - n_predicted_pos) * ratio):]
+    elif mode == "inc":
+        selected_pos_indices = predicted_pos_indices[confs[predicted_pos_indices] >= ub]
+        selected_neg_indices = predicted_neg_indices[confs[predicted_neg_indices] <= lb]
     else:
         raise ValueError(f"Unsupported selection mode: {mode}")
 
@@ -50,7 +57,7 @@ def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
     # Create labels aligned with the indices (first select_step are positive, rest are negative)
     selected_Y = pd.Series([1] * len(selected_pos_indices) + [0] * len(selected_neg_indices))
 
-    return selected_indices, selected_Y
+    return selected_indices, selected_Y, new_lb, new_ub
 
 
 def est_conf(labeled_X: pd.DataFrame, labeled_Y: pd.Series, 

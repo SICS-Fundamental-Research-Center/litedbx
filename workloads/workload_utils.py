@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import math
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
 from typing import Tuple
 from data_structure import PopulationSpec
@@ -173,12 +174,12 @@ def build_feature_generation_prompt(
 # ============================================================================
 
 def build_ground_truth_labels(
-    data: pd.DataFrame,
+    data: list[pd.DataFrame],
     q_name: str,
     selected_columns: list[str],
     data_dir: str,
     debug: bool = False,
-) -> pd.Series:
+) -> list[pd.Series]:
     """Build ground truth labels for a query.
 
     Args:
@@ -189,25 +190,29 @@ def build_ground_truth_labels(
         debug: Enable debug mode
 
     Returns:
-        Series of boolean labels
+        List of series of boolean labels
     """
     ground_truth_df = pd.read_csv(f"{data_dir}/ground_truth/{q_name}.csv")
     ground_truth_df = ground_truth_df[selected_columns]
     ground_truth_set = set(tuple(row) for row in ground_truth_df.values)
 
-    labels = data[selected_columns].apply(
-        lambda row: tuple(row) in ground_truth_set,
-        axis=1
-    ).reset_index(drop=True)
+    labels_li = []
 
-    if debug:
-        true_rows = data[labels][selected_columns]
-        true_rows_set = set(tuple(row) for row in true_rows.values)
-        assert true_rows_set == ground_truth_set, \
-            f"[DebugErr] Fail to build ground truth labels for query {q_name}."
-        logger.info(f"Ground truth of {q_name}: {labels.sum()} positives / {len(labels)} samples. Oracle selectivity: {labels.sum() / len(labels):.4f}")
+    for d in data:
+        labels = d[selected_columns].apply(
+            lambda row: tuple(row) in ground_truth_set,
+            axis=1
+        ).reset_index(drop=True)
+        labels_li.append(labels)
 
-    return labels
+        if debug:
+            true_rows = d[labels][selected_columns]
+            true_rows_set = set(tuple(row) for row in true_rows.values)
+            assert true_rows_set == ground_truth_set, \
+                f"[DebugErr] Fail to build ground truth labels for query {q_name}."
+            logger.info(f"Ground truth of {q_name}: {labels.sum()} positives / {len(labels)} samples. Oracle selectivity: {labels.sum() / len(labels):.4f}")
+
+    return labels_li
 
 
 # ============================================================================
@@ -539,53 +544,58 @@ def report_evaluation_trace(execution_trace: dict):
 def perform_label_propagation(
     train_X: pd.DataFrame,
     train_Y: pd.Series,
-    test_X: pd.DataFrame,
-    test_Y: pd.Series,
-    visible_labels: pd.Series,
-    b_rew: int,
+    test_X_li: list[pd.DataFrame],
+    test_Y_li: list[pd.Series],
     debug: bool = False,
-) -> Tuple[list, pd.Series, pd.Series, dict, dict]:
-    """Perform label propagation and query translation.
+) -> Tuple[RandomForestClassifier, list[pd.Series]]:
 
-    Args:
-        train_X: Training features
-        train_Y: Training labels
-        test_X: Test features
-        test_Y: Test labels (ground truth)
-        visible_labels: Labels from labeled data
-        b_rew: Rewriting disjunction budget
-        debug: Enable debug logging
-
-    Returns:
-        Tuple of (rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results)
-    """
-
-    # Encode features and train classifier
+    # Train the classifier on the training data.
     train_X_proc = encode_features(train_X)
-    test_X_proc = encode_features(test_X)
     clf = train_classifier(train_X_proc, train_Y, n_estimators=3)
 
-    # Predict labels for unlabeled data
-    pred_Y = pd.Series(clf.predict(test_X_proc), index=test_Y.index)
+    assert len(test_X_li) == len(test_Y_li), "test_X_li and test_Y_li must have the same length."
 
-    # Perform query translation
-    rules = clf_to_rules(clf, train_X_proc.columns.tolist(),
-                         disjunction_budget=b_rew,
-                         X_train=train_X_proc.to_numpy(), y_train=train_Y.to_numpy(),
-                         debug=True)
-    trans_Y = apply_rules(rules, test_X_proc, debug=debug)
+    pred_Y_li = []
+    for i in range(len(test_X_li)):
+        test_X_proc = encode_features(test_X_li[i])
+        pred_Y_li.append(pd.Series(clf.predict(test_X_proc), index=test_Y_li[i].index))
 
-    # Append with ground truth labels
-    pred_Y_complete = pd.concat([visible_labels, pred_Y], ignore_index=True)
-    trans_Y_complete = pd.concat([visible_labels, trans_Y], ignore_index=True)
-    test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
+    return clf, pred_Y_li
 
-    # Evaluate the label propagation results with ground truth
-    pred_eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
-    # Evaluate the query translation results with ground truth
-    trans_eval_results = evaluate_classifier(trans_Y_complete, test_Y_complete)
 
-    return rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results
+def compute_inc_error_certificate(
+        label_Y: pd.Series, prev_prop_Y_li: list[pd.Series], prop_Y_li: list[pd.Series]) -> float:
+    assert len(prev_prop_Y_li) == len(prop_Y_li), (
+        f"Length of prev_prop_Y_li and prop_Y_li must be the same. "
+        f"Got {len(prev_prop_Y_li)} and {len(prop_Y_li)}."
+    )
+
+    if len(prop_Y_li) == 1:
+        return 0.0   # The first iteration introduces no error.
+
+    pi = sum(label_Y) / len(label_Y)
+    piE = \
+        sum([sum(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))]) / \
+            sum([len(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))])
+    Gamma = max(pi, 1-pi) / (min(pi, 1-pi) + 1e-6)
+    GammaE = max(piE, 1-piE) / (min(piE, 1-piE) + 1e-6)
+
+    curr_data_size = sum([len(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))])
+    prev_data_size = curr_data_size - len(prev_prop_Y_li[-1])
+    new_data_size = len(prev_prop_Y_li[-1])
+    data_err = new_data_size / curr_data_size
+
+    pred_err = 0.0
+    for i in range(len(prev_prop_Y_li) - 1):
+        pred_err += sum(prev_prop_Y_li[i] != prop_Y_li[i])
+    pred_err /= prev_data_size
+
+
+    err_certificate = (Gamma + GammaE) * (data_err + pred_err)
+
+    return err_certificate
+
+
 
 
 def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:

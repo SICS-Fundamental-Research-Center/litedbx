@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import logging
 from pathlib import Path
-from typing import Tuple, Any, cast, Optional
+from typing import Tuple, Any, cast
 from collections import defaultdict
 import pandas.api.types as ptypes
 from data_structure import LdbData, SemCQ, PopulationSpec, FeatureRefinementResponse, Predicate
@@ -14,6 +14,8 @@ from common import (
     compute_feature_importance,
     encode_features,
     evaluate_classifier,
+    clf_to_rules,
+    apply_rules,
 )
 from workloads.workload_utils import (
     build_contrastive_batch,
@@ -25,6 +27,7 @@ from workloads.workload_utils import (
     report_evaluation_trace,
     perform_label_propagation,
     pred_and_eval,
+    compute_inc_error_certificate,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,11 +48,14 @@ class LdbWorkload:
         self.b_se = config["b_se"]
         self.b_rew = config["b_rew"]
         self.b_fs = config["b_fs"]
+        self.eta = config["eta"]
 
-        self.sigma_satisfied_data = []
-        self.labeled_data = [{}]
-        self.unlabeled_data = [{}]
-        self.coresets = [{}]
+        self.data_stream = []
+        self.sigma_satisfied_data = [{} for _ in range(len(self.dynamic_setting))]
+        self.unlabeled_data = [{} for _ in range(len(self.dynamic_setting))]
+        self.labeled_data = {}
+        self.coresets = {}
+        self.rules = {}
 
         self.feature_spaces = {}
         
@@ -73,6 +79,7 @@ class LdbWorkload:
                 "feature_space_refine",
                 "materialize_labeled_full",
                 "materialize_unlabeled_full",
+                "materialize_unlabeled_inc",
             ]
         } for _ in range(len(self.dynamic_setting))]
 
@@ -80,14 +87,14 @@ class LdbWorkload:
         for q_name, sem_cq in self.queries.items():
 
             data = self.ldb_data.sigma_retrieve(sem_cq.Sigma, reset_index=True)
-            labels = build_ground_truth_labels(data.df, q_name, sem_cq.selected, self.data_dir, debug=debug)
+            labels_li = build_ground_truth_labels([data.df], q_name, sem_cq.selected, self.data_dir, debug=debug)
 
             # Get indices for positive and negative samples
-            rem_pos_idx = labels[labels == True].index
-            rem_neg_idx = labels[labels == False].index
+            rem_pos_idx = labels_li[0][labels_li[0] == True].index
+            rem_neg_idx = labels_li[0][labels_li[0] == False].index
 
             base_ratio = 0
-            for r in self.dynamic_setting:
+            for idx, r in enumerate(self.dynamic_setting):
                 delta_ratio = (r - base_ratio) / (1 - base_ratio)
 
                 sel_pos_idx = rem_pos_idx.to_series().sample(frac=delta_ratio, random_state=self.random_seed).index
@@ -95,15 +102,13 @@ class LdbWorkload:
                 sel_idx = sel_pos_idx.union(sel_neg_idx)
                 shuffled_idx = sel_idx.to_series().sample(frac=1, random_state=self.random_seed).index
 
-                self.sigma_satisfied_data.append({
-                    q_name: {
-                        "data": LdbData(
-                            df=data.df.loc[shuffled_idx].reset_index(drop=True),
-                            config=data.config
-                        ),
-                        "labels": labels.loc[shuffled_idx].reset_index(drop=True),
-                    }
-                })
+                self.sigma_satisfied_data[idx][q_name] = {
+                    "data": LdbData(
+                        df=data.df.loc[shuffled_idx].reset_index(drop=True),
+                        config=data.config
+                    ),
+                    "labels": labels_li[0].loc[shuffled_idx].reset_index(drop=True),
+                }
 
                 rem_pos_idx = rem_pos_idx.difference(sel_pos_idx)
                 rem_neg_idx = rem_neg_idx.difference(sel_neg_idx)
@@ -190,24 +195,27 @@ class LdbWorkload:
                 logger.info(f"No UCQ predicates suggested for query {q_name}")
 
             # Apply the new UCQ to narrow down the data
-            filtered_data = self.sigma_satisfied_data[0][q_name]["data"].sigma_retrieve_ucq(new_ucq, reset_index=True)
+            filtered_data = [
+                self.sigma_satisfied_data[i][q_name]["data"].sigma_retrieve_ucq(new_ucq, reset_index=True)
+                for i in range(len(self.dynamic_setting))
+            ]
 
             # Rebuild labels for the filtered data
-            labels = build_ground_truth_labels(
-                filtered_data.df, q_name, sem_cq.selected, self.data_dir, debug=False
+            labels_li = build_ground_truth_labels(
+                [filtered.df for filtered in filtered_data], q_name, sem_cq.selected, self.data_dir, debug=False
             )
 
             # Update the sigma_satisfied_data
-            self.sigma_satisfied_data[0][q_name]["data"] = filtered_data
-            self.sigma_satisfied_data[0][q_name]["labels"] = labels
+            for i in range(len(self.dynamic_setting)):
+                logger.info(
+                    f"Apply UCQ for query {q_name} - dyn - {i}. "
+                    f"Data size: {len( self.sigma_satisfied_data[i][q_name]["data"].df)} -> {len(filtered_data[i].df)} rows"
+                )
+                self.sigma_satisfied_data[i][q_name]["data"] = filtered_data[i]
+                self.sigma_satisfied_data[i][q_name]["labels"] = labels_li[i]
 
-            logger.info(
-                f"Successfully applied UCQ for query {q_name}. "
-                f"Data size: {len(data.df)} -> {len(filtered_data.df)} rows"
-            )
-
-            if self.b_lab >= len(filtered_data.df):
-                self.b_lab = len(filtered_data.df) // 2
+            if self.b_lab >= len(filtered_data[0].df):
+                self.b_lab = len(filtered_data[0].df) // 2
                 logger.info(f"Adjusted b_lab to {self.b_lab} due to small data size after UCQ application for query {q_name}.")
 
     
@@ -221,48 +229,56 @@ class LdbWorkload:
             self.feature_spaces[q_name] = await self._init_feature_space(q_name, sem_cq)
 
             # Store materialized data in coreset
-            self.coresets[0][q_name] = {
-                "data": LdbData(df=self.labeled_data[0][q_name]["data"].df, config=self.ldb_data.config),
-                "labels": self.labeled_data[0][q_name]["labels"],
+            self.coresets[q_name] = {
+                "data": LdbData(df=self.labeled_data[q_name]["data"].df, config=self.ldb_data.config),
+                "labels": self.labeled_data[q_name]["labels"],
+                "lb": float('inf'),
+                "ub": float('-inf'),
             }
 
 
-    async def populate_unlabeled_data(self):
+    async def populate_unlabeled_data(self, inc_round: int = 0):
         for q_name, spec in self.feature_spaces.items():
-            self.unlabeled_data[0][q_name]["data"].df = await self._materialize_features(
+            self.unlabeled_data[inc_round][q_name]["data"].df = await self._materialize_features(
                     q_name=q_name,
                     tag="unlabeled_full",
-                    data=self.unlabeled_data[0][q_name]["data"],
+                    data=self.unlabeled_data[inc_round][q_name]["data"],
                     feature_specs=spec,
                     is_remote=False
                 )
 
     
-    def expand_coreset(self, debug: bool = False):
-        for q_name, coreset in self.coresets[0].items():
+    def expand_coreset(self, inc_round: int = 0, debug: bool = False):
+        for q_name, coreset in self.coresets.items():
             labeled_X = coreset["data"].exclude_fk_and_id()
             labeled_Y = coreset["labels"]
-            unlabeled_X = self.unlabeled_data[0][q_name]["data"].exclude_fk_and_id()
+            unlabeled_X = self.unlabeled_data[inc_round][q_name]["data"].exclude_fk_and_id()
 
-            selected_X_idx, selected_Y = select_coreset(
+            mode = "empirical" if inc_round == 0 else "inc"
+            selected_X_idx, selected_Y, new_lb, new_ub = select_coreset(
                 labeled_X=labeled_X,
                 labeled_Y=labeled_Y,
                 unlabeled_X=unlabeled_X,
                 k_neighbors=self.config.get("k_neighbors", 5),
-                mode="emperical",
+                mode=mode,
+                lb=coreset["lb"],
+                ub=coreset["ub"],
             )
+            self.coresets[q_name]["lb"] = new_lb
+            self.coresets[q_name]["ub"] = new_ub
 
             # Update the coreset with the selected samples.
             selected_X = \
-                self.unlabeled_data[0][q_name]["data"].df.iloc[selected_X_idx].reset_index(drop=True)
-            self.coresets[0][q_name]["data"].df = \
-                pd.concat([self.coresets[0][q_name]["data"].df, selected_X], ignore_index=True)
-            self.coresets[0][q_name]["labels"] = pd.concat([labeled_Y, selected_Y], ignore_index=True)
+                self.unlabeled_data[inc_round][q_name]["data"].df.iloc[selected_X_idx].reset_index(drop=True)
+            self.coresets[q_name]["data"].df = \
+                pd.concat([self.coresets[q_name]["data"].df, selected_X], ignore_index=True)
+            self.coresets[q_name]["labels"] = pd.concat([labeled_Y, selected_Y], ignore_index=True)
 
-            logger.info(f"Expanded coreset for query {q_name}: added {len(selected_X)} samples. New coreset size: {len(self.coresets[0][q_name]['data'].df)}")
+            logger.info(f"Inc-Round {inc_round}: Expanded coreset for query {q_name}: added {len(selected_X)} samples. New coreset size: {len(self.coresets[q_name]['data'].df)}")
 
             if debug:
-                ground_truth_Y = self.unlabeled_data[0][q_name]["labels"].iloc[selected_X_idx].reset_index(drop=True)
+                ground_truth_Y = \
+                    self.unlabeled_data[inc_round][q_name]["labels"].iloc[selected_X_idx].reset_index(drop=True)
                 eval_results = evaluate_classifier(selected_Y, ground_truth_Y)
                 logger.info((
                     f"Debug evaluation of expanded coreset for query {q_name}: "
@@ -275,7 +291,7 @@ class LdbWorkload:
 
         importance_sum = defaultdict(float)
 
-        for coreset in self.coresets[0].values():
+        for coreset in self.coresets.values():
             X = encode_features(coreset["data"].exclude_fk_and_id())
             Y = coreset["labels"].astype(int)
             for feat, imp in compute_feature_importance(X, Y).itertuples(index=False):
@@ -298,14 +314,21 @@ class LdbWorkload:
 
         logger.info(f"Selected {len(top_feats)} external features: {top_feats}")
 
+        # Trim the feature space to only include the candidate external features.
+        for q_name, space in self.feature_spaces.items():
+            self.feature_spaces[q_name] = [
+                spec for spec in space if spec.target_col in self.candidate_external_features
+            ]
+
         return self.candidate_external_features
 
 
-    def select_schema_and_rewrite_query(self, debug: bool = False) -> Tuple[dict, dict]:
+    def p_eval(self, debug: bool = False) -> Tuple[dict, dict]:
 
         best_static_error = float('inf')
         best_statistics = {}   
         execution_trace = {}
+        rules_trace = {}
 
         for i in range(len(self.candidate_external_features)):
 
@@ -321,34 +344,50 @@ class LdbWorkload:
             execution_results["L_avg"] = float('inf')
 
             for q_name, _ in self.queries.items():
-                # Propagation labels
-                train_X = self.coresets[0][q_name]["data"].select_active_features(active_external_features)
-                train_Y = self.coresets[0][q_name]["labels"].astype(int)
+                # Propagate labels
+                train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
+                train_Y = self.coresets[q_name]["labels"].astype(int)
                 test_X = self.unlabeled_data[0][q_name]["data"].select_active_features(active_external_features)
                 test_Y = self.unlabeled_data[0][q_name]["labels"].astype(int)
-                visible_labels = self.labeled_data[0][q_name]["labels"].astype(int)
+                visible_labels = self.labeled_data[q_name]["labels"].astype(int)
+                clf, pred_Y_li = perform_label_propagation(train_X, train_Y, [test_X], [test_Y])
+                self.unlabeled_data[0][q_name]["propagated_labels"] = pred_Y_li[0]
 
-                rules, pred_Y, trans_Y, pred_eval_results, trans_eval_results = \
-                    perform_label_propagation(
-                        train_X, train_Y, test_X, test_Y, visible_labels,
-                        self.b_rew, debug
-                    )
+                # Translated the query.
+                if q_name not in rules_trace.keys():
+                    rules_trace[q_name] = []
+                rules = clf_to_rules(
+                    clf, feature_names=train_X.columns.tolist(), 
+                    disjunction_budget=self.b_rew, 
+                    X_train=encode_features(train_X).to_numpy(), 
+                    y_train=train_Y.to_numpy(), debug=debug)
+                rules_trace[q_name].append(rules)
+
+                # Apply the rules.
+                trans_Y = apply_rules(rules, encode_features(test_X))
+
+                # Evaluate the predications and translations.
+                pred_Y_complete = pd.concat([visible_labels, pred_Y_li[0]], ignore_index=True)
+                trans_Y_complete = pd.concat([visible_labels, trans_Y], ignore_index=True)
+                test_Y_complete = pd.concat([visible_labels, test_Y], ignore_index=True)
+                pred_eval_results = evaluate_classifier(pred_Y_complete, test_Y_complete)
+                trans_eval_results = evaluate_classifier(trans_Y_complete, test_Y_complete)
 
                 # Estimate objective error score.
                 L_rew, penalty_rew = compute_objective_error(
-                    pred_Y=pred_Y, trans_Y=trans_Y, b_rew=self.b_rew,
+                    pred_Y=pred_Y_li[0], trans_Y=trans_Y, b_rew=self.b_rew,
                     schema_arity=len(active_external_features) + len(self.base_schema),
                     query_size=len(self.queries),
-                    selected_data_size=len(pred_Y) + self.b_lab,
+                    selected_data_size=len(pred_Y_li[0]) + self.b_lab,
                     delta=self.config["delta"])
                 L_obj = L_rew + penalty_rew
 
                 # Estimate subjective error score.
                 L_LOO, penalty_LOO = compute_subjective_error(
-                    X=self.labeled_data[0][q_name]["data"].select_active_features(active_external_features),
-                    Y=self.labeled_data[0][q_name]["labels"].astype(int),
+                    X=self.labeled_data[q_name]["data"].select_active_features(active_external_features),
+                    Y=self.labeled_data[q_name]["labels"].astype(int),
                     query_size=len(self.queries),
-                    data_size=len(self.labeled_data[0][q_name]["labels"]),
+                    data_size=len(self.labeled_data[q_name]["labels"]),
                     delta=self.config["delta"],
                     loo_step=self.config["loo_step"])
                 L_subj = L_LOO + penalty_LOO
@@ -397,7 +436,91 @@ class LdbWorkload:
                 best_static_error = average_error
                 best_statistics = execution_results
 
+        # TODO: temporarily set the "longest" rule as the best rule.
+        for q_name, rules in rules_trace.items():
+            self.rules[q_name] = {
+                "active_external_features": self.candidate_external_features,
+                "ucq": rules[-1]
+            }
+
         return best_statistics, execution_trace
+
+
+    async def inc_eval(self, debug: bool = False) -> list:
+
+        eval_results = []
+
+        for inc_round in range(1, len(self.dynamic_setting)):
+        
+            eval_results_single_step = {q_name: {
+                "error_certificate": None,
+                "pred_eval": None,
+                "trans_eval": None,
+            } for q_name in self.queries.keys()}
+
+            for q_name, _ in self.queries.items():
+
+                active_external_features = self.rules[q_name]["active_external_features"]
+
+                # Materialize the unlabeled data.
+                self.unlabeled_data[inc_round][q_name]["data"].df = await self._materialize_features(
+                    q_name=q_name,
+                    tag=f"unlabeled_inc",
+                    data=self.unlabeled_data[inc_round][q_name]["data"],
+                    feature_specs=self.feature_spaces[q_name],
+                    is_remote=False,
+                    sub_tag=f"_{inc_round}",
+                )
+
+                # Propagate labels
+                train_X = self.coresets[q_name]["data"].select_active_features(active_external_features)
+                train_Y = self.coresets[q_name]["labels"].astype(int)
+                test_X_li = [
+                    self.unlabeled_data[i][q_name]["data"].select_active_features(active_external_features)
+                    for i in range(inc_round + 1)
+                ]
+                test_Y_li = [
+                    self.unlabeled_data[i][q_name]["labels"].astype(int)
+                    for i in range(inc_round + 1)
+                ]
+                visible_labels = self.labeled_data[q_name]["labels"].astype(int)
+                _, pred_Y_li = perform_label_propagation(train_X, train_Y, test_X_li, test_Y_li)
+
+                # Compute the error certificate.
+                self.unlabeled_data[inc_round][q_name]["propagated_labels"] = pred_Y_li[-1]
+                err_certificate = compute_inc_error_certificate(
+                    label_Y=self.labeled_data[q_name]["labels"].astype(int),
+                    prev_prop_Y_li=[self.unlabeled_data[i][q_name]["propagated_labels"] for i in range(inc_round + 1)],
+                    prop_Y_li=pred_Y_li,
+                )
+                logger.info(f"Inc-Round {inc_round}, Query {q_name}: Est. error certificate: {err_certificate:.4f}")
+
+                # Apply the rules.
+                trans_Y_li = []
+                if err_certificate < self.eta:
+                    trans_Y_li = [
+                        apply_rules(
+                            self.rules[q_name]["ucq"],
+                            encode_features(test_X_li[i]),
+                        ) for i in range(inc_round + 1)
+                    ]
+
+                # Evaluate the predications and translations.
+                pred_Y_complete = pd.concat([visible_labels] + pred_Y_li, ignore_index=True)
+                trans_Y_complete = pd.concat([visible_labels] + trans_Y_li, ignore_index=True)
+                test_Y_complete = pd.concat([visible_labels] + test_Y_li, ignore_index=True)
+
+                eval_results_single_step[q_name]["error_certificate"] = err_certificate
+                eval_results_single_step[q_name]["pred_eval"] = evaluate_classifier(pred_Y_complete, test_Y_complete)
+                eval_results_single_step[q_name]["trans_eval"] = evaluate_classifier(trans_Y_complete, test_Y_complete)
+            eval_results.append({
+                "inc_round": inc_round,
+                "inc_ratio": self.dynamic_setting[inc_round],
+                "eval_results": eval_results_single_step,
+            })
+        return eval_results
+
+
 
 
     def _acquire_human_label(self, q_name: str, debug: bool = False):
@@ -438,7 +561,7 @@ class LdbWorkload:
 
         remaining_indices = data.df.index.difference(labeled_indices)
 
-        self.labeled_data[0][q_name] = {
+        self.labeled_data[q_name] = {
             "data": LdbData(
                 df=data.df.loc[labeled_indices].reset_index(drop=True),
                 config=data.config),
@@ -451,11 +574,14 @@ class LdbWorkload:
             "labels": labels.loc[remaining_indices].reset_index(drop=True),
         }
 
+        for i in range(1, len(self.dynamic_setting)):
+            self.unlabeled_data[i][q_name] = self.sigma_satisfied_data[i][q_name]
+
         if debug:
             logger.info((f"Acquired labels for {self.scenario}.{q_name}: "
-                         f"{self.labeled_data[0][q_name]['labels'].sum()} positive labels / "
-                         f"{len(self.labeled_data[0][q_name]['data'].df)} labeled samples. Selectivity: "
-                         f"{self.labeled_data[0][q_name]['labels'].sum() / len(self.labeled_data[0][q_name]['data'].df):.4f}"))
+                         f"{self.labeled_data[q_name]['labels'].sum()} positive labels / "
+                         f"{len(self.labeled_data[q_name]['data'].df)} labeled samples. Selectivity: "
+                         f"{self.labeled_data[q_name]['labels'].sum() / len(self.labeled_data[q_name]['data'].df):.4f}"))
 
 
     async def _init_feature_space(self, q_name: str, sem_cq: SemCQ) -> list[PopulationSpec]:
@@ -478,7 +604,7 @@ class LdbWorkload:
                 self._update_statistics("feature_space_init", cached_usage)
             with open(ckpt_data_path, 'r') as f:
                 cached_df = pd.read_csv(f)
-                self.labeled_data[0][q_name]["data"] = LdbData(df=cached_df, config=self.ldb_data.config)
+                self.labeled_data[q_name]["data"] = LdbData(df=cached_df, config=self.ldb_data.config)
             return [PopulationSpec(**spec) for spec in cached_data[q_name]]
 
         # Initialize feature space
@@ -489,7 +615,7 @@ class LdbWorkload:
             field = sem_pred.field
 
             # Divide pos / neg labeled data into batches
-            labels = self.labeled_data[0][q_name]["labels"]
+            labels = self.labeled_data[q_name]["labels"]
             pos_indices = labels[labels == True].index.tolist()
             neg_indices = labels[labels == False].index.tolist()
 
@@ -503,7 +629,7 @@ class LdbWorkload:
                 # Use all available samples with their labels
                 all_indices = pos_indices + neg_indices
                 all_labels = [True] * len(pos_indices) + [False] * len(neg_indices)
-                all_data = self.labeled_data[0][q_name]["data"].df.loc[all_indices, field].tolist()
+                all_data = self.labeled_data[q_name]["data"].df.loc[all_indices, field].tolist()
 
                 # Build data items and metadata for single-class case
                 data_items = all_data
@@ -516,7 +642,7 @@ class LdbWorkload:
                 prompt = build_feature_generation_prompt(
                     sem_pred, feature_space, None, 0,
                     self.b_fs, PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"],
-                    data_df=self.labeled_data[0][q_name]["data"].df
+                    data_df=self.labeled_data[q_name]["data"].df
                 )
 
                 # Call LLM
@@ -533,14 +659,14 @@ class LdbWorkload:
                 features_to_remove = [f for f in llm_response.to_remove if f not in self.base_schema]
                 if features_to_remove:
                     feature_space[:] = [spec for spec in feature_space if spec.target_col not in features_to_remove]
-                    self.labeled_data[0][q_name]["data"].df.drop(columns=features_to_remove, inplace=True)
+                    self.labeled_data[q_name]["data"].df.drop(columns=features_to_remove, inplace=True)
 
                 if llm_response.to_add:
                     feature_space.extend(llm_response.to_add)
-                    self.labeled_data[0][q_name]["data"].df = await self._materialize_features(
+                    self.labeled_data[q_name]["data"].df = await self._materialize_features(
                         q_name=q_name,
                         tag=f"labeled_full",
-                        data=self.labeled_data[0][q_name]["data"],
+                        data=self.labeled_data[q_name]["data"],
                         feature_specs=llm_response.to_add,
                         reuse=False,
                         is_remote=False,
@@ -584,21 +710,21 @@ class LdbWorkload:
                 # Get current batch indices and data
                 current_pos_indices = pos_indices[pos_start:pos_end] 
                 current_neg_indices = neg_indices[neg_start:neg_end]
-                pos_batch_data = self.labeled_data[0][q_name]["data"].df.loc[current_pos_indices, field].tolist() 
-                neg_batch_data = self.labeled_data[0][q_name]["data"].df.loc[current_neg_indices, field].tolist()
+                pos_batch_data = self.labeled_data[q_name]["data"].df.loc[current_pos_indices, field].tolist() 
+                neg_batch_data = self.labeled_data[q_name]["data"].df.loc[current_neg_indices, field].tolist()
 
                 # Build data items and metadata
                 data_items, metadata = build_contrastive_batch(
                     sem_pred, pos_batch_data, neg_batch_data,
                     current_pos_indices, current_neg_indices, previous_feedback,
-                    self.labeled_data[0][q_name]["data"].df
+                    self.labeled_data[q_name]["data"].df
                 )
 
                 # Build prompt
                 prompt = build_feature_generation_prompt(
                     sem_pred, feature_space, previous_feedback, iteration,
                     self.b_fs, PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"],
-                    data_df=self.labeled_data[0][q_name]["data"].df
+                    data_df=self.labeled_data[q_name]["data"].df
                 )
 
                 # Call LLM
@@ -615,14 +741,14 @@ class LdbWorkload:
                 features_to_remove = [f for f in llm_response.to_remove if f not in self.base_schema]
                 if features_to_remove:
                     feature_space[:] = [spec for spec in feature_space if spec.target_col not in features_to_remove]
-                    self.labeled_data[0][q_name]["data"].df.drop(columns=features_to_remove, inplace=True)
+                    self.labeled_data[q_name]["data"].df.drop(columns=features_to_remove, inplace=True)
                 
                 if llm_response.to_add:
                     feature_space.extend(llm_response.to_add)
-                    self.labeled_data[0][q_name]["data"].df = await self._materialize_features(
+                    self.labeled_data[q_name]["data"].df = await self._materialize_features(
                         q_name=q_name,
                         tag=f"labeled_full",
-                        data=self.labeled_data[0][q_name]["data"],
+                        data=self.labeled_data[q_name]["data"],
                         feature_specs=llm_response.to_add,
                         reuse=False,
                         is_remote=False,
@@ -630,14 +756,14 @@ class LdbWorkload:
 
                 # Evaluate and enforce budget
                 feedback = pred_and_eval(
-                    self.labeled_data[0][q_name]["data"].exclude_fk_and_id(),
-                    self.labeled_data[0][q_name]["labels"]
+                    self.labeled_data[q_name]["data"].exclude_fk_and_id(),
+                    self.labeled_data[q_name]["labels"]
                 )
                 if len(feature_space) > self.b_fs:
                     feature_can_be_removed = [k for k, v in feedback["feature_importance"].items() if k not in self.base_schema]
                     feature_to_be_removed = feature_can_be_removed[-(len(feature_space) - self.b_fs):]
                     feature_space[:] = [spec for spec in feature_space if spec.target_col not in feature_to_be_removed]
-                    self.labeled_data[0][q_name]["data"].df.drop(columns=feature_to_be_removed, inplace=True)
+                    self.labeled_data[q_name]["data"].df.drop(columns=feature_to_be_removed, inplace=True)
                     logger.info(f"Removed {len(feature_to_be_removed)} features to enforce budget.")
 
                 logger.info(f"Iteration {iteration}: F1={feedback['f1']:.4f}, "
@@ -676,19 +802,20 @@ class LdbWorkload:
     async def _materialize_features(self, q_name: str, tag: str, data: LdbData, 
                                     feature_specs: list[PopulationSpec],
                                     is_remote: bool=True, 
-                                    reuse: bool=True) -> pd.DataFrame:
-        ckpt_path = self.CKPT_path / f"{q_name}_{tag}.csv"
-        ckpt_usage_path = self.CKPT_path / f"{q_name}_usage_{tag}.json"
+                                    reuse: bool=True,
+                                    sub_tag: str="") -> pd.DataFrame:
+        ckpt_path = self.CKPT_path / f"{q_name}_{tag}{sub_tag}.csv"
+        ckpt_usage_path = self.CKPT_path / f"{q_name}_usage_{tag}{sub_tag}.json"
 
         if ckpt_path.exists() and reuse:
             assert ckpt_usage_path.exists(), \
-                f"[Error] Checkpoint for materialized features exists but usage statistics is missing for query {q_name} with tag {tag}."
+                f"[Error] Checkpoint for materialized features exists but usage statistics is missing for query {q_name} with tag {tag}{sub_tag}."
             materialized_df = pd.read_csv(ckpt_path)
-            logger.info(f"Loading cached materialized features for query {q_name} with tag {tag} from: {ckpt_path}")
+            logger.info(f"Loading cached materialized features for query {q_name} with tag {tag}{sub_tag} from: {ckpt_path}")
             with open(ckpt_usage_path, "r") as f:
                 cached_usage = json.load(f)
                 self._update_statistics(f"materialize_{tag}", cached_usage)
-            logger.info(f"Loaded cached usage statistics for materializing features for query {q_name} with tag {tag} from: {ckpt_usage_path}")
+            logger.info(f"Loaded cached usage statistics for materializing features for query {q_name} with tag {tag}{sub_tag} from: {ckpt_usage_path}")
             return materialized_df
 
         df_cp = data.df.copy()
@@ -705,10 +832,10 @@ class LdbWorkload:
         # Store the usage statistics to the cache.
         with open(ckpt_usage_path, 'w') as f:
             json.dump(self.usage_statistics[0][f"materialize_{tag}"], f, indent=2)
-            logger.info(f"Cached usage statistics for materializing features for query {q_name} with tag {tag} to: {ckpt_usage_path}")
+            logger.info(f"Cached usage statistics for materializing features for query {q_name} with tag {tag}{sub_tag} to: {ckpt_usage_path}")
 
         df_cp.to_csv(ckpt_path, index=False)
-        logger.info(f"Cached materialized features for query {q_name} with tag {tag} to: {ckpt_path}")
+        logger.info(f"Cached materialized features for query {q_name} with tag {tag}{sub_tag} to: {ckpt_path}")
 
         return df_cp
 
@@ -844,3 +971,29 @@ class LdbWorkload:
 
         return "\n".join(lines) if lines else "No relevant fields identified"
 
+
+
+    def _report_dynamic_results(self, eval_results: list):
+        inc_rounds = [res["inc_round"] for res in eval_results]
+        inc_ratios = [res["inc_ratio"] for res in eval_results]
+        eval_resuls_single_step = [res["eval_results"] for res in eval_results]
+        
+        queries = eval_resuls_single_step[0].keys()
+
+        for q in queries:
+            eval_q_single_step = [res[q] for res in eval_resuls_single_step]
+
+            trans_f1s = [res["trans_eval"]["f1"] for res in eval_q_single_step]
+            pred_f1s = [res["pred_eval"]["f1"] for res in eval_q_single_step]
+            error_certificates = [res["error_certificate"] for res in eval_q_single_step]
+
+            results = pd.DataFrame({
+                "inc_round": inc_rounds,
+                "inc_ratio": inc_ratios,
+                "trans_f1": trans_f1s,
+                "pred_f1": pred_f1s,
+                "error_certificate": error_certificates,
+            })
+
+            print("=" * 20 + f" Incremental Evaluation Results for Query {q}" + "=" * 20)
+            print(results)

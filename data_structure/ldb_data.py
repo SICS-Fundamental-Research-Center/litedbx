@@ -4,12 +4,22 @@ import yaml
 from typing import Optional
 from llm import LdbLLMClient
 from .sem_query import Predicate
-from .llm_resp_templates import PopulationSpec, IntFeatureResponse, FloatFeatureResponse, BooleanFeatureResponse
+from .llm_resp_templates import (
+    PopulationSpec, 
+    IntFeatureResponse, 
+    FloatFeatureResponse, 
+    BooleanFeatureResponse
+)
 
 logger = logging.getLogger(__name__)
 
 class LdbData:
-    def __init__(self, data_dir: Optional[str] = None, df: Optional[pd.DataFrame] = None, config: Optional[dict] = None):
+    def __init__(
+            self, 
+            data_dir: Optional[str] = None, 
+            df: Optional[pd.DataFrame] = None, 
+            config: Optional[dict] = None):
+
         if df is None:
             assert data_dir is not None, \
                 "Data directory must be provided when DataFrame is not directly passed."
@@ -36,9 +46,10 @@ class LdbData:
         return self.df.drop(columns=self.id_features + self.foreign_keys)
 
 
-    def select_active_features(self, active_external_features: list[str]) -> pd.DataFrame:
+    def select_active_features(self, active_external_features: list[str])  -> pd.DataFrame:
         selected_features = self.base_features + active_external_features
-        return self.df[selected_features]
+        ret = self.df[selected_features]
+        return ret
 
 
     def sigma_retrieve(
@@ -107,6 +118,32 @@ class LdbData:
         if reset_index:
             result = result.reset_index(drop=True)
         return LdbData(df=result, config=self.config)
+
+
+    async def sync_with_enriched_features(
+            self, 
+            enriched_features: list[PopulationSpec], 
+            llm_client: LdbLLMClient,
+            is_remote: bool = False) -> None:
+        current_external_features = set(self.df.columns) - set(self.base_features) \
+            - set(self.id_features) - set(self.foreign_keys)
+        
+        features_to_remove = [col for col in current_external_features
+                              if col not in {spec.target_col for spec in enriched_features}]
+        features_to_add = [spec for spec in enriched_features 
+                           if spec.target_col not in current_external_features]
+        
+        # Remove features that are no longer in the enriched feature space
+        self.df.drop(columns=features_to_remove, inplace=True)
+
+        # Add new features to the DataFrame with default values
+        for spec in features_to_add:
+            assert spec.target_col not in self.df.columns, (
+                f"Target column '{spec.target_col}' already exists in DataFrame. "
+            )
+            self.df[spec.target_col] = await self._sem_map(
+                spec=spec, llm_client=llm_client, is_remote=is_remote
+            )
 
 
     def _cq_map(self, predicate: Predicate) -> pd.Series:
