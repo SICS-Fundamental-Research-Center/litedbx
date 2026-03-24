@@ -8,6 +8,7 @@ from .sem_query import SemCQ, Predicate
 from .llm_resp_templates import PopulationSpec
 
 logger = logging.getLogger(__name__)
+random.seed(42)
 
 
 class LdbDataManager:
@@ -27,8 +28,10 @@ class LdbDataManager:
         self.dynamic_steps = dynamic_steps
         self.CKPT_path = Path(__file__).parent.parent / ".data_ckpt" / scenario \
             / "_".join(str(step) for step in dynamic_steps)
+        self.CKPT_path.mkdir(parents=True, exist_ok=True)
 
-        self.enriched_features: list[PopulationSpec] = []
+        self.enriched_features: dict[str, list[PopulationSpec]] = {}
+        self.trimmed_feature_names: list[str] = []
 
         """
         schema of data_stream:
@@ -44,7 +47,9 @@ class LdbDataManager:
             {
                 "Q1": {
                     "ldb_data": LdbData,
-                    "ground_truth": pd.Series,
+                    "labels": pd.Series,
+                    "propagated_labels": pd.Series,
+                    "deduplicated_num_pos": int,
                     "num_fn": int,
                     "num_tp": int,
                 }, ...<queries>
@@ -61,6 +66,7 @@ class LdbDataManager:
             "Q1": {
                 "ldb_data": LdbData,
                 "labels": pd.Series,
+                "observed_size": int,
                 "lb": int,
                 "ub": int,
             }, ...<queries> 
@@ -85,8 +91,8 @@ class LdbDataManager:
         data_ladder = [int(total_rows * step) for step in steps]
 
         for i in range(1, len(data_ladder)):
-            indices = indices[data_ladder[i-1]:data_ladder[i]]
-            df = self.complete_dataset.df.iloc[indices].copy().reset_index(drop=True)
+            selected_indices = indices[data_ladder[i-1]:data_ladder[i]]
+            df = self.complete_dataset.df.iloc[selected_indices].copy().reset_index(drop=True)
 
             self.data_stream.append(LdbData(df=df, config=self.complete_dataset.config))
 
@@ -112,80 +118,93 @@ class LdbDataManager:
     def refine_sigma_satisfied_data(
             self,
             q_name: str,
-            ucq: list[list[Predicate]],
-            stream_idx: int = 0) -> None:
+            ucq: list[list[Predicate]]) -> None:
         """
         [Optional]
         Refine (narrow down) the Sigma-satisfied data.
         """
-        self._apply_query_sigma_and_build_ground_truth(
-            stream_idx=stream_idx,
-            q_name=q_name,
-            ucq=ucq
-        )
+        for stream_idx in range(len(self.data_stream)):
+            self._apply_query_sigma_and_build_ground_truth(
+                stream_idx=stream_idx,
+                q_name=q_name,
+                ucq=ucq
+            )
 
 
     def acquire_annotation_and_init_coreset(
             self, b_lab: int, seed: int = 42) -> None:
-        for idx in range(len(self.data_stream)):
-            for q_name in self.queries.keys():
-                self._acquire_query_annotation_and_init_coreset(
-                    b_lab=b_lab, 
-                    q_name=q_name, 
-                    stream_idx=idx, 
-                    seed=seed
-                )
+        for q_name in self.queries.keys():
+            self._acquire_query_annotation_and_init_coreset(
+                b_lab=b_lab, 
+                q_name=q_name, 
+                stream_idx=0, 
+                seed=seed
+            )
 
 
-    def sync_coreset_features(
+    async def sync_coreset_features(
             self,
-            enriched_features: list[PopulationSpec],
+            q_name: str,
+            tag: str = "",
             enable_cache: bool = True,
             is_remote: bool = False) -> dict:
 
-        for q_name, coreset in self.coresets.items():
-            ckpt_path = self.CKPT_path / f"{q_name}_coreset.csv"
-            if enable_cache and ckpt_path.exists():
-                logger.info(f"Loading enriched coreset for query '{q_name}' from cache.")
-                coreset["ldb_data"].df = pd.read_csv(ckpt_path)
-                continue
+        ckpt_path = self.CKPT_path / q_name / f"coreset_{tag}.csv"
+        if enable_cache and ckpt_path.exists():
+            logger.info(f"Loading enriched coreset for query '{q_name}' from cache.")
+            self.coresets[q_name]["ldb_data"].df = pd.read_csv(ckpt_path)
+            return self.llm_client.get_usage_statistics()
 
-            coreset["ldb_data"].sync_with_enriched_features(
-                enriched_features=enriched_features,
-                llm_client=self.llm_client,
-                is_remote=is_remote
-            )
+        assert q_name in self.enriched_features.keys(), (
+            f"Enriched features for query '{q_name}' not found. "
+        )
+        await self.coresets[q_name]["ldb_data"].sync_with_enriched_features(
+            enriched_features=self.enriched_features[q_name],
+            llm_client=self.llm_client,
+            is_remote=is_remote
+        )
+
+        # Flush the cache.
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        self.coresets[q_name]["ldb_data"].df.to_csv(ckpt_path, index=False)
 
         llm_usage_statistics = self.llm_client.get_usage_statistics() 
         self.llm_client.reset_usage_statistics()
         return llm_usage_statistics
 
 
-    def sync_sigma_satisfied_data_features(
+    async def sync_sigma_satisfied_data_features(
             self,
-            enriched_features: list[PopulationSpec],
+            q_name: str,
+            tag: str = "",
+            stream_idx: int = 0,
             enable_cache: bool = True,
             is_remote: bool = False) -> dict:
 
-        for stream_idx in range(len(self.data_stream)):
-            for q_name in self.queries.keys():
-                ckpt_path = self.CKPT_path / (
-                    f"{q_name}_stream_{stream_idx}_sigma_satisfied_data.csv"
-                )
-                if enable_cache and ckpt_path.exists():
-                    logger.info((
-                        f"Loading enriched Sigma-satisfied data for "
-                        f"query '{q_name}' in stream-{stream_idx} from cache."
-                    ))
-                    self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df = pd.read_csv(ckpt_path)
-                    continue
+        ckpt_path = self.CKPT_path / q_name / (
+            f"stream_{stream_idx}_sigma_satisfied_data_{tag}.csv"
+        )
+        if enable_cache and ckpt_path.exists():
+            logger.info((
+                f"Loading enriched Sigma-satisfied data for "
+                f"query '{q_name}' in stream-{stream_idx} from cache."
+            ))
+            self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df = pd.read_csv(ckpt_path)
+            return self.llm_client.get_usage_statistics() 
 
-                self.sigma_satisfied_data[stream_idx][q_name]['ldb_data']\
-                    .sync_with_enriched_features(
-                        enriched_features=enriched_features,
-                        llm_client=self.llm_client,
-                        is_remote=is_remote
-                    )
+        assert q_name in self.enriched_features.keys(), (
+            f"Enriched features for query '{q_name}' not found. "
+        )
+        await self.sigma_satisfied_data[stream_idx][q_name]['ldb_data']\
+            .sync_with_enriched_features(
+                enriched_features=self.enriched_features[q_name],
+                llm_client=self.llm_client,
+                is_remote=is_remote
+            )
+
+        # Flush the cache.
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df.to_csv(ckpt_path, index=False)
         
         llm_usage_statistics = self.llm_client.get_usage_statistics() 
         self.llm_client.reset_usage_statistics()
@@ -215,9 +234,11 @@ class LdbDataManager:
             )
             self.sigma_satisfied_data[stream_idx][q_name] = {
                 "ldb_data": self.data_stream[stream_idx].sigma_retrieve_ucq(ucq, reset_index=True),
-                "ground_truth": None,
+                "labels": None,
+                "propagated_labels": None,
                 "num_fn": 0,
                 "num_tp": 0,
+                "deduplicated_num_pos": 0,
             }
         else:
             # Refined sigma retrieval
@@ -238,6 +259,19 @@ class LdbDataManager:
         # ==============================================
         # (2) Build ground truth.
         # ==============================================
+
+        # Handle the case when all samples are eliminated by the augmented Sigma retrieval.
+        if len(self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df) == 0:
+            assert self.sigma_satisfied_data[stream_idx][q_name]['labels'] is not None
+            prev_num_true = self.sigma_satisfied_data[stream_idx][q_name]['deduplicated_num_pos']
+            self.sigma_satisfied_data[stream_idx][q_name]['num_tp'] = 0
+            self.sigma_satisfied_data[stream_idx][q_name]['num_fn'] += prev_num_true
+            self.sigma_satisfied_data[stream_idx][q_name]['labels'] = pd.Series([])
+            logger.info((
+                f"Refined Sigma retrieval eliminates all samples, resulting in {prev_num_true} FNs for query "
+                f"'{q_name}' in stream-{stream_idx}."))
+            return
+
         selected_cols = self.queries[q_name].selected
         ground_truth_df = pd.read_csv(
             f"{self.data_dir}/ground_truth/{q_name}.csv"
@@ -248,20 +282,41 @@ class LdbDataManager:
             lambda row: tuple(row) in ground_truth_set,
             axis=1
         ).reset_index(drop=True)
-        self.sigma_satisfied_data[stream_idx][q_name]["ground_truth"] = labels
+        positive_samples = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df[labels][selected_cols]
+        deduplicated_num_pos = len(set(tuple(row) for row in positive_samples.values))
 
-        # Integrity check.
-        true_rows = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df[labels][selected_cols]
-        true_rows_set = set(tuple(row) for row in true_rows.values)
-        assert true_rows_set.issubset(ground_truth_set), (
-            f"Fail to build ground truth for query '{q_name}' in stream-{stream_idx}."
-        )
-        if len(true_rows_set) < len(ground_truth_set):
-            num_fn = len(ground_truth_set) - len(true_rows_set)
-            self.sigma_satisfied_data[stream_idx][q_name]["num_fn"] = num_fn
+        if self.sigma_satisfied_data[stream_idx][q_name]['labels'] is None:
+            self.sigma_satisfied_data[stream_idx][q_name]["labels"] = labels
+            self.sigma_satisfied_data[stream_idx][q_name]["deduplicated_num_pos"] = deduplicated_num_pos
+            self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] = len(positive_samples) - deduplicated_num_pos
+            self.sigma_satisfied_data[stream_idx][q_name]["num_fn"] = 0
             logger.info((
-                f"[W] Sigma-retrieving introduces {num_fn} FNs for {q_name} in stream-{stream_idx} "
+                f"[W] Duplication in {q_name}-stream-{stream_idx} ground truth introduces: "
+                f"{len(positive_samples) - deduplicated_num_pos} additional TPs. "
+                f"The deduplicated number of pos sample is {deduplicated_num_pos}."
             ))
+        else:
+            # Integrity check.
+            prev_deduplicated_num_true = self.sigma_satisfied_data[stream_idx][q_name]['deduplicated_num_pos']
+            curr_true_rows = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df[labels][selected_cols]
+            curr_true_rows_set = set(tuple(row) for row in curr_true_rows.values)
+            curr_deduplicated_num_true = len(curr_true_rows_set)
+            assert curr_true_rows_set.issubset(ground_truth_set), (
+                f"Fail to build ground truth for query '{q_name}' in stream-{stream_idx}."
+            )
+
+            num_new_tp = len(curr_true_rows) - curr_deduplicated_num_true
+            num_new_fn = self.sigma_satisfied_data[stream_idx][q_name]['num_fn'] + \
+                (prev_deduplicated_num_true - curr_deduplicated_num_true)
+            self.sigma_satisfied_data[stream_idx][q_name]["num_fn"] = num_new_fn 
+            self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] = num_new_tp
+
+            logger.info((
+                f"[W] Refined Sigma retrieval for {q_name}-stream-{stream_idx} results in "
+                f"{num_new_fn} FNs and {num_new_tp} TPs."))
+            
+            self.sigma_satisfied_data[stream_idx][q_name]["labels"] = labels
+            self.sigma_satisfied_data[stream_idx][q_name]["deduplicated_num_pos"] = deduplicated_num_pos
 
         # Report the oracle selectivity.
         logger.info((
@@ -274,59 +329,55 @@ class LdbDataManager:
     def _acquire_query_annotation_and_init_coreset(
             self, q_name: str, b_lab: int, stream_idx: int = 0, seed: int = 42) -> None:
 
-        data = self.sigma_satisfied_data[stream_idx][q_name]["data"]
+        data = self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"]
         labels = self.sigma_satisfied_data[stream_idx][q_name]["labels"]
 
-        if b_lab >= len(data.df):
+        labeling_budget = b_lab
+        if labeling_budget >= len(data.df):
             logger.info((
-                f"[W] Requested labeled budget {b_lab} exceeds the data scale "
+                f"[W] Requested labeled budget {labeling_budget} exceeds the data scale "
                 f"{len(data.df)} for query '{q_name}' in stream-{stream_idx}. "
             ))
-            b_lab = len(data.df) // 2
+            labeling_budget = len(data.df) // 2
             logger.info((
-                f"Adjusted labeled budget to {b_lab} for query '{q_name}' in stream-{stream_idx}."
+                f"Adjusted labeled budget to {labeling_budget} for query '{q_name}' in stream-{stream_idx}."
             ))
 
-        labeled_indices = data.df.sample(n=b_lab, random_state=seed).index
+        labeled_indices = data.df.sample(n=labeling_budget, random_state=seed).index
 
-        """ [Backup]
-        # Fallback: ensure minority class has at least minority_threshold samples
+        # Check whether the sampled data contains both positive and negative samples.
         num_pos_sampled = labels.loc[labeled_indices].sum()
         num_neg_sampled = len(labeled_indices) - num_pos_sampled
-        minority_threshold = max(1, int(0.05 * self.b_lab))
-        if min(num_pos_sampled, num_neg_sampled) < minority_threshold:
-            # Need to resample with minority constraint
+        minority_bias = min(2, b_lab - labeling_budget)  # Add bias to avoid single-class situation.
+        if num_pos_sampled == 0 and minority_bias > 0:
             pos_indices = labels[labels == True].index
+            pos_to_add = min(minority_bias, len(pos_indices))
+            labeled_indices = labeled_indices.union(pos_indices[:pos_to_add])
+            logger.info((
+                f"Minority class (positive) is not sampled for query '{q_name}' in stream-{stream_idx}. "
+                f"Added {pos_to_add} positive samples to the labeled set. "
+                f"Current labeled set has {labels.loc[labeled_indices].sum()} pos samples out of {len(labeled_indices)} samples."
+            ))
+        if num_neg_sampled == 0 and minority_bias > 0:
             neg_indices = labels[labels == False].index
-
-            # Allocate budget: minority class gets minority_threshold, majority gets the rest
-            if num_pos_sampled < num_neg_sampled:
-                pos_to_sample = min(minority_threshold, len(pos_indices))
-                neg_to_sample = min(self.b_lab - pos_to_sample, len(neg_indices))
-            else:
-                neg_to_sample = min(minority_threshold, len(neg_indices))
-                pos_to_sample = min(self.b_lab - neg_to_sample, len(pos_indices))
-
-            # Check if we have enough total samples
-            if pos_to_sample + neg_to_sample < self.b_lab:
-                logger.warning(
-                    f"Query {q_name}: Not enough samples to fill budget. "
-                    f"Sampling {pos_to_sample} pos + {neg_to_sample} neg = {pos_to_sample + neg_to_sample} < {self.b_lab}"
-                )
-
-            # Resample with the constraint
-            labeled_pos = pd.Series(pos_indices).sample(n=pos_to_sample, random_state=self.random_seed)
-            labeled_neg = pd.Series(neg_indices).sample(n=neg_to_sample, random_state=self.random_seed)
-            labeled_indices = pd.concat([labeled_pos, labeled_neg])
-        """
+            neg_to_add = min(minority_bias, len(neg_indices))
+            labeled_indices = labeled_indices.union(neg_indices[:neg_to_add])
+            logger.info((
+                f"Minority class (negative) is not sampled for query '{q_name}' in stream-{stream_idx}. "
+                f"Added {neg_to_add} negative samples to the labeled set. "
+                f"Current labeled set has {labels.loc[labeled_indices].sum()} neg samples out of {len(labeled_indices)} samples."
+            ))
 
         remaining_indices = data.df.index.difference(labeled_indices)
 
         # Move the labeled data from `sigma_satisfied_data` to the `coreset`.
         if q_name not in self.coresets.keys():
             self.coresets[q_name] = {
-                "ldb_data": data.df.loc[labeled_indices].reset_index(drop=True),
+                "ldb_data": LdbData(
+                    df=data.df.loc[labeled_indices].reset_index(drop=True), 
+                    config=data.config),
                 "labels": labels.loc[labeled_indices].reset_index(drop=True),
+                "observed_size": len(labeled_indices),
                 "lb": float('inf'),
                 "ub": float('-inf'),
             }
@@ -334,19 +385,22 @@ class LdbDataManager:
             logger.info((
                 f"[W] Coreset for query '{q_name}' already exists. "
             ))
-            self.coresets[q_name]["ldb_data"] = pd.concat([
-                self.coresets[q_name]["ldb_data"],
+            self.coresets[q_name]["ldb_data"].df = pd.concat([
+                self.coresets[q_name]["ldb_data"].df,
                 data.df.loc[labeled_indices].reset_index(drop=True)
             ], ignore_index=True)
             self.coresets[q_name]["labels"] = pd.concat([
                 self.coresets[q_name]["labels"],
                 labels.loc[labeled_indices].reset_index(drop=True)
             ], ignore_index=True)
+            self.coresets[q_name]["observed_size"] += len(labeled_indices)
 
         # Update the `sigma_satisfied_data`.
         num_tp = labels.loc[labeled_indices].sum()
         self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] += num_tp
-        self.sigma_satisfied_data[stream_idx][q_name]["ground_truth"] = \
+        self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"].df = \
+            data.df.loc[remaining_indices].reset_index(drop=True)
+        self.sigma_satisfied_data[stream_idx][q_name]["labels"] = \
             labels.loc[remaining_indices].reset_index(drop=True)
 
         logger.info((

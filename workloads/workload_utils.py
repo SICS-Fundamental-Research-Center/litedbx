@@ -623,7 +623,11 @@ def pred_and_eval(df: pd.DataFrame, labels: pd.Series) -> dict:
 
     # Bad cases (misclassified samples) with prediction probabilities for uncertainty
     misclassified_mask = labels != preds
-    pred_proba = np.asarray(clf.predict_proba(df_proc))[:, 1]  # Probability of positive class
+    proba = clf.predict_proba(df_proc)
+    if len(np.unique(labels)) == 1:
+        pred_proba = np.ones(len(df_proc)) * (1 if clf.classes_[0] else 0)
+    else:
+        pred_proba = np.asarray(proba)[:, 1]
     bad_cases = df[misclassified_mask].copy()
 
     # Preserve original index for looking up source data

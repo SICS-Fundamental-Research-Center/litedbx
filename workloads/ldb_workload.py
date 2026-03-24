@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Tuple, Any, cast
 from collections import defaultdict
 import pandas.api.types as ptypes
-from data_structure import LdbData, SemCQ, PopulationSpec, FeatureRefinementResponse, Predicate
+from time import time
+from data_structure import LdbData, SemCQ, PopulationSpec, FeatureRefinementResponse, Predicate, LdbDataManager
 from data_structure.llm_resp_templates import PredicateResponses, PredicateResponse, RelevantFieldsResponse
 from llm import LdbLLMClient, PROMPTS
 from common import (
@@ -29,6 +30,7 @@ from workloads.workload_utils import (
     pred_and_eval,
     compute_inc_error_certificate,
 )
+from workloads.feature_utils import initialize_feature_space
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ class LdbWorkload:
         self.dynamic_setting = config["dynamic_setting"]
 
         self.data_dir = data_dir
-        self.scenario = scenario if self.dynamic_setting == [1.0] else f"dyn_{scenario}"
+        self.scenario = scenario
         self.ldb_data = LdbData(data_dir=data_dir)
         self.queries = queries
         self.config = config
@@ -49,6 +51,15 @@ class LdbWorkload:
         self.b_rew = config["b_rew"]
         self.b_fs = config["b_fs"]
         self.eta = config["eta"]
+        self.delta = config["delta"]
+
+        self.data_manager = LdbDataManager(
+            data_dir=self.data_dir,
+            scenario=self.scenario,
+            queries=self.queries,
+            llm_client=self.llm_client,
+            dynamic_steps=self.dynamic_setting
+        )
 
         self.data_stream = []
         self.sigma_satisfied_data = [{} for _ in range(len(self.dynamic_setting))]
@@ -62,8 +73,10 @@ class LdbWorkload:
         self.base_schema = self.ldb_data.df.columns.tolist()
         self.candidate_external_features = []
 
-        self.CKPT_path = Path(__file__).parent.parent / ".ckpt" / self.scenario
-        self.CKPT_path.mkdir(parents=True, exist_ok=True)
+        self.CKPT_path = Path(__file__).parent.parent / ".data_ckpt" / self.scenario \
+            / "_".join(str(step) for step in self.dynamic_setting)
+        for q_name in self.queries.keys():
+            (self.CKPT_path / q_name).mkdir(parents=True, exist_ok=True)
 
         self.usage_statistics = [{
             item: {
@@ -113,6 +126,88 @@ class LdbWorkload:
                 rem_pos_idx = rem_pos_idx.difference(sel_pos_idx)
                 rem_neg_idx = rem_neg_idx.difference(sel_neg_idx)
                 base_ratio = r
+
+
+    def refine_sigma_satisfied_data(self):
+        for q_name, sem_cq in self.queries.items():
+            logger.info(f"Augmenting Sigma for query {q_name}...")
+
+            df_clean = self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"].exclude_fk_and_id()
+            schema_info = self._collect_table_schema(df_clean)
+            query_desc = self._build_query_description(sem_cq)
+
+
+            cache_path = self.CKPT_path / q_name / "prefilter_ucq.json"
+            if cache_path.exists():
+                with open(cache_path, 'r') as f:
+                    cached_results = json.load(f)
+            else:
+                # ========== Step 1: Identify Query-Relevant Fields ==========
+                logger.info(f"Step 1: Identifying query-relevant fields for query {q_name}...")
+                identify_fields_prompt = PROMPTS["IDENTIFY_RELEVANT_FIELDS_PROMPT"].format(
+                    query_desc=query_desc,
+                    schema_info=schema_info
+                )
+
+                fields_response = cast(RelevantFieldsResponse, self.llm_client.invoke(
+                    is_remote=True,
+                    modality="Text",
+                    prompt=identify_fields_prompt,
+                    response_model=RelevantFieldsResponse,
+                ))
+                self._update_statistics("sigma_augmentation", self.llm_client.get_usage_statistics())
+                self.llm_client.reset_usage_statistics()
+
+                relevant_fields_by_category = fields_response.value
+
+                # Enforce the validity of the response
+                for category, fields in relevant_fields_by_category.items():
+                    relevant_fields_by_category[category] = [f for f in fields if f in df_clean.columns]
+
+                # Log categorized fields
+                total_fields = sum(len(fields) for fields in relevant_fields_by_category.values())
+                logger.info(f"Identified {total_fields} relevant fields across {len(relevant_fields_by_category)} category/categories:")
+                for category, fields in relevant_fields_by_category.items():
+                    if fields:
+                        logger.info(f"  - {category}: {fields}")
+
+                # ========== Step 2: Generate UCQ with High Confidence ==========
+                logger.info(f"Step 2: Generating UCQ for query {q_name}...")
+
+                generate_ucq_prompt = PROMPTS["GENERATE_UCQ_PROMPT"].format(
+                    query_desc=query_desc,
+                    relevant_fields=self._format_relevant_fields(relevant_fields_by_category),
+                    schema_info=schema_info
+                )
+
+                ucq_response = cast(PredicateResponses, self.llm_client.invoke(
+                    is_remote=True,
+                    modality="Text",
+                    prompt=generate_ucq_prompt,
+                    response_model=PredicateResponses,
+                ))
+                self._update_statistics("sigma_augmentation", self.llm_client.get_usage_statistics())
+                self.llm_client.reset_usage_statistics()
+
+                # Save to cache for reproducibility
+                cached_results = {
+                    "field_resp": relevant_fields_by_category,
+                    "ucq_resp": ucq_response.model_dump(),
+                }
+                with open(cache_path, 'w') as f:
+                    json.dump(cached_results, f, indent=2)
+
+            new_ucq = self._expand_ucq([
+                [PredicateResponse(**pred) for pred in group] \
+                    for group in cached_results["ucq_resp"]["value"]])
+            if not new_ucq:
+                logger.info(f"No UCQ predicates suggested for query {q_name}")
+
+
+            # Apply the new UCQ to narrow down the data
+            self.data_manager.refine_sigma_satisfied_data(
+                q_name=q_name, ucq=new_ucq
+            )
 
 
     def augment_sigma_and_apply(self):
@@ -218,6 +313,58 @@ class LdbWorkload:
                 self.b_lab = len(filtered_data[0].df) // 2
                 logger.info(f"Adjusted b_lab to {self.b_lab} due to small data size after UCQ application for query {q_name}.")
 
+
+    async def construct_feature_space(self, debug: bool = False):
+
+        self.data_manager.acquire_annotation_and_init_coreset(
+            b_lab=self.b_lab,
+            seed=self.random_seed,
+        )
+
+        for q_name, sem_cq in self.queries.items():
+            # Acquire initial feature space.
+            ckpt_path = self.CKPT_path / q_name / "feature_space.json"
+            ckpt_usage_path = self.CKPT_path / q_name / "usage_feature_space.json"
+
+            if ckpt_path.exists() and ckpt_usage_path.exists():
+                with open(ckpt_path, 'r') as f:
+                    feature_space = json.load(f)
+                with open(ckpt_usage_path, 'r') as f:
+                    usage_statistics = json.load(f)
+                logger.info(f"Loaded feature space from checkpoint for query {q_name}.")
+                self.data_manager.enriched_features[q_name] = [PopulationSpec(**spec) for spec in feature_space]
+                self._update_statistics("feature_space_init", usage_statistics)
+                continue
+
+            feature_space, usage_statistics = await initialize_feature_space(
+                b_fs=self.b_fs,
+                data_manager=self.data_manager,
+                q_name=q_name,
+                sem_cq=sem_cq,
+                llm_client=self.llm_client,
+            )
+            self.data_manager.enriched_features[q_name] = feature_space
+            self._update_statistics("feature_space_init", usage_statistics)
+            self.llm_client.reset_usage_statistics()
+
+            with open(ckpt_path, 'w') as f:
+                json.dump([spec.model_dump() for spec in feature_space], f, indent=2)
+            with open(ckpt_usage_path, 'w') as f:
+                json.dump(usage_statistics, f, indent=2)        
+            logger.info(f"Saved feature space and usage statistics to checkpoint for query {q_name}.")
+
+
+    async def sync_with_enriched_features(self, tag: str = ""):
+        for q_name in self.queries.keys():
+            stat_coreset = await self.data_manager\
+                .sync_coreset_features(q_name, tag=tag, enable_cache=True)
+            stat_sigma = await self.data_manager.\
+                sync_sigma_satisfied_data_features(q_name, stream_idx=0, tag=tag, enable_cache=True)
+
+            self._update_statistics("materialize_labeled_full", stat_coreset)
+            self._update_statistics("materialize_unlabeled_full", stat_sigma)
+            self.llm_client.reset_usage_statistics()
+
     
     async def init_coresets(self, debug: bool = False):
 
@@ -248,6 +395,52 @@ class LdbWorkload:
                 )
 
     
+    def expand_coresets(self, inc_round: int = 0, debug: bool = False):
+        for q_name in self.data_manager.coresets.keys():
+            labeled_X = self.data_manager.coresets[q_name]["ldb_data"].exclude_fk_and_id()
+            labeled_Y = self.data_manager.coresets[q_name]["labels"]
+            unlabeled_X = self.data_manager.sigma_satisfied_data[inc_round][q_name]["ldb_data"].exclude_fk_and_id()
+
+            mode = "empirical" if inc_round == 0 else "inc"
+            selected_X_idx, selected_Y, new_lb, new_ub = select_coreset(
+                labeled_X=labeled_X,
+                labeled_Y=labeled_Y,
+                unlabeled_X=unlabeled_X,
+                k_neighbors=self.config.get("k_neighbors", 5),
+                mode=mode,
+                lb=self.data_manager.coresets[q_name]["lb"],
+                ub=self.data_manager.coresets[q_name]["ub"],
+            )
+            self.data_manager.coresets[q_name]["lb"] = new_lb
+            self.data_manager.coresets[q_name]["ub"] = new_ub
+
+            # Update the coreset with the selected samples.
+            selected_X = \
+                self.data_manager.sigma_satisfied_data[inc_round][q_name]["ldb_data"]\
+                    .df.iloc[selected_X_idx].reset_index(drop=True)
+            self.data_manager.coresets[q_name]["ldb_data"].df = \
+                pd.concat([self.data_manager.coresets[q_name]["ldb_data"].df, selected_X], ignore_index=True)
+            self.data_manager.coresets[q_name]["labels"] = pd.concat([labeled_Y, selected_Y], ignore_index=True)
+
+            
+            logger.info((
+                f"Inc-Round {inc_round}: Expanded coreset for query {q_name}: "
+                f"added {len(selected_X)} samples. "
+                f"New coreset size: {len(self.data_manager.coresets[q_name]['ldb_data'].df)}"))
+
+            if debug:
+                ground_truth_Y = \
+                    self.data_manager.sigma_satisfied_data[inc_round][q_name]["ldb_data"]\
+                        .df.iloc[selected_X_idx].reset_index(drop=True)
+                eval_results = evaluate_classifier(selected_Y, ground_truth_Y)
+                logger.info((
+                    f"Debug evaluation of expanded coreset for query {q_name}: "
+                    f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
+                    f"Precision={eval_results['precision']:.4f}, "
+                    f"Recall={eval_results['recall']:.4f}, F1={eval_results['f1']:.4f}."
+                ))    
+
+
     def expand_coreset(self, inc_round: int = 0, debug: bool = False):
         for q_name, coreset in self.coresets.items():
             labeled_X = coreset["data"].exclude_fk_and_id()
@@ -287,6 +480,53 @@ class LdbWorkload:
                 ))
 
     
+    async def rank_and_trim_feature_space(self, reuse: bool = False):
+
+        ckpt_path = self.CKPT_path / "ranked_feature_space.json"
+
+        top_feats = []
+        if ckpt_path.exists() and reuse:
+            with open(ckpt_path, 'r') as f:
+                ranked_features = json.load(f)
+            top_feats = ranked_features[:self.b_se]
+            logger.info(f"Loaded ranked feature space from checkpoint.")
+        else:
+            importance_sum = defaultdict(float)
+            for coreset in self.data_manager.coresets.values():
+                X = encode_features(coreset["ldb_data"].exclude_fk_and_id())
+                Y = coreset["labels"].astype(int)
+                for feat, imp in compute_feature_importance(X, Y).itertuples(index=False):
+                    importance_sum[feat] += imp
+            # Collect external features (excluding base schema)
+            external_feats = list({
+                spec.target_col
+                for space in self.data_manager.enriched_features.values()
+                for spec in space
+            })
+            # Sort by importance and select top-k
+            ranked_feats = sorted(external_feats, key=lambda f: importance_sum.get(f, 0), reverse=True)
+            top_feats = ranked_feats[:self.b_se]
+            logger.info(f"Selected {len(top_feats)} external features: {top_feats}")
+            with open(ckpt_path, 'w') as f:
+                json.dump(ranked_feats, f, indent=2)
+
+        # Trim the feature space to only include the candidate external features.
+        self.data_manager.trimmed_feature_names = top_feats
+        for q_name in self.data_manager.enriched_features.keys():
+            self.data_manager.enriched_features[q_name] = [
+                spec for spec in self.data_manager.enriched_features[q_name] if spec.target_col in top_feats
+            ]
+
+        # sync the trimmed feature space.
+        for q_name in self.data_manager.coresets.keys():
+            _ = await self.data_manager.\
+                sync_coreset_features(q_name, tag="trimmed", enable_cache=True)
+
+        for q_name in self.data_manager.sigma_satisfied_data[0].keys():
+            _ = await self.data_manager.\
+                sync_sigma_satisfied_data_features(q_name, stream_idx=0, tag="trimmed", enable_cache=True)
+    
+
     def generate_candidate_external_features(self):
 
         importance_sum = defaultdict(float)
@@ -321,6 +561,142 @@ class LdbWorkload:
             ]
 
         return self.candidate_external_features
+
+
+    def rewrite_and_execute_query(self, debug: bool = False) -> Tuple[dict, dict]:
+
+        best_static_error = float('inf')
+        best_statistics = {}   
+        execution_trace = {}
+        rules_trace = {}
+
+        assert len(self.data_manager.trimmed_feature_names) > 0, "No available features to be selected."
+
+        for i in range(len(self.data_manager.trimmed_feature_names)):
+
+            accumulated_error = 0
+
+            stats = [
+                "rules", "features", "pred_eval", "trans_eval", "L_rew",
+                "penalty_rew", "L_LOO", "penalty_LOO", "L_obj", "L_subj", "L_static"
+            ]
+
+            execution_results: dict[str, Any] = {stat: {} for stat in stats}
+            execution_results["L_avg"] = float('inf')
+
+            for q_name, _ in self.queries.items():
+                # Propagate labels
+                active_external_features = [
+                    spec.target_col for spec in self.data_manager.enriched_features[q_name] 
+                    if spec.target_col in self.data_manager.trimmed_feature_names[:i+1]
+                ]
+                train_X = self.data_manager.coresets[q_name]["ldb_data"].select_active_features(active_external_features)
+                train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
+                test_X = self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"].select_active_features(active_external_features)
+                test_Y = self.data_manager.sigma_satisfied_data[0][q_name]["labels"].astype(int)
+
+                clf, pred_Y_li = perform_label_propagation(train_X, train_Y, [test_X], [test_Y])
+                self.data_manager.sigma_satisfied_data[0][q_name]["propagated_labels"] = pred_Y_li[0]
+
+                # Translated the query.
+                if q_name not in rules_trace.keys():
+                    rules_trace[q_name] = []
+                rules = clf_to_rules(
+                    clf, feature_names=train_X.columns.tolist(), 
+                    disjunction_budget=self.b_rew, 
+                    X_train=encode_features(train_X).to_numpy(), 
+                    y_train=train_Y.to_numpy(), debug=debug)
+                rules_trace[q_name].append(rules)
+
+                # Apply the rules.
+                trans_Y = apply_rules(rules, encode_features(test_X))
+
+                # Evaluate the predications and translations.
+                biased_fn = self.data_manager.sigma_satisfied_data[0][q_name]["num_fn"]
+                biased_tp = self.data_manager.sigma_satisfied_data[0][q_name]["num_tp"]
+                logger.info(f"Inc-Round {0}, Query {q_name}: num_tp={biased_tp}, num_fn={biased_fn}")
+                pred_eval_results = evaluate_classifier(pred_Y_li[0], test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
+                trans_eval_results = evaluate_classifier(trans_Y, test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
+
+                # Estimate objective error score.
+                observed_size = self.data_manager.coresets[q_name]["observed_size"]
+                L_rew, penalty_rew = compute_objective_error(
+                    pred_Y=pred_Y_li[0], trans_Y=trans_Y, b_rew=self.b_rew,
+                    schema_arity=len(train_X.columns.tolist()),
+                    query_size=len(self.queries),
+                    selected_data_size=len(pred_Y_li[0]) + self.b_lab,  # TODO: the b_lab may be adjusted.
+                    delta=self.delta)
+                L_obj = L_rew + penalty_rew
+
+                # Estimate subjective error score.
+                L_LOO, penalty_LOO = compute_subjective_error(
+                    X=self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"]\
+                        .select_active_features(active_external_features).iloc[:observed_size],
+                    Y=self.data_manager.sigma_satisfied_data[0][q_name]["labels"].astype(int)[:observed_size],
+                    query_size=len(self.queries),
+                    data_size=observed_size,
+                    delta=self.delta,
+                    loo_step=self.config["loo_step"])
+                L_subj = L_LOO + penalty_LOO
+
+                L_static = L_obj + L_subj
+                accumulated_error += L_static
+
+                # Store metrics organized by type
+                execution_results[q_name] = {
+                    "rules": rules,
+                    "features": active_external_features,
+                    "pred_eval": pred_eval_results,
+                    "trans_eval": trans_eval_results,
+                    "L_rew": L_rew,
+                    "penalty_rew": penalty_rew,
+                    "L_LOO": L_LOO,
+                    "penalty_LOO": penalty_LOO,
+                    "L_obj": L_obj,
+                    "L_subj": L_subj,
+                    "L_static": L_static,
+                }
+                execution_results["rules"][q_name] = rules
+                execution_results["features"][q_name] = active_external_features
+                execution_results["pred_eval"][q_name] = pred_eval_results
+                execution_results["trans_eval"][q_name] = trans_eval_results
+                execution_results["L_rew"][q_name] = L_rew
+                execution_results["penalty_rew"][q_name] = penalty_rew
+                execution_results["L_LOO"][q_name] = L_LOO
+                execution_results["penalty_LOO"][q_name] = penalty_LOO
+                execution_results["L_obj"][q_name] = L_obj
+                execution_results["L_subj"][q_name] = L_subj
+                execution_results["L_static"][q_name] = L_static
+
+                if debug:
+                    logger.info(
+                        f"Estimated for {q_name} with {i+1} external features: "
+                        f"L_obj = {L_obj:.4f} (L_rew={L_rew:.4f}, penalty={penalty_rew:.4f}), "
+                        f"L_subj = {L_subj:.4f} (L_LOO={L_LOO:.4f}, penalty={penalty_LOO:.4f})"
+                    )
+
+            average_error = accumulated_error / len(self.queries)
+            execution_results["L_avg"] = average_error
+            execution_trace[i] = execution_results
+
+            if average_error < best_static_error:
+                best_static_error = average_error
+                best_statistics = execution_results
+
+        # TODO: temporarily set the "longest" rule as the best rule.
+        for q_name, rules in rules_trace.items():
+            trimmed_feature_names = self.data_manager.trimmed_feature_names
+            active_feature_names = [
+                spec.target_col for spec in self.data_manager.enriched_features[q_name] 
+                if spec.target_col in trimmed_feature_names
+            ]
+            self.rules[q_name] = {
+                "active_external_features": active_feature_names,
+                "ucq": rules[-1]
+            }
+
+        return best_statistics, execution_trace
+
 
 
     def p_eval(self, debug: bool = False) -> Tuple[dict, dict]:
@@ -444,6 +820,98 @@ class LdbWorkload:
             }
 
         return best_statistics, execution_trace
+
+
+    async def incremental_processing(self, debug: bool = False) -> Tuple[bool, list]:
+
+        eval_results = []
+        rerun = False
+
+        for inc_round in range(1, len(self.dynamic_setting)):
+        
+            start_time = time()
+            eval_results_single_step = {q_name: {
+                "error_certificate": None,
+                "pred_eval": None,
+                "trans_eval": None,
+            } for q_name in self.queries.keys()}
+
+            for q_name, _ in self.queries.items():
+                if self.data_manager.sigma_satisfied_data[inc_round][q_name]["ldb_data"].df.empty:
+                    logger.info(f"Inc-Round {inc_round}: No sigma-satisfied data available.")
+                    break
+
+                active_external_features = self.rules[q_name]["active_external_features"]
+
+                # Materialize the unlabeled data.
+                await self.data_manager.\
+                    sync_sigma_satisfied_data_features(q_name=q_name, tag="init", stream_idx=inc_round, enable_cache=True)
+
+                # Expand the coreset.
+                self.expand_coresets(inc_round=inc_round, debug=debug)
+
+                # Propagate labels
+                train_X = self.data_manager.coresets[q_name]["ldb_data"].select_active_features(active_external_features)
+                train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
+                test_X_li = [
+                    self.data_manager.sigma_satisfied_data[i][q_name]["ldb_data"].select_active_features(active_external_features)
+                    for i in range(inc_round + 1)
+                ]
+
+                test_Y_li = [
+                    self.data_manager.sigma_satisfied_data[i][q_name]["labels"].astype(int)
+                    for i in range(inc_round + 1)
+                ]
+                _, pred_Y_li = perform_label_propagation(train_X, train_Y, test_X_li, test_Y_li)
+
+                # Compute the error certificate.
+                self.data_manager.sigma_satisfied_data[inc_round][q_name]["propagated_labels"] = pred_Y_li[-1]
+                observed_data_size = self.data_manager.coresets[q_name]["observed_size"]
+                err_certificate = compute_inc_error_certificate(
+                    label_Y=self.data_manager.coresets[q_name]["labels"][:observed_data_size].astype(int),
+                    prev_prop_Y_li=[self.data_manager.sigma_satisfied_data[i][q_name]["propagated_labels"] for i in range(inc_round + 1)],
+                    prop_Y_li=pred_Y_li,
+                )
+                logger.info(f"Inc-Round {inc_round}, Query {q_name}: Est. error certificate: {err_certificate:.4f}")
+
+                # Apply the rules.
+                trans_Y_li = []
+                if err_certificate < self.eta:
+                    trans_Y_li = [
+                            apply_rules(
+                                self.rules[q_name]["ucq"],
+                                encode_features(test_X_li[i]),
+                            ) for i in range(inc_round + 1)
+                        ]
+                else:
+                    rerun = True
+                    return rerun, []
+
+                # Evaluate the predications and translations.
+                pred_Y_complete = pd.concat(pred_Y_li, ignore_index=True)
+                trans_Y_complete = pd.concat(trans_Y_li, ignore_index=True)
+                test_Y_complete = pd.concat(test_Y_li, ignore_index=True)
+
+                num_tp, num_fn = 0, 0
+                for i in range(inc_round + 1):
+                    num_tp += self.data_manager.sigma_satisfied_data[i][q_name]["num_tp"]
+                    num_fn += self.data_manager.sigma_satisfied_data[i][q_name]["num_fn"]
+
+                logger.info(f"Inc-Round {inc_round}, Query {q_name}: num_tp={num_tp}, num_fn={num_fn}")
+
+                eval_results_single_step[q_name]["error_certificate"] = err_certificate
+                eval_results_single_step[q_name]["pred_eval"] = evaluate_classifier(pred_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+                eval_results_single_step[q_name]["trans_eval"] = evaluate_classifier(trans_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+            
+            end_time = time()
+            eval_results.append({
+                "inc_round": inc_round,
+                "inc_ratio": self.dynamic_setting[inc_round],
+                "eval_results": eval_results_single_step,
+                "eval_time": end_time - start_time
+            })
+        return False, eval_results
+
 
 
     async def inc_eval(self, debug: bool = False) -> list:
@@ -977,23 +1445,28 @@ class LdbWorkload:
         inc_rounds = [res["inc_round"] for res in eval_results]
         inc_ratios = [res["inc_ratio"] for res in eval_results]
         eval_resuls_single_step = [res["eval_results"] for res in eval_results]
+        eval_time = [res["eval_time"] for res in eval_results]
         
         queries = eval_resuls_single_step[0].keys()
 
-        for q in queries:
-            eval_q_single_step = [res[q] for res in eval_resuls_single_step]
+        try:
+            for q in queries:
+                eval_q_single_step = [res[q] for res in eval_resuls_single_step]
 
-            trans_f1s = [res["trans_eval"]["f1"] for res in eval_q_single_step]
-            pred_f1s = [res["pred_eval"]["f1"] for res in eval_q_single_step]
-            error_certificates = [res["error_certificate"] for res in eval_q_single_step]
+                trans_f1s = [res["trans_eval"]["f1"] if res else None for res in eval_q_single_step]
+                pred_f1s = [res["pred_eval"]["f1"] if res else None for res in eval_q_single_step]
+                error_certificates = [res["error_certificate"] if res else None for res in eval_q_single_step]
 
-            results = pd.DataFrame({
-                "inc_round": inc_rounds,
-                "inc_ratio": inc_ratios,
-                "trans_f1": trans_f1s,
-                "pred_f1": pred_f1s,
-                "error_certificate": error_certificates,
-            })
+                results = pd.DataFrame({
+                    "inc_round": inc_rounds,
+                    "inc_ratio": inc_ratios,
+                    "trans_f1": trans_f1s,
+                    "pred_f1": pred_f1s,
+                    "error_certificate": error_certificates,
+                    "eval_time": eval_time,
+                })
 
-            print("=" * 20 + f" Incremental Evaluation Results for Query {q}" + "=" * 20)
-            print(results)
+                print("=" * 20 + f" Incremental Evaluation Results for Query {q}" + "=" * 20)
+                print(results)
+        except Exception as e:
+            print(eval_results)

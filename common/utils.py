@@ -44,6 +44,8 @@ def train_classifier(
         n_estimators=100,
         max_depth=10) -> RandomForestClassifier:
 
+    # Convert labels to integers (sklearn requires integer dtype for classification)
+    Y = Y.astype(int)
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
@@ -55,7 +57,11 @@ def train_classifier(
     return clf
 
 
-def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series) -> dict:
+def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series, biased_tp: int = 0, biased_fn: int = 0) -> dict:
+    # Convert labels to integers for consistency
+    Y_true = Y_true.astype(int)
+    Y_pred = Y_pred.astype(int)
+
     # Calculate TP, FP, TN, FN
     TP = ((Y_true == 1) & (Y_pred == 1)).sum()
     FP = ((Y_true == 0) & (Y_pred == 1)).sum()
@@ -66,6 +72,9 @@ def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series) -> dict:
         "Sum of TP, FP, TN, FN must equal total samples. "
         f"Got {TP + FP + TN + FN} samples, expected {len(Y_true)}."
     )
+
+    TP += biased_tp
+    FN += biased_fn
 
     precision = TP / (TP + FP) if (TP + FP) > 0 else 0
     recall = TP / (TP + FN) if (TP + FN) > 0 else 0
@@ -85,6 +94,9 @@ def compute_feature_importance(
         X: pd.DataFrame, Y: pd.Series,
         n_estimators=100,
         max_depth=10) -> pd.DataFrame:
+
+    # Convert labels to integers (sklearn requires integer dtype for classification)
+    Y = Y.astype(int)
 
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
@@ -112,6 +124,9 @@ def clf_to_rules(
 ) -> List[List[Tuple[str, float, str]]]:
 
     assert len(feature_names) == clf.n_features_in_
+
+    # Convert labels to integers for consistency
+    y_train = y_train.astype(int)
 
     N = len(y_train)
     pos_mask = (y_train == 1)
