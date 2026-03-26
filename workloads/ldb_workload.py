@@ -532,8 +532,10 @@ class LdbWorkload:
                 logger.info(f"Inc-Round {inc_round}, Query {q_name}: num_tp={num_tp}, num_fn={num_fn}")
 
                 eval_results_single_step[q_name]["error_certificate"] = err_certificate
-                eval_results_single_step[q_name]["pred_eval"] = evaluate_classifier(pred_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
-                eval_results_single_step[q_name]["trans_eval"] = evaluate_classifier(trans_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+                eval_results_single_step[q_name]["pred_eval"] = \
+                    evaluate_classifier(pred_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+                eval_results_single_step[q_name]["trans_eval"] = \
+                    evaluate_classifier(trans_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
             
             end_time = time()
             eval_results.append({
