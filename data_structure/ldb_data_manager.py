@@ -263,8 +263,7 @@ class LdbDataManager:
         # Handle the case when all samples are eliminated by the augmented Sigma retrieval.
         if len(self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df) == 0:
             assert self.sigma_satisfied_data[stream_idx][q_name]['labels'] is not None
-            prev_num_true = self.sigma_satisfied_data[stream_idx][q_name]['deduplicated_num_pos']
-            self.sigma_satisfied_data[stream_idx][q_name]['num_tp'] = 0
+            prev_num_true = self.sigma_satisfied_data[stream_idx][q_name]['labels'].sum()
             self.sigma_satisfied_data[stream_idx][q_name]['num_fn'] += prev_num_true
             self.sigma_satisfied_data[stream_idx][q_name]['labels'] = pd.Series([])
             logger.info((
@@ -288,7 +287,6 @@ class LdbDataManager:
         if self.sigma_satisfied_data[stream_idx][q_name]['labels'] is None:
             self.sigma_satisfied_data[stream_idx][q_name]["labels"] = labels
             self.sigma_satisfied_data[stream_idx][q_name]["deduplicated_num_pos"] = deduplicated_num_pos
-            self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] = len(positive_samples) - deduplicated_num_pos
             self.sigma_satisfied_data[stream_idx][q_name]["num_fn"] = 0
             logger.info((
                 f"[W] Duplication in {q_name}-stream-{stream_idx} ground truth introduces: "
@@ -297,23 +295,21 @@ class LdbDataManager:
             ))
         else:
             # Integrity check.
-            prev_deduplicated_num_true = self.sigma_satisfied_data[stream_idx][q_name]['deduplicated_num_pos']
+            prev_num_true = self.sigma_satisfied_data[stream_idx][q_name]['labels'].sum()
+            curr_num_true = labels.sum()
             curr_true_rows = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df[labels][selected_cols]
             curr_true_rows_set = set(tuple(row) for row in curr_true_rows.values)
-            curr_deduplicated_num_true = len(curr_true_rows_set)
             assert curr_true_rows_set.issubset(ground_truth_set), (
                 f"Fail to build ground truth for query '{q_name}' in stream-{stream_idx}."
             )
 
-            num_new_tp = len(curr_true_rows) - curr_deduplicated_num_true
             num_new_fn = self.sigma_satisfied_data[stream_idx][q_name]['num_fn'] + \
-                (prev_deduplicated_num_true - curr_deduplicated_num_true)
+                (prev_num_true - curr_num_true)
             self.sigma_satisfied_data[stream_idx][q_name]["num_fn"] = num_new_fn 
-            self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] = num_new_tp
 
             logger.info((
                 f"[W] Refined Sigma retrieval for {q_name}-stream-{stream_idx} results in "
-                f"{num_new_fn} FNs and {num_new_tp} TPs."))
+                f"{num_new_fn} FNs."))
             
             self.sigma_satisfied_data[stream_idx][q_name]["labels"] = labels
             self.sigma_satisfied_data[stream_idx][q_name]["deduplicated_num_pos"] = deduplicated_num_pos
@@ -397,7 +393,7 @@ class LdbDataManager:
 
         # Update the `sigma_satisfied_data`.
         num_tp = labels.loc[labeled_indices].sum()
-        self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] += num_tp
+        self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] = num_tp
         self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"].df = \
             data.df.loc[remaining_indices].reset_index(drop=True)
         self.sigma_satisfied_data[stream_idx][q_name]["labels"] = \
