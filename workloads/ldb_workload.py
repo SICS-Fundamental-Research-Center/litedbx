@@ -261,9 +261,9 @@ class LdbWorkload:
 
             if debug:
                 ground_truth_Y = \
-                    self.data_manager.sigma_satisfied_data[inc_round][q_name]["ldb_data"]\
+                    self.data_manager.sigma_satisfied_data[inc_round][q_name]["labels"]\
                         .df.iloc[selected_X_idx].reset_index(drop=True)
-                eval_results = evaluate_classifier(selected_Y, ground_truth_Y)
+                eval_results = evaluate_classifier(Y_pred=selected_Y, Y_true=ground_truth_Y)
                 logger.info((
                     f"Debug evaluation of expanded coreset for query {q_name}: "
                     f"TP={eval_results['TP']}, FP={eval_results['FP']}, FN={eval_results['FN']}, "
@@ -371,8 +371,8 @@ class LdbWorkload:
                 biased_fn = self.data_manager.sigma_satisfied_data[0][q_name]["num_fn"]
                 biased_tp = self.data_manager.sigma_satisfied_data[0][q_name]["num_tp"]
                 logger.info(f"Inc-Round {0}, Query {q_name}: num_tp={biased_tp}, num_fn={biased_fn}")
-                pred_eval_results = evaluate_classifier(pred_Y_li[0], test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
-                trans_eval_results = evaluate_classifier(trans_Y, test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
+                pred_eval_results = evaluate_classifier(Y_pred=pred_Y_li[0], Y_true=test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
+                trans_eval_results = evaluate_classifier(Y_pred=trans_Y, Y_true=test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
 
                 # Estimate objective error score.
                 observed_size = self.data_manager.coresets[q_name]["observed_size"]
@@ -533,9 +533,9 @@ class LdbWorkload:
 
                 eval_results_single_step[q_name]["error_certificate"] = err_certificate
                 eval_results_single_step[q_name]["pred_eval"] = \
-                    evaluate_classifier(pred_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+                    evaluate_classifier(Y_pred=pred_Y_complete, Y_true=test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
                 eval_results_single_step[q_name]["trans_eval"] = \
-                    evaluate_classifier(trans_Y_complete, test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+                    evaluate_classifier(Y_pred=trans_Y_complete, Y_true=test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
             
             end_time = time()
             eval_results.append({
