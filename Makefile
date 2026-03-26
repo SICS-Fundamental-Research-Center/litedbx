@@ -1,62 +1,44 @@
-.PHONY: clean clean_medical
+.PHONY: clean clean_cache help
 
-clean_movie_q1:
-	rm -rf .ckpt/movie/Q1*
+# Default values (can be overridden by CLI arguments)
+DYNAMIC_SETTING ?= 0.6_0.8_1.0
+DATASET ?= movie
+QUERY_ID ?=
+DRY_RUN ?= false
 
-clean_movie_q2:
-	rm -rf .ckpt/movie/Q2*
+help:
+	@echo "Usage:"
+	@echo "  make clean_cache DATASET=movie DYNAMIC_SETTING=0.6_0.8_1.0 QUERY_ID=Q1 DRY_RUN=false"
+	@echo ""
+	@echo "Parameters:"
+	@echo "  DATASET          - Dataset name (movie, ecomm, mmqa, medical)"
+	@echo "  DYNAMIC_SETTING  - Dynamic setting (default: 0.6_0.8_1.0)"
+	@echo "  QUERY_ID         - Query ID to delete (e.g., Q1, Q2, Q3a)"
+	@echo "  DRY_RUN          - Show command only (true) or execute (false), default: true"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make clean_cache DATASET=movie QUERY_ID=Q1"
+	@echo "  make clean_cache DATASET=movie QUERY_ID=Q1 DRY_RUN=false"
+	@echo "  make clean_cache DATASET=medical QUERY_ID=Q3 DRY_RUN=false"
+	@echo "  make clean_cache DATASET=mmqa QUERY_ID=Q6a DRY_RUN=false"
 
-clean_ecomm_q1:
-	rm -rf .ckpt/ecomm/Q1*
-
-clean_ecomm_q2:
-	rm -rf .ckpt/ecomm/Q2*
-
-clean_mmqa_q3a:
-	rm -rf .ckpt/mmqa/Q3a*
-
-clean_mmqa_q3f:
-	rm -rf .ckpt/mmqa/Q3f*
-
-clean_mmqa_q6a:
-	rm -rf .ckpt/mmqa/Q6a*
-
-clean_mmqa_q6b:
-	rm -rf .ckpt/mmqa/Q6b*
-
-clean_mmqa_q6c:
-	rm -rf .ckpt/mmqa/Q6c*
-
-clean_medical_q1:
-	rm -rf .ckpt/medical/Q1*
-
-clean_medical_q3:
-	rm -rf .ckpt/medical/Q3*
-
-clean_medical_q8:
-	rm -rf .ckpt/medical/Q8*
-
-clean_movie:
-	make clean_movie_q1
-	make clean_movie_q2
-
-clean_ecomm:
-	make clean_ecomm_q1
-
-clean_mmqa:
-	make clean_mmqa_q3a
-	make clean_mmqa_q3f
-	make clean_mmqa_q6a
-	make clean_mmqa_q6b
-	make clean_mmqa_q6c
-
-clean_medical:
-	make clean_medical_q1
-	make clean_medical_q3
-	make clean_medical_q8
-
-clean:
-	make clean_movie
-	make clean_ecomm
-	make clean_mmqa
-	make clean_medical
+clean_cache:
+	@if [ -z "$(DATASET)" ]; then \
+		echo "Error: DATASET parameter is required"; \
+		exit 1; \
+	fi
+	@if [ -z "$(QUERY_ID)" ]; then \
+		echo "Error: QUERY_ID parameter is required"; \
+		exit 1; \
+	fi
+	@echo "Target path: .data_ckpt/$(DATASET)/$(DYNAMIC_SETTING)/$(QUERY_ID)"
+	@if [ "$(DRY_RUN)" = "true" ]; then \
+		echo "DRY RUN: Command that would be executed:"; \
+		echo "  rm -rf .data_ckpt/$(DATASET)/$(DYNAMIC_SETTING)/$(QUERY_ID)"; \
+		echo ""; \
+		echo "To execute, run: make clean_cache DATASET=$(DATASET) DYNAMIC_SETTING=$(DYNAMIC_SETTING) QUERY_ID=$(QUERY_ID) DRY_RUN=false"; \
+	else \
+		echo "EXECUTING: Deleting .data_ckpt/$(DATASET)/$(DYNAMIC_SETTING)/$(QUERY_ID)"; \
+		rm -rf .data_ckpt/$(DATASET)/$(DYNAMIC_SETTING)/$(QUERY_ID); \
+		echo "Done!"; \
+	fi
