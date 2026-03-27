@@ -80,7 +80,7 @@ Q6c = SemCQ(
     Ps=[
         SemPredicate(
             field="Destinations",
-            modality="Text",
+            modality="VectorText",
             succ_cond="The airline has destinations in Europe",
             prompt=(
                 "Please determine if the given text indicate "

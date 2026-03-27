@@ -24,7 +24,7 @@ class Predicate:
 
 
 class SemPredicate:
-    def __init__(self, field: str, modality: Literal["Text", "Image"], succ_cond: str, prompt: str):
+    def __init__(self, field: str, modality: Literal["Text", "Image", "VectorText"], succ_cond: str, prompt: str):
         self.field = field
         self.modality = modality
         self.succ_cond = succ_cond

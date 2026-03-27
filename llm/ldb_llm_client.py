@@ -174,7 +174,7 @@ class LdbLLMClient:
     ):
         params, cost_params, mode = self._construct_prompt_params(
             is_remote=is_remote,
-            modality=modality,
+            modality= "Text" if modality == "VectorText" else modality,
             prompt=prompt,
             data_items=data_items,
             data_items_metadata=data_items_metadata,
@@ -198,29 +198,92 @@ class LdbLLMClient:
         model_id: Optional[int] = None,
         enable_token_usage: bool = True,
     ):
+        # Map phase: Expand data_items based on modality
+        expanded_items = []
+        original_indices = []  # Track which original item each expanded item belongs to
+
+        for original_idx, data_item in enumerate(data_items):
+            if modality == "VectorText":
+                # Split VectorText into individual items
+                split_items = [item.strip() for item in data_item[0].split(",") if item.strip()]
+                for split_item in split_items:
+                    expanded_items.append([split_item])
+                    original_indices.append(original_idx)
+            else:
+                # For non-VectorText, keep as-is
+                expanded_items.append(data_item)
+                original_indices.append(original_idx)
+
+        # Create tasks for all expanded items
         tasks = []
-        for idx, data_item in enumerate(data_items):
+        for exp_idx, exp_data_item in enumerate(expanded_items):
             params, cost_params, mode = self._construct_prompt_params(
                 is_remote=is_remote,
-                modality=modality,
+                modality= "Text" if modality == "VectorText" else modality,
                 prompt=prompt,
-                data_items=data_item,
+                data_items=exp_data_item,
                 response_model=response_model,
                 model_index=model_id,
             )
             if response_model:
-                tasks.append(self._ainvoke_structured(idx, params, enable_token_usage, cost_params, mode))
+                tasks.append(self._ainvoke_structured(exp_idx, params, enable_token_usage, cost_params, mode))
             else:
-                tasks.append(self._ainvoke(idx, params, enable_token_usage, cost_params))
+                tasks.append(self._ainvoke(exp_idx, params, enable_token_usage, cost_params))
 
+        # Execute all tasks in parallel
         results = await tqdm_asyncio.gather(*tasks)
-        results.sort(key=lambda x: x[0])
-        return [resp for _, resp in results]
+
+        # Reduce phase: Group results by original indices and apply reduction logic
+        if modality == "VectorText":
+            # Group results by original index
+            grouped_results = {}
+            for (exp_idx, resp), orig_idx in zip(results, original_indices):
+                if orig_idx not in grouped_results:
+                    grouped_results[orig_idx] = []
+                grouped_results[orig_idx].append(resp)
+
+            # Apply OR logic to each group
+            final_results = []
+            for orig_idx in sorted(grouped_results.keys()):
+                reduced = self._reduce_vector_text_results(grouped_results[orig_idx])
+                final_results.append((orig_idx, reduced))
+
+            final_results.sort(key=lambda x: x[0])
+            return [resp for _, resp in final_results]
+        else:
+            # For non-VectorText, return results as-is
+            results.sort(key=lambda x: x[0])
+            return [resp for _, resp in results]
+
+
+    def _reduce_vector_text_results(self, results: list):
+        if not results:
+            return None
+
+        from data_structure.llm_resp_templates import BooleanFeatureResponse
+
+        # Get the type name of the first result
+        result_type_name = type(results[0]).__name__
+
+        # Check if all results have the same type.
+        if not all(type(r).__name__ == result_type_name for r in results):
+            raise ValueError((
+                f"All results must have the same type, "
+                f"got mixed types: {[type(r).__name__ for r in results]}"))
+
+        # Handle BooleanFeatureResponse - apply OR logic
+        if result_type_name == "BooleanFeatureResponse":
+            reduced_value = any(r.value for r in results)  # OR logic on the value field
+            return BooleanFeatureResponse(value=reduced_value)
+
+        # Fallback for any other unexpected type
+        raise TypeError(f"VectorText reduction is not supported for type {result_type_name}. "
+                       f"Only BooleanFeatureResponse is supported.")
 
 
 
     def _construct_prompt_params(
-            self, 
+            self,
             is_remote: bool,
             modality: str,
             prompt: str,
@@ -277,7 +340,7 @@ class LdbLLMClient:
 
         return  dict(lm_params, **self.kwargs), cost_params, mode
 
-    def _invoke(self, params: PromptParams, enable_token_usage: bool = True, 
+    def _invoke(self, params: PromptParams, enable_token_usage: bool = True,
                 cost_params: Optional[dict] = None):
         resp =  self.client.completion(**params.kwargs)
         if enable_token_usage:
@@ -294,7 +357,7 @@ class LdbLLMClient:
                 self.usage_statistics["prompt_cost"] + self.usage_statistics["completion_cost"]
         return resp
 
-    def _invoke_structured(self, params: PromptParams, enable_token_usage: bool = True, 
+    def _invoke_structured(self, params: PromptParams, enable_token_usage: bool = True,
                            cost_params: Optional[dict] = None, mode: str = "JSON"):
         _client = None
         if mode == "JSON":
@@ -321,7 +384,7 @@ class LdbLLMClient:
                 self.usage_statistics["prompt_cost"] + self.usage_statistics["completion_cost"]
         return resp
 
-    async def _ainvoke(self, worker_id, params: PromptParams, enable_token_usage: bool = True, 
+    async def _ainvoke(self, worker_id, params: PromptParams, enable_token_usage: bool = True,
                        cost_params: Optional[dict] = None):
         attempt = 0
 
@@ -349,7 +412,7 @@ class LdbLLMClient:
                     raise e
                 await asyncio.sleep(min(2**attempt, 30))
 
-    async def _ainvoke_structured(self, worker_id, params: PromptParams, enable_token_usage: bool = True, 
+    async def _ainvoke_structured(self, worker_id, params: PromptParams, enable_token_usage: bool = True,
                                   cost_params: Optional[dict] = None, mode: str = "JSON"):
 
         _client = None
@@ -358,8 +421,7 @@ class LdbLLMClient:
         elif mode == "TOOLS":
             _client = self.client_struct_async_tools
         else:
-            raise ValueError(f"Unsupported mode: {mode}")        
-
+            raise ValueError(f"Unsupported mode: {mode}")
 
         attempt = 0
 
@@ -390,7 +452,8 @@ class LdbLLMClient:
                 if attempt > self.max_retries:
                     raise e
                 await asyncio.sleep(min(2**attempt, 30))
-    
+
+
     def _extract_usage(self, resp):
         assert resp is not None, "Response is None, cannot extract token usage."
         usage = getattr(resp, "usage", None)
@@ -432,7 +495,7 @@ class LdbLLMClient:
 
         # prompt = "Does this X-Ray indicate pneumonia? Answer with True or False."
         # image_ids = [
-        #     204, 241, 529, 105, 591, 
+        #     204, 241, 529, 105, 591,
         #     140, 59, 628, 319, 471,
         #     434, 361, 324, 409, 138,
         #     64, 21, 615, 281, 239,
@@ -485,7 +548,7 @@ class LdbLLMClient:
         # print(f"Local response: {resp}")
 
 
-        
+
 if __name__ == "__main__":
     llm_client = LdbLLMClient()
 

@@ -4,7 +4,7 @@ from typing import Literal
 
 class PopulationSpec(BaseModel):
     source_col: str
-    source_modality: Literal["Text", "Image"]
+    source_modality: Literal["Text", "Image", "VectorText"]
     target_col: str
     prompt: str
     feature_type: Literal["bool", "float", "int", "undefined"]
