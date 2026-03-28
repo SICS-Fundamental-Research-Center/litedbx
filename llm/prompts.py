@@ -259,6 +259,10 @@ For multi-value predicates in equality operators (== or !=), the value can be a 
    - For categorical data, consider all potentially relevant values using multi-value equality
    - When uncertain between filtering and not filtering, choose not to filter
 
+4. MAKE SURE ONLY THE RELEVANT FIELDS ARE USED
+   - Do not include predicates on fields that are not identified as relevant
+   - Irrelevant fields can introduce noise and reduce recall
+
 === Response Format ===
 
 Return a JSON object with the following structure:

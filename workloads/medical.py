@@ -64,11 +64,43 @@ Q8 = SemCQ(
         ))
 ])
 
+Q9 = SemCQ(
+    selected=["patient_id"],
+    Sigma=[
+        Predicate("image_path", "!=", ""),
+        Predicate("image_path_xray", "!=", ""),
+    ],
+    Ps=[
+        SemPredicate(
+            field="image_path",
+            modality="Image",
+            succ_cond="This image shows a malignant human skin mole (considered abnormal/cancerous/sick) according to the image",
+            prompt=(
+                "You are a dermatology expert. " 
+                "Please determine if the given skin image indicate "
+                "that it shows a malignant human skin mole (considered abnormal/cancerous/sick) according to the image. "
+                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                "Do NOT provide any explanations."
+        )),
+        SemPredicate(
+            field="image_path_xray",
+            modality="Image",
+            succ_cond="This X-ray image shows a sick human lung according to the X-ray image",
+            prompt=(
+                "You are a radiology expert. " 
+                "Please determine if the given X-ray image indicate "
+                "that there are lung problems (considered sick/disease) according to the X-ray image. "
+                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                "Do NOT provide any explanations."
+        ))
+])
+
 
 SEM_QUERIES = {
     "Q1": Q1,
     "Q3": Q3,
     "Q8": Q8,
+    "Q9": Q9,
 }
 
 

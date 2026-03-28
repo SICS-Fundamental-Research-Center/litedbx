@@ -145,6 +145,9 @@ async def initialize_feature_space(
     while sample_iterator.has_next_batch():
         pos_idx, neg_idx = sample_iterator.next_batch()
 
+        # Phase 1: Propose features for all semantic predicates
+        total_added = 0
+        total_removed = 0
         for sem_pred in sem_cq.Ps:
             field = sem_pred.field
             pos_samples = data_manager.coresets[q_name]["ldb_data"].df.loc[pos_idx, field].tolist()
@@ -179,7 +182,7 @@ async def initialize_feature_space(
                 response_model=FeatureRefinementResponse,
             ))
 
-            # Update the feature space.
+            # Update the feature space (defer materialization)
             features_to_remove = [f for f in llm_response.to_remove if f not in base_schema]
             features_to_add = [spec for spec in llm_response.to_add if \
                                spec.target_col not in base_schema and \
@@ -187,43 +190,47 @@ async def initialize_feature_space(
             feature_space = [spec for spec in feature_space if spec.target_col not in features_to_remove]
             feature_space.extend(features_to_add)
 
+            total_added += len(llm_response.to_add)
+            total_removed += len(llm_response.to_remove)
+
+        # Phase 2: Materialize the complete feature space once
+        data_manager.enriched_features[q_name] = feature_space
+        stat = await data_manager.sync_coreset_features(q_name=q_name, enable_cache=False)
+        for k, v in stat.items():
+            usage_statistics[k] += v
+
+        # Phase 3: Evaluate on the complete feature space and enforce budget
+        feedback = pred_and_eval(
+            data_manager.coresets[q_name]["ldb_data"].exclude_fk_and_id(),
+            data_manager.coresets[q_name]["labels"]
+        )
+
+        if len(feature_space) > b_fs:
+            feature_can_be_removed = [
+                k for k, _ in feedback["feature_importance"].items() if k not in base_schema]
+            feature_to_be_removed = feature_can_be_removed[-(len(feature_space) - b_fs):]
+            feature_space[:] = [
+                spec for spec in feature_space if spec.target_col not in feature_to_be_removed]
+
             data_manager.enriched_features[q_name] = feature_space
             stat = await data_manager.sync_coreset_features(q_name=q_name, enable_cache=False)
             for k, v in stat.items():
                 usage_statistics[k] += v
 
-            # Evaluate and enforce budget
-            feedback = pred_and_eval(
-                data_manager.coresets[q_name]["ldb_data"].exclude_fk_and_id(),
-                data_manager.coresets[q_name]["labels"]
-            )
+            logger.info(f"Removed {len(feature_to_be_removed)} features to enforce budget.")
 
-            if len(feature_space) > b_fs:
-                feature_can_be_removed = [
-                    k for k, _ in feedback["feature_importance"].items() if k not in base_schema]
-                feature_to_be_removed = feature_can_be_removed[-(len(feature_space) - b_fs):]
-                feature_space[:] = [
-                    spec for spec in feature_space if spec.target_col not in feature_to_be_removed]
+        logger.info(f"Iteration {sample_iterator.iter_num - 1}: F1={feedback['f1']:.4f}, "
+                   f"Added={total_added}, Removed={total_removed}")
 
-                data_manager.enriched_features[q_name] = feature_space                    
-                stat = await data_manager.sync_coreset_features(q_name=q_name, enable_cache=False)
-                for k, v in stat.items():
-                    usage_statistics[k] += v
+        # Check stopping criteria: F1 drops > 0.05
+        if prev_f1 is not None:
+            f1_drop = prev_f1 - feedback['f1']
+            if f1_drop > 0.05:
+                logger.info(f"F1 dropped by {f1_drop:.4f} > 0.05. Stopping iteration.")
+                break
 
-                logger.info(f"Removed {len(feature_to_be_removed)} features to enforce budget.")
-
-            logger.info(f"Iteration {sample_iterator.iter_num - 1}: F1={feedback['f1']:.4f}, "
-                       f"Added={len(llm_response.to_add)}, Removed={len(llm_response.to_remove)}")
-
-            # Check stopping criteria: F1 drops > 0.05
-            if prev_f1 is not None:
-                f1_drop = prev_f1 - feedback['f1']
-                if f1_drop > 0.05:
-                    logger.info(f"F1 dropped by {f1_drop:.4f} > 0.05. Stopping iteration.")
-                    break
-
-            prev_f1 = feedback['f1']
-            previous_feedback = feedback
+        prev_f1 = feedback['f1']
+        previous_feedback = feedback
 
     return feature_space, usage_statistics
 
