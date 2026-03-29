@@ -172,9 +172,25 @@ class LdbLLMClient:
             model_id: Optional[int] = None,
             enable_token_usage: bool = True,
     ):
+        invoke_modality = modality
+        if modality == "VectorText":
+            invoke_modality = "Text"
+        if modality == "VectorImage":
+            invoke_modality = "Image"
+
+        if data_items and data_items_metadata and modality in ["VectorText", "VectorImage"]:
+            flattened_data_items = []
+            flattened_metadata = []
+            for item, meta in zip(data_items, data_items_metadata):
+                split_items = [i.strip() for i in item.split(",") if i.strip()][:5]
+                flattened_data_items.extend(split_items)
+                flattened_metadata.extend([meta] * len(split_items))
+            data_items = flattened_data_items
+            data_items_metadata = flattened_metadata
+
         params, cost_params, mode = self._construct_prompt_params(
             is_remote=is_remote,
-            modality= "Text" if modality == "VectorText" else modality,
+            modality= invoke_modality,
             prompt=prompt,
             data_items=data_items,
             data_items_metadata=data_items_metadata,
@@ -203,23 +219,28 @@ class LdbLLMClient:
         original_indices = []  # Track which original item each expanded item belongs to
 
         for original_idx, data_item in enumerate(data_items):
-            if modality == "VectorText":
-                # Split VectorText into individual items
+            if modality == "VectorText" or modality == "VectorImage":
+                # Split Vector content into individual items
                 split_items = [item.strip() for item in data_item[0].split(",") if item.strip()]
                 for split_item in split_items:
                     expanded_items.append([split_item])
                     original_indices.append(original_idx)
             else:
-                # For non-VectorText, keep as-is
+                # For non-Vector content, keep as-is
                 expanded_items.append(data_item)
                 original_indices.append(original_idx)
 
         # Create tasks for all expanded items
         tasks = []
         for exp_idx, exp_data_item in enumerate(expanded_items):
+            invoke_modality = modality
+            if modality == "VectorText":
+                invoke_modality = "Text"
+            if modality == "VectorImage":
+                invoke_modality = "Image"
             params, cost_params, mode = self._construct_prompt_params(
                 is_remote=is_remote,
-                modality= "Text" if modality == "VectorText" else modality,
+                modality= invoke_modality,
                 prompt=prompt,
                 data_items=exp_data_item,
                 response_model=response_model,
@@ -234,7 +255,7 @@ class LdbLLMClient:
         results = await tqdm_asyncio.gather(*tasks)
 
         # Reduce phase: Group results by original indices and apply reduction logic
-        if modality == "VectorText":
+        if modality == "VectorText" or modality == "VectorImage":
             # Group results by original index
             grouped_results = {}
             for (exp_idx, resp), orig_idx in zip(results, original_indices):
@@ -251,7 +272,7 @@ class LdbLLMClient:
             final_results.sort(key=lambda x: x[0])
             return [resp for _, resp in final_results]
         else:
-            # For non-VectorText, return results as-is
+            # For non-Vector content, return results as-is
             results.sort(key=lambda x: x[0])
             return [resp for _, resp in results]
 
@@ -277,7 +298,7 @@ class LdbLLMClient:
             return BooleanFeatureResponse(value=reduced_value)
 
         # Fallback for any other unexpected type
-        raise TypeError(f"VectorText reduction is not supported for type {result_type_name}. "
+        raise TypeError(f"Vector reduction is not supported for type {result_type_name}. "
                        f"Only BooleanFeatureResponse is supported.")
 
 

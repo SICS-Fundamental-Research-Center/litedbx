@@ -286,6 +286,10 @@ def compute_subjective_error(
         Tuple of (L_LOO, penalty)
     """
 
+    # LOO error could only compute with at least 2 sample.
+    if len(X) < 2:
+        return 0.0, 0.0
+
     Y_loo = []
     Y_true = []
 

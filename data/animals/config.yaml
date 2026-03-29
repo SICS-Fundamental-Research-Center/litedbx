@@ -1,0 +1,3 @@
+base_features: []
+id_features: [City,StationID]
+foreign_keys: [ImagePath,Species]
