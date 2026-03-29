@@ -561,6 +561,9 @@ def perform_label_propagation(
 
     pred_Y_li = []
     for i in range(len(test_X_li)):
+        if test_X_li[i].empty:
+            pred_Y_li.append(pd.Series(dtype=int))
+            continue
         test_X_proc = encode_features(test_X_li[i])
         pred_Y_li.append(pd.Series(clf.predict(test_X_proc), index=test_Y_li[i].index))
 

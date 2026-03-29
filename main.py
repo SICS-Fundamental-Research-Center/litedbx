@@ -23,9 +23,9 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    workload = "animals"
+    workload = "ecomm"
     queries = [
-        "Q7", 
+        "Q2", 
     ]
 
     workload_mapping = {

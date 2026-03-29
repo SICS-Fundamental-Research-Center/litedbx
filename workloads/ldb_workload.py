@@ -463,9 +463,9 @@ class LdbWorkload:
         
             start_time = time()
             eval_results_single_step = {q_name: {
-                "error_certificate": None,
-                "pred_eval": None,
-                "trans_eval": None,
+                "error_certificate": 0.0,
+                "pred_eval": {},
+                "trans_eval": {},
             } for q_name in self.queries.keys()}
 
             for q_name, _ in self.queries.items():
@@ -487,11 +487,15 @@ class LdbWorkload:
                 train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
                 test_X_li = [
                     self.data_manager.sigma_satisfied_data[i][q_name]["ldb_data"].select_active_features(active_external_features)
+                    if not self.data_manager.sigma_satisfied_data[i][q_name]["ldb_data"].df.empty
+                    else pd.DataFrame(columns=train_X.columns)
                     for i in range(inc_round + 1)
                 ]
 
                 test_Y_li = [
                     self.data_manager.sigma_satisfied_data[i][q_name]["labels"].astype(int)
+                    if not self.data_manager.sigma_satisfied_data[i][q_name]["ldb_data"].df.empty
+                    else pd.Series(dtype=int)
                     for i in range(inc_round + 1)
                 ]
                 _, pred_Y_li = perform_label_propagation(train_X, train_Y, test_X_li, test_Y_li)
@@ -501,7 +505,12 @@ class LdbWorkload:
                 observed_data_size = self.data_manager.coresets[q_name]["observed_size"]
                 err_certificate = compute_inc_error_certificate(
                     label_Y=self.data_manager.coresets[q_name]["labels"][:observed_data_size].astype(int),
-                    prev_prop_Y_li=[self.data_manager.sigma_satisfied_data[i][q_name]["propagated_labels"] for i in range(inc_round + 1)],
+                    prev_prop_Y_li=[
+                        self.data_manager.sigma_satisfied_data[i][q_name]["propagated_labels"]
+                        if not self.data_manager.sigma_satisfied_data[i][q_name]["ldb_data"].df.empty
+                        else pd.Series(dtype=int)
+                        for i in range(inc_round + 1)
+                    ],
                     prop_Y_li=pred_Y_li,
                 )
                 logger.info(f"Inc-Round {inc_round}, Query {q_name}: Est. error certificate: {err_certificate:.4f}")
@@ -526,6 +535,8 @@ class LdbWorkload:
 
                 num_tp, num_fn = 0, 0
                 for i in range(inc_round + 1):
+                    if self.data_manager.sigma_satisfied_data[i][q_name]["ldb_data"].df.empty:
+                        continue
                     num_tp += self.data_manager.sigma_satisfied_data[i][q_name]["num_tp"]
                     num_fn += self.data_manager.sigma_satisfied_data[i][q_name]["num_fn"]
 
