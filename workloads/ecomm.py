@@ -39,9 +39,71 @@ Q2 = SemCQ(
 ])
 
 
+Q13 = SemCQ(
+    selected=["id"],
+    Sigma=[Predicate("productNameAndDesc", "!=", ""), Predicate("image_path", "!=", "")],
+    Ps=[
+        SemPredicate(
+            field="productNameAndDesc",
+            modality="Text",
+            succ_cond=(
+                "The product is a running t-shirt for men "
+                "with a round neck and short sleeves, \n"
+                "preferably in blue or black, "
+                "but not bright colors like white. "
+                "Also definitely not green. \n"
+                "It should be suitable for outdoor running in warm weather. \n"
+                "If the t-shirt is not green, it should at least feature a striped design."
+            ),
+            prompt=(
+                "You will receive a textural description of the product. "
+                "Please determine if this description matches "
+                "the following description: \n"
+                "The product is a running t-shirt for men "
+                "with a round neck and short sleeves, \n"
+                "preferably in blue or black, "
+                "but not bright colors like white. "
+                "Also definitely not green. \n"
+                "It should be suitable for outdoor running in warm weather. \n"
+                "If the t-shirt is not green, it should at least feature a striped design. "
+                "Please JUST answer \"True\" if the product matches the description, and \"False\" otherwise. "
+                "Do NOT provide any explanations."
+            )),
+        SemPredicate(
+            field="image_path",
+            modality="Image",
+            succ_cond=(
+                "The displayed product shows a running shirt for "
+                "men with a round neck and short sleeves, \n"
+                "preferably in blue or black, "
+                "but not bright colors like white. "
+                "Also definitely not green. \n"
+                "It should be suitable for outdoor running in warm weather. \n"
+                "If the t-shirt is not green, it should at least feature a striped design."
+            ),
+            prompt=(
+                "You will receive an image of the product. "
+                "Please determine if the given product matches "
+                "the following description: \n"
+                "The product is a running t-shirt for men "
+                "with a round neck and short sleeves, \n"
+                "preferably in blue or black, "
+                "but not bright colors like white. "
+                "Also definitely not green. \n"
+                "It should be suitable for outdoor running in a warm weather. \n"
+                "If the t-shirt is not green, it should at least feature a striped design. "
+                "Please JUST answer \"True\" if the product matches the description, and \"False\" otherwise. "
+                "Do NOT provide any explanations."
+        )),
+    ]
+)
+
+
+
 SEM_QUERIES = {
     "Q1": Q1,
     "Q2": Q2,
+    "Q13": Q13,
 }
 
 

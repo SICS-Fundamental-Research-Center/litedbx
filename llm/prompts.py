@@ -181,6 +181,8 @@ Return a JSON object with the following structure:
 
 IMPORTANT:
 - The returned field names must EXACTLY match the column names in the dataset schema
+- The fields (together with its available values) should be clearly relevant to the query description.
+- The available values of each fields CANNOT be ambiguous (eg, be an ambiguous acronym or have multiple meanings) to be considered compatible.
 - Include ALL relevant fields - it's better to be inclusive than exclusive
 - Use meaningful semantic group names that describe what the fields represent
 - Only group fields that have BOTH semantic similarity AND compatible value ranges
@@ -262,6 +264,9 @@ For multi-value predicates in equality operators (== or !=), the value can be a 
 4. MAKE SURE ONLY THE RELEVANT FIELDS ARE USED
    - Do not include predicates on fields that are not identified as relevant
    - Irrelevant fields can introduce noise and reduce recall
+
+5. Return conjunctive groups that contains at most 4 MOST-important predicates.
+   - NEVER return an over-complicated UCQ. Make sure the generated UCQ is as simple as possible.
 
 === Response Format ===
 
