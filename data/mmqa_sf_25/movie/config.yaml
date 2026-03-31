@@ -1,3 +1,3 @@
 base_features: [title]
-id_features: [row_id]
+id_features: []
 foreign_keys: [url,text]

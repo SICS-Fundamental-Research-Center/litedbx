@@ -1,3 +1,3 @@
 base_features: []
-id_features: [ID,Airlines]
-foreign_keys: [Destinations,Seasonal Destinations]
+id_features: [row_id,Airlines,Airport]
+foreign_keys: [Destinations]

@@ -134,9 +134,17 @@ def clf_to_rules(
 
     # Fallback: if all samples are of the same class, return empty rule set
     if len(np.unique(y_train)) == 1:
-        logger.warning(f"All training samples belong to the same class ({y_train[0]}). "
-                      f"Returning empty rule set.")
-        return []
+        fallback_rules = []
+        for feature_name in feature_names:
+            if not feature_name.startswith("llm_label_"):
+                continue
+            fallback_rules.append([(feature_name, 0.5, ">")])  # Return the LLM predicated label.
+        if len(fallback_rules) > 0:
+            logger.warning(f"Generated fallback rules based on LLM-predicated labels.")
+        else:
+            logger.warning(f"All training samples belong to the same class ({y_train[0]}). "
+                          f"Returning empty rule set.")
+        return fallback_rules
 
     _lambda = sum(neg_mask) / max(1, sum(pos_mask))
 

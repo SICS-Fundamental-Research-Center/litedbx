@@ -65,7 +65,9 @@ Constraints:
     • useful for filtering, ranking, or query rewriting
 - Do NOT include free-text, categorical, or high-cardinality string features.
 {CONSTRAINTS_ADDITIONAL}
-- MUST include a feature that directly answer the task description
+- MUST include a feature that directly answer the task description. 
+  • The name of this feature MUST has the prefix: `llm_label_`. For example: `llm_label_is_positive`.
+  • The feature type of this feature MUST be boolean.
 ```
 {DESC}
 ```
