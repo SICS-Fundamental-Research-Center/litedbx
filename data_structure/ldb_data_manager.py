@@ -232,6 +232,7 @@ class LdbDataManager:
             assert self.data_stream[stream_idx] is not None, (
                 "Data stream should be initialized before applying Sigma retrieval."
             )
+            prev_data_scale = len(self.data_stream[stream_idx].df)
             self.sigma_satisfied_data[stream_idx][q_name] = {
                 "ldb_data": self.data_stream[stream_idx].sigma_retrieve_ucq(ucq, reset_index=True),
                 "labels": None,
@@ -240,6 +241,10 @@ class LdbDataManager:
                 "num_tp": 0,
                 "deduplicated_num_pos": 0,
             }
+            logger.info((
+                f"Applied Sigma retrieval for query '{q_name}' in stream-{stream_idx}: "
+                f"{prev_data_scale} -> {len(self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df)} rows."
+            ))
         else:
             # Refined sigma retrieval
             assert self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'] is not None, (
