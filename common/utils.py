@@ -57,7 +57,7 @@ def train_classifier(
     return clf
 
 
-def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series, biased_tp: int = 0, biased_fn: int = 0) -> dict:
+def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series) -> dict:
     # Convert labels to integers for consistency
     Y_true = Y_true.astype(int)
     Y_pred = Y_pred.astype(int)
@@ -72,9 +72,6 @@ def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series, biased_tp: int = 0
         "Sum of TP, FP, TN, FN must equal total samples. "
         f"Got {TP + FP + TN + FN} samples, expected {len(Y_true)}."
     )
-
-    TP += biased_tp
-    FN += biased_fn
 
     precision = TP / (TP + FP) if (TP + FP) > 0 else 0
     recall = TP / (TP + FN) if (TP + FN) > 0 else 0

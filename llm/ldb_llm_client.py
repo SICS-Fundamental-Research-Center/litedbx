@@ -281,7 +281,11 @@ class LdbLLMClient:
         if not results:
             return None
 
-        from data_structure.llm_resp_templates import BooleanFeatureResponse
+        from data_structure.llm_resp_templates import (
+            BooleanFeatureResponse,
+            IntFeatureResponse,
+            FloatFeatureResponse,
+        )
 
         # Get the type name of the first result
         result_type_name = type(results[0]).__name__
@@ -297,7 +301,14 @@ class LdbLLMClient:
             reduced_value = any(r.value for r in results)  # OR logic on the value field
             return BooleanFeatureResponse(value=reduced_value)
 
-        # Fallback for any other unexpected type
+        # Fallback for numerical features - apply SUM logic
+        if result_type_name == "IntFeatureResponse":
+            reduced_value = sum(r.value for r in results)
+            return IntFeatureResponse(value=reduced_value)
+        if result_type_name == "FloatFeatureResponse":
+            reduced_value = sum(r.value for r in results)
+            return FloatFeatureResponse(value=reduced_value)
+            
         raise TypeError(f"Vector reduction is not supported for type {result_type_name}. "
                        f"Only BooleanFeatureResponse is supported.")
 

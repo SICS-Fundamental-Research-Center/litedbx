@@ -49,14 +49,13 @@ class LdbDataManager:
                     "ldb_data": LdbData,
                     "labels": pd.Series,
                     "propagated_labels": pd.Series,
-                    "deduplicated_num_pos": int,
-                    "num_fn": int,
-                    "num_tp": int,
+                    "selected_data": pd.DataFrame,
+                    "selected_labels": pd.Series,
+                    "discarded_data": pd.DataFrame,
+                    "discarded_labels": pd.Series,
                 }, ...<queries>
             }, ...<streams>
         ]
-        The sigma retrieval may introduce FNs, hence we track it with `num_fn`.
-        We can also require the human-annotated labels, hence we track it with `num_tp`.
         """
         self.sigma_satisfied_data = []
 
@@ -210,6 +209,75 @@ class LdbDataManager:
         self.llm_client.reset_usage_statistics()
         return llm_usage_statistics
 
+    
+    def eval_query_quality(self, q_name: str, selected_cols: list[str], 
+                           stream_idx: int, pred_labels: list[pd.Series]) -> dict:
+        ground_truth, retrieved_data = set(), set()
+        for sid in range(stream_idx + 1):
+            # 1. Process the sigma-satisfied data.
+            ss_data = self.sigma_satisfied_data[sid][q_name]
+            ss_df = ss_data["ldb_data"].df
+            ground_truth_labels = ss_data["labels"]
+            retrieved_labels = pred_labels[sid].astype(bool)
+            ground_truth.update(ss_df[ground_truth_labels]\
+                                .apply(lambda row: tuple(row[selected_cols]), axis=1))
+            retrieved_data.update(ss_df[retrieved_labels]\
+                                  .apply(lambda row: tuple(row[selected_cols]), axis=1))
+            
+            # 2. Involve the selected items with human annotation.
+            selected_df = ss_data["selected_data"]
+            selected_labels = ss_data["selected_labels"]
+            assert sum(selected_labels) == len(selected_df), (
+                "All selected data should be labeled as positive samples."
+            )
+            ground_truth.update(selected_df.apply(lambda row: tuple(row[selected_cols]), axis=1))
+            retrieved_data.update(selected_df.apply(lambda row: tuple(row[selected_cols]), axis=1))
+
+            # 3. Involve the discarded items.
+            discarded_df = ss_data["discarded_data"]
+            discarded_labels = ss_data["discarded_labels"]
+            if sum(discarded_labels) > 0:
+                logger.warning((
+                    f"Found {sum(discarded_labels)} positive samples in the discarded data "
+                    f"for query '{q_name}' in stream-{sid}."
+                ))
+                ground_truth.update(discarded_df[discarded_labels]\
+                                        .apply(lambda row: tuple(row[selected_cols]), axis=1))
+
+        # Compute the evaluation metrics.
+        TP = len(ground_truth.intersection(retrieved_data))
+        FP = len(retrieved_data - ground_truth)
+        FN = len(ground_truth - retrieved_data)
+
+        # Avoid the case when there is no positive sample in the ground truth, which leads to TP=FP=FN=0.
+        if FP == 0 and FN == 0 and TP == 0:
+            logger.info((
+                f"Both prediction and ground truth are empty for query '{q_name}' in stream-{stream_idx}."
+            ))
+            return {
+                'f1': 1.0,
+                'precision': 1.0,
+                'recall': 1.0,
+                'TP': TP,
+                'FP': FP,
+                'FN': FN,
+            }
+
+        precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+        recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        return {
+            'f1': f1,
+            'precision': precision,
+            'recall': recall,
+            'TP': TP,
+            'FP': FP,
+            'FN': FN,
+        }
+
+
+        
 
     def _apply_query_sigma_and_build_ground_truth(
             self, 
@@ -233,13 +301,17 @@ class LdbDataManager:
                 "Data stream should be initialized before applying Sigma retrieval."
             )
             prev_data_scale = len(self.data_stream[stream_idx].df)
+            selected_indices = self.data_stream[stream_idx].sigma_retrieve_ucq(ucq)
+            selected_data = self.data_stream[stream_idx].df\
+                .loc[selected_indices].reset_index(drop=True).copy()
             self.sigma_satisfied_data[stream_idx][q_name] = {
-                "ldb_data": self.data_stream[stream_idx].sigma_retrieve_ucq(ucq, reset_index=True),
+                "ldb_data": LdbData(df=selected_data, config=self.complete_dataset.config),
                 "labels": None,
                 "propagated_labels": None,
-                "num_fn": 0,
-                "num_tp": 0,
-                "deduplicated_num_pos": 0,
+                "selected_data": pd.DataFrame(),
+                "discarded_data": pd.DataFrame(),
+                "selected_labels": pd.Series(),
+                "discarded_labels": pd.Series(),
             }
             logger.info((
                 f"Applied Sigma retrieval for query '{q_name}' in stream-{stream_idx}: "
@@ -247,13 +319,36 @@ class LdbDataManager:
             ))
         else:
             # Refined sigma retrieval
-            assert self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'] is not None, (
-                "Sigma-satisfied data should be initialized before refining Sigma retrieval."
+            assert self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'] is not None and \
+                self.sigma_satisfied_data[stream_idx][q_name]['labels'] is not None, (
+                "Sigma-satisfied data and labels should be initialized before refining Sigma retrieval."
             )
             prev_data_scale = len(self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df)
 
+            selected_indices = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data']\
+                .sigma_retrieve_ucq(ucq)
+            selected_data = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df\
+                .loc[selected_indices].reset_index(drop=True).copy()
+            discarded_data = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df\
+                .drop(index=selected_indices).reset_index(drop=True).copy()
+            selected_labels = self.sigma_satisfied_data[stream_idx][q_name]['labels']\
+                .loc[selected_indices].reset_index(drop=True).copy()
+            discarded_labels = self.sigma_satisfied_data[stream_idx][q_name]['labels']\
+                .drop(index=selected_indices).reset_index(drop=True).copy()
+            
             self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'] = \
-                self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].sigma_retrieve_ucq(ucq, reset_index=True)
+                LdbData(df=selected_data, config=self.complete_dataset.config)
+            self.sigma_satisfied_data[stream_idx][q_name]['labels'] = selected_labels
+            self.sigma_satisfied_data[stream_idx][q_name]['discarded_data'] = \
+                pd.concat([
+                    self.sigma_satisfied_data[stream_idx][q_name]['discarded_data'], 
+                    discarded_data
+                ], ignore_index=True)
+            self.sigma_satisfied_data[stream_idx][q_name]['discarded_labels'] = \
+                pd.concat([
+                    self.sigma_satisfied_data[stream_idx][q_name]['discarded_labels'], 
+                    discarded_labels
+                ], ignore_index=True)
 
             post_data_scale = len(self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df)
             logger.info((
@@ -265,15 +360,11 @@ class LdbDataManager:
         # (2) Build ground truth.
         # ==============================================
 
-        # Handle the case when all samples are eliminated by the augmented Sigma retrieval.
-        if len(self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df) == 0:
-            assert self.sigma_satisfied_data[stream_idx][q_name]['labels'] is not None
-            prev_num_true = self.sigma_satisfied_data[stream_idx][q_name]['labels'].sum()
-            self.sigma_satisfied_data[stream_idx][q_name]['num_fn'] += prev_num_true
-            self.sigma_satisfied_data[stream_idx][q_name]['labels'] = pd.Series([])
+        if self.sigma_satisfied_data[stream_idx][q_name]['labels'] is not None:
             logger.info((
-                f"Refined Sigma retrieval eliminates all samples, resulting in {prev_num_true} FNs for query "
-                f"'{q_name}' in stream-{stream_idx}."))
+                f"Ground truth for query '{q_name}' in stream-{stream_idx} already exists. "
+                f"Skip building ground truth."
+            ))
             return
 
         selected_cols = self.queries[q_name].selected
@@ -286,38 +377,8 @@ class LdbDataManager:
             lambda row: tuple(row) in ground_truth_set,
             axis=1
         ).reset_index(drop=True)
-        positive_samples = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df[labels][selected_cols]
-        deduplicated_num_pos = len(set(tuple(row) for row in positive_samples.values))
 
-        if self.sigma_satisfied_data[stream_idx][q_name]['labels'] is None:
-            self.sigma_satisfied_data[stream_idx][q_name]["labels"] = labels
-            self.sigma_satisfied_data[stream_idx][q_name]["deduplicated_num_pos"] = deduplicated_num_pos
-            self.sigma_satisfied_data[stream_idx][q_name]["num_fn"] = 0
-            logger.info((
-                f"[W] Duplication in {q_name}-stream-{stream_idx} ground truth introduces: "
-                f"{len(positive_samples) - deduplicated_num_pos} additional TPs. "
-                f"The deduplicated number of pos sample is {deduplicated_num_pos}."
-            ))
-        else:
-            # Integrity check.
-            prev_num_true = self.sigma_satisfied_data[stream_idx][q_name]['labels'].sum()
-            curr_num_true = labels.sum()
-            curr_true_rows = self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df[labels][selected_cols]
-            curr_true_rows_set = set(tuple(row) for row in curr_true_rows.values)
-            assert curr_true_rows_set.issubset(ground_truth_set), (
-                f"Fail to build ground truth for query '{q_name}' in stream-{stream_idx}."
-            )
-
-            num_new_fn = self.sigma_satisfied_data[stream_idx][q_name]['num_fn'] + \
-                (prev_num_true - curr_num_true)
-            self.sigma_satisfied_data[stream_idx][q_name]["num_fn"] = num_new_fn 
-
-            logger.info((
-                f"[W] Refined Sigma retrieval for {q_name}-stream-{stream_idx} results in "
-                f"{num_new_fn} FNs."))
-            
-            self.sigma_satisfied_data[stream_idx][q_name]["labels"] = labels
-            self.sigma_satisfied_data[stream_idx][q_name]["deduplicated_num_pos"] = deduplicated_num_pos
+        self.sigma_satisfied_data[stream_idx][q_name]["labels"] = labels
 
         # Report the oracle selectivity.
         logger.info((
@@ -330,21 +391,21 @@ class LdbDataManager:
     def _acquire_query_annotation_and_init_coreset(
             self, q_name: str, b_lab: int, stream_idx: int = 0, seed: int = 42) -> None:
 
-        data = self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"]
+        data = self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"].df.copy()
         labels = self.sigma_satisfied_data[stream_idx][q_name]["labels"]
 
         labeling_budget = b_lab
-        if labeling_budget >= len(data.df):
+        if labeling_budget >= len(data):
             logger.info((
                 f"[W] Requested labeled budget {labeling_budget} exceeds the data scale "
-                f"{len(data.df)} for query '{q_name}' in stream-{stream_idx}. "
+                f"{len(data)} for query '{q_name}' in stream-{stream_idx}. "
             ))
-            labeling_budget = len(data.df) // 2
+            labeling_budget = len(data) // 2
             logger.info((
                 f"Adjusted labeled budget to {labeling_budget} for query '{q_name}' in stream-{stream_idx}."
             ))
 
-        labeled_indices = data.df.sample(n=labeling_budget, random_state=seed).index
+        labeled_indices = data.sample(n=labeling_budget, random_state=seed).index
 
         # Check whether the sampled data contains both positive and negative samples.
         num_pos_sampled = labels.loc[labeled_indices].sum()
@@ -369,15 +430,15 @@ class LdbDataManager:
                 f"Current labeled set has {labels.loc[labeled_indices].sum()} neg samples out of {len(labeled_indices)} samples."
             ))
 
-        remaining_indices = data.df.index.difference(labeled_indices)
+        remaining_indices = data.index.difference(labeled_indices)
 
         # Move the labeled data from `sigma_satisfied_data` to the `coreset`.
         if q_name not in self.coresets.keys():
             self.coresets[q_name] = {
                 "ldb_data": LdbData(
-                    df=data.df.loc[labeled_indices].reset_index(drop=True), 
-                    config=data.config),
-                "labels": labels.loc[labeled_indices].reset_index(drop=True),
+                    df=data.loc[labeled_indices].reset_index(drop=True).copy(), 
+                    config=self.complete_dataset.config),
+                "labels": labels.loc[labeled_indices].reset_index(drop=True).copy(),
                 "observed_size": len(labeled_indices),
                 "lb": float('inf'),
                 "ub": float('-inf'),
@@ -388,24 +449,40 @@ class LdbDataManager:
             ))
             self.coresets[q_name]["ldb_data"].df = pd.concat([
                 self.coresets[q_name]["ldb_data"].df,
-                data.df.loc[labeled_indices].reset_index(drop=True)
+                data.loc[labeled_indices].reset_index(drop=True).copy()
             ], ignore_index=True)
             self.coresets[q_name]["labels"] = pd.concat([
                 self.coresets[q_name]["labels"],
-                labels.loc[labeled_indices].reset_index(drop=True)
+                labels.loc[labeled_indices].reset_index(drop=True).copy()
             ], ignore_index=True)
             self.coresets[q_name]["observed_size"] += len(labeled_indices)
 
         # Update the `sigma_satisfied_data`.
-        num_tp = labels.loc[labeled_indices].sum()
-        self.sigma_satisfied_data[stream_idx][q_name]["num_tp"] = num_tp
         self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"].df = \
-            data.df.loc[remaining_indices].reset_index(drop=True)
+            data.loc[remaining_indices].reset_index(drop=True).copy()
         self.sigma_satisfied_data[stream_idx][q_name]["labels"] = \
-            labels.loc[remaining_indices].reset_index(drop=True)
+            labels.loc[remaining_indices].reset_index(drop=True).copy()
 
-        logger.info((
-            f"Acquired labels for {q_name}: "
-            f"{num_tp} pos samples / {len(labeled_indices)} total samples."
-        ))
-    
+        # Update the selected and discarded data for analysis.
+        pos_labeled_indices = labeled_indices[labels.loc[labeled_indices] == True]
+        neg_labeled_indices = labeled_indices[labels.loc[labeled_indices] == False]
+        self.sigma_satisfied_data[stream_idx][q_name]["selected_data"] = \
+            pd.concat([
+                self.sigma_satisfied_data[stream_idx][q_name]["selected_data"],
+                data.loc[pos_labeled_indices].reset_index(drop=True).copy()
+            ], ignore_index=True)
+        self.sigma_satisfied_data[stream_idx][q_name]["selected_labels"] = \
+            pd.concat([
+                self.sigma_satisfied_data[stream_idx][q_name]["selected_labels"],
+                labels.loc[pos_labeled_indices].reset_index(drop=True).copy()
+            ], ignore_index=True)
+        self.sigma_satisfied_data[stream_idx][q_name]["discarded_data"] = \
+            pd.concat([
+                self.sigma_satisfied_data[stream_idx][q_name]["discarded_data"],
+                data.loc[neg_labeled_indices].reset_index(drop=True).copy()
+            ], ignore_index=True)
+        self.sigma_satisfied_data[stream_idx][q_name]["discarded_labels"] = \
+            pd.concat([
+                self.sigma_satisfied_data[stream_idx][q_name]["discarded_labels"],
+                labels.loc[neg_labeled_indices].reset_index(drop=True).copy()
+            ], ignore_index=True)

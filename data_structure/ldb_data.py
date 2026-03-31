@@ -1,7 +1,7 @@
 import pandas as pd
 import logging
 import yaml
-from typing import Optional
+from typing import Optional, Tuple
 from llm import LdbLLMClient
 from .sem_query import Predicate
 from .llm_resp_templates import (
@@ -52,45 +52,12 @@ class LdbData:
         return ret
 
 
-    def sigma_retrieve(
-            self, Sigma: list[Predicate], reset_index: bool = False) -> 'LdbData':
-        # Start with all rows as True (no filter)
-        mask = pd.Series([True] * len(self.df), index=self.df.index)
-
-        # Combine masks for all predicates with AND logic
-        for predicate in Sigma:
-            logger.info(f"Applying predicate: {predicate}")
-            mask &= self._cq_map(predicate)
-
-        result = self.df[mask].copy()
-        if reset_index:
-            result = result.reset_index(drop=True)
-        return LdbData(df=result, config=self.config)
-
-
-    def sigma_retrieve_disjunctive(
-            self, Sigma: list[Predicate], reset_index: bool = False) -> 'LdbData':
-        # Start with all rows as False (no filter)
-        mask = pd.Series([False] * len(self.df), index=self.df.index)
-
-        # Combine masks for all predicates with OR logic
-        for predicate in Sigma:
-            logger.info(f"Applying predicate: {predicate}")
-            mask |= self._cq_map(predicate)
-
-        result = self.df[mask].copy()
-        if reset_index:
-            result = result.reset_index(drop=True)
-        return LdbData(df=result, config=self.config
-    )
-
-
     def sigma_retrieve_ucq(
-            self, Sigma: list[list[Predicate]], reset_index: bool = False) -> 'LdbData':
+            self, Sigma: list[list[Predicate]]) -> pd.Index:
         # If Sigma is empty or contains empty groups, return all data
         if not Sigma or all(not group for group in Sigma):
             logger.info("UCQ is empty - returning all data")
-            return LdbData(df=self.df.copy(), config=self.config)
+            return self.df.index
 
         # Start with all rows as False (no match)
         mask = pd.Series([False] * len(self.df), index=self.df.index)
@@ -114,10 +81,7 @@ class LdbData:
             # Combine with overall mask using OR logic
             mask |= group_mask
 
-        result = self.df[mask].copy()
-        if reset_index:
-            result = result.reset_index(drop=True)
-        return LdbData(df=result, config=self.config)
+        return self.df[mask].index
 
 
     async def sync_with_enriched_features(

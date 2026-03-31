@@ -25,7 +25,7 @@ if __name__ == "__main__":
 
     workload = "mmqa"
     queries = [
-        "Q6c", 
+        "Q3f", 
     ]
 
     workload_mapping = {

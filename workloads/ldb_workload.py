@@ -317,6 +317,19 @@ class LdbWorkload:
         for q_name in self.data_manager.sigma_satisfied_data[0].keys():
             _ = await self.data_manager.\
                 sync_sigma_satisfied_data_features(q_name, stream_idx=0, tag="trimmed", enable_cache=True)
+
+        # Patch: If the generated trimmed feature space is inconsistent with the cached features, 
+        # flush the current trimmed feature space.
+        for q_name in self.data_manager.coresets.keys():
+            ldb_data = self.data_manager.coresets[q_name]["ldb_data"]
+            features = ldb_data.df.columns.tolist()
+            original_schema = ldb_data.base_features + ldb_data.id_features + ldb_data.foreign_keys
+            external_features = [f for f in features if f not in original_schema]
+            self.data_manager.trimmed_feature_names = external_features
+            self.data_manager.enriched_features[q_name] = [
+                spec for spec in self.data_manager.enriched_features[q_name] \
+                    if spec.target_col in external_features
+            ]
     
 
     def rewrite_and_execute_query(self, debug: bool = False) -> Tuple[dict, dict]:
@@ -368,11 +381,18 @@ class LdbWorkload:
                 trans_Y = apply_rules(rules, encode_features(test_X))
 
                 # Evaluate the predications and translations.
-                biased_fn = self.data_manager.sigma_satisfied_data[0][q_name]["num_fn"]
-                biased_tp = self.data_manager.sigma_satisfied_data[0][q_name]["num_tp"]
-                logger.info(f"Inc-Round {0}, Query {q_name}: num_tp={biased_tp}, num_fn={biased_fn}")
-                pred_eval_results = evaluate_classifier(Y_pred=pred_Y_li[0], Y_true=test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
-                trans_eval_results = evaluate_classifier(Y_pred=trans_Y, Y_true=test_Y, biased_fn=biased_fn, biased_tp=biased_tp)
+                pred_eval_results = self.data_manager.eval_query_quality(
+                    q_name=q_name, 
+                    selected_cols=self.queries[q_name].selected,
+                    stream_idx=0,
+                    pred_labels=pred_Y_li,
+                )
+                trans_eval_results = self.data_manager.eval_query_quality(
+                    q_name=q_name, 
+                    selected_cols=self.queries[q_name].selected,
+                    stream_idx=0,
+                    pred_labels=[trans_Y]
+                )
 
                 # Estimate objective error score.
                 observed_size = self.data_manager.coresets[q_name]["observed_size"]
@@ -529,24 +549,21 @@ class LdbWorkload:
                     return rerun, []
 
                 # Evaluate the predications and translations.
-                pred_Y_complete = pd.concat(pred_Y_li, ignore_index=True)
-                trans_Y_complete = pd.concat(trans_Y_li, ignore_index=True)
-                test_Y_complete = pd.concat(test_Y_li, ignore_index=True)
-
-                num_tp, num_fn = 0, 0
-                for i in range(inc_round + 1):
-                    if self.data_manager.sigma_satisfied_data[i][q_name]["ldb_data"].df.empty:
-                        continue
-                    num_tp += self.data_manager.sigma_satisfied_data[i][q_name]["num_tp"]
-                    num_fn += self.data_manager.sigma_satisfied_data[i][q_name]["num_fn"]
-
-                logger.info(f"Inc-Round {inc_round}, Query {q_name}: num_tp={num_tp}, num_fn={num_fn}")
-
                 eval_results_single_step[q_name]["error_certificate"] = err_certificate
                 eval_results_single_step[q_name]["pred_eval"] = \
-                    evaluate_classifier(Y_pred=pred_Y_complete, Y_true=test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+                    self.data_manager.eval_query_quality(
+                        q_name=q_name, 
+                        selected_cols=self.queries[q_name].selected,
+                        stream_idx=inc_round,
+                        pred_labels=pred_Y_li,
+                    )
                 eval_results_single_step[q_name]["trans_eval"] = \
-                    evaluate_classifier(Y_pred=trans_Y_complete, Y_true=test_Y_complete, biased_fn=num_fn, biased_tp=num_tp)
+                    self.data_manager.eval_query_quality(
+                        q_name=q_name, 
+                        selected_cols=self.queries[q_name].selected,
+                        stream_idx=inc_round,
+                        pred_labels=trans_Y_li,
+                    )
             
             end_time = time()
             eval_results.append({
