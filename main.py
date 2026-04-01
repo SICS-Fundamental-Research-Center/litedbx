@@ -23,9 +23,9 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    workload = "mmqa"
+    workload = "movie"
     queries = [
-        "Q3f", 
+        "Q1", 
     ]
 
     workload_mapping = {
@@ -39,6 +39,16 @@ if __name__ == "__main__":
     workload_func = workload_mapping.get(workload)
     assert workload_func is not None, f"Invalid workload: {workload}"
     workload = workload_func(queries=queries)
+
+    exp_group = "vary_b_lab"
+    exp_patch = {
+        "b_lab": 10,
+        # "b_lab": 30,
+        # "b_lab": 50,
+        # "b_lab": 70,
+        # "b_lab": 90,
+    }
+    workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
 
     ldb_engine = LdbEngine(workload)
 

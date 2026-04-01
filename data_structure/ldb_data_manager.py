@@ -486,3 +486,8 @@ class LdbDataManager:
                 self.sigma_satisfied_data[stream_idx][q_name]["discarded_labels"],
                 labels.loc[neg_labeled_indices].reset_index(drop=True).copy()
             ], ignore_index=True)
+        logger.info((
+            f"Initialized coreset for query '{q_name}' in stream-{stream_idx} with "
+            f"{len(labeled_indices)} labeled samples. "
+            f"Remaining Sigma-satisfied data has {len(remaining_indices)} samples."
+        ))

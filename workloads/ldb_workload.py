@@ -92,6 +92,34 @@ class LdbWorkload:
         } for _ in range(len(self.dynamic_setting))]
 
 
+    def inject_exp_setting(self, exp_group: str, exp_patch: dict):
+        assert exp_group != "", "Exp group cannot be empty when injecting exp setting."
+        assert exp_patch is not None, "Exp patch cannot be None when injecting exp setting."
+        for k, v in exp_patch.items():
+            assert k in self.config, f"Invalid config key in exp patch: {k}"
+            self.config[k] = v
+
+            logger.info(f"Exp patch applied: {k}={v}")
+
+        # Flush the config setting.
+        self.random_seed = self.config["random_seed"]
+        self.b_lab = self.config["b_lab"]
+        self.b_se = self.config["b_se"]
+        self.b_rew = self.config["b_rew"]
+        self.b_fs = self.config["b_fs"]
+        self.eta = self.config["eta"]
+        self.delta = self.config["delta"]
+
+        exp_term = "_".join([str(v[0])+"="+str(v[1]) for v in list(zip(exp_patch.keys(), exp_patch.values()))])
+        self.CKPT_path = Path(__file__).parent.parent / ".data_ckpt" / exp_group / self.scenario / exp_term \
+            / "_".join(str(step) for step in self.dynamic_setting)
+        for q_name in self.queries.keys():
+            (self.CKPT_path / q_name).mkdir(parents=True, exist_ok=True)
+
+        # Update the ckpt path of data manager.
+        self.data_manager.CKPT_path = self.CKPT_path
+
+
     def refine_sigma_satisfied_data(self):
         for q_name, sem_cq in self.queries.items():
             logger.info(f"Augmenting Sigma for query {q_name}...")
