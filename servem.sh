@@ -111,7 +111,7 @@ MODEL_GPU_UTIL[qwen3-vl-8b]=0.9
 
 MODEL_PATHS[llava-v1.6-7b]="/ssd_data/models/llava-v1___6-mistral-7b-hf"
 MODEL_PORTS[llava-v1.6-7b]=8003
-MODEL_GPUS[llava-v1.6-7b]="0,1"
+MODEL_GPUS[llava-v1.6-7b]="2,3"
 MODEL_MAX_LEN[llava-v1.6-7b]=32768
 MODEL_TP_SIZE[llava-v1.6-7b]=2
 MODEL_GPU_UTIL[llava-v1.6-7b]=0.9

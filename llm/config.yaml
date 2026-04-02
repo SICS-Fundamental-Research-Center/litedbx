@@ -104,14 +104,14 @@ LOCAL_MODELS:
       output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/Qwen3-VL-8B-Instruct
       api_key: "*"
-      mode: TOOLS
+      mode: JSON
       api_base: http://localhost:8002/v1
       input_cost: 0
       output_cost: 0 
       output_cost_thinking: 0
     - model: hosted_vllm//ssd_data/models/llava-v1___6-mistral-7b-hf
       api_key: "*"
-      mode: TOOLS
+      mode: JSON
       api_base: http://localhost:8003/v1
       input_cost: 0
       output_cost: 0 
