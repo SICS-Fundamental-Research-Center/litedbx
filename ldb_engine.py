@@ -1,6 +1,7 @@
 import logging
 from typing import Tuple
 from workloads.ldb_workload import LdbWorkload
+from time import time
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class LdbEngine:
         """
         [Phase 1] Preprocessing.
         """
+        preprocessing_start = time()
         # (1.1) Initialize the data stream for the dynamic setting.
         self.workload.data_manager.init_data_stream()
 
@@ -33,29 +35,52 @@ class LdbEngine:
         # (1.3) [Optional] Augment the Sigma with high-confidence 
         #   LLM-suggested predicates to narrow down the data scale.
         self.workload.refine_sigma_satisfied_data()
-
-
+        preprocessing_end = time()
+        preprocessing_duration = preprocessing_end - preprocessing_start
 
         """
         [Phase 2] Construct the feature space and the coreset.
         """
+        coreset_start = time()
         # (2.1) Construct the feature space.
         await self.workload.construct_feature_space(debug=debug)
+        coreset_fs_end = time()
+        coreset_fs_duration = coreset_fs_end - coreset_start
 
         # (2.2) Populate the dataset with the selected features.
         await self.workload.sync_with_enriched_features(tag="init")
+        coreset_fs_sync_end = time()
+        coreset_fs_sync_duration = coreset_fs_sync_end - coreset_fs_end
 
         # (2.3) Expand the coreset.
         self.workload.expand_coresets(inc_round=0)
+        coreset_end = time()
+        coreset_expand_duration = coreset_end - coreset_fs_sync_end
+        coreset_duration = coreset_end - coreset_start
 
         """
         [Phase 3] Schema selection and query rewriting.
         """
+        qr_start = time()
         # (3.1) Rank and trim the feature space according the feature selection budget.
         await self.workload.rank_and_trim_feature_space()
+        qr_trim_end = time()
+        qr_trim_duration = qr_trim_end - qr_start
 
         # (3.2) Select the best schema and translate the query.
         _, execution_trace = self.workload.rewrite_and_execute_query()
+        qr_rewrite_end = time()
+        qr_rewrite_duration = qr_rewrite_end - qr_trim_end
+        qr_duration = qr_rewrite_end - qr_start
+
+        logger.info(f"Preprocessing duration: {preprocessing_duration:.2f} seconds")
+        logger.info(f"Feature space construction duration: {coreset_fs_duration:.2f} seconds")
+        logger.info(f"Feature space sync duration: {coreset_fs_sync_duration:.2f} seconds")
+        logger.info(f"Coreset expansion duration: {coreset_expand_duration:.2f} seconds")
+        logger.info(f"Total coreset construction duration: {coreset_duration:.2f} seconds")
+        logger.info(f"Query rewriting trim duration: {qr_trim_duration:.2f} seconds")
+        logger.info(f"Query rewriting duration: {qr_rewrite_duration:.2f} seconds")
+        logger.info(f"Total query rewriting duration: {qr_duration:.2f} seconds")
 
         return execution_trace
 
