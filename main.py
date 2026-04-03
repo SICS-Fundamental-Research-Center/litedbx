@@ -40,15 +40,15 @@ if __name__ == "__main__":
     assert workload_func is not None, f"Invalid workload: {workload}"
     workload = workload_func(queries=queries)
 
-    exp_group = "vary_b_lab"
+    exp_group = "scalability"
     exp_patch = {
-        "b_lab": 10,
-        # "b_lab": 30,
-        # "b_lab": 50,
-        # "b_lab": 70,
-        # "b_lab": 90,
+        # "b_se": 1,
+        # "b_se": 2,
+        # "b_se": 3,
+        # "b_se": 4,
+        "b_se": 5,
     }
-    workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
+    # workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
 
     ldb_engine = LdbEngine(workload)
 
