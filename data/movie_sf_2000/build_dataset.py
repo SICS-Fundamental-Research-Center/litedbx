@@ -155,6 +155,12 @@ if __name__ == "__main__":
     # Generate movies table
     selected_movies = generate_movies_table(movies_df, selected_reviews)
 
+    selected_reviews["reviewText"] = (
+        selected_reviews["reviewText"]
+        .str.replace("\n", " ", regex=False)
+        .str.replace("\r", " ", regex=False)
+    )
+
 
     merged_df = selected_movies.merge(
         selected_reviews,
