@@ -225,7 +225,7 @@ class LdbWorkload:
                 continue
 
             feature_space, usage_statistics = await initialize_feature_space(
-                b_fs=self.b_fs,
+                feature_budget=self.b_se * 2,
                 data_manager=self.data_manager,
                 q_name=q_name,
                 sem_cq=sem_cq,

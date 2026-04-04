@@ -350,10 +350,13 @@ class LdbDataManager:
                     discarded_labels
                 ], ignore_index=True)
 
+            introduced_fn = sum(self.sigma_satisfied_data[stream_idx][q_name]['discarded_labels'])
+
             post_data_scale = len(self.sigma_satisfied_data[stream_idx][q_name]['ldb_data'].df)
             logger.info((
                 f"Refined Sigma-satisfied data for query '{q_name}' in stream-{stream_idx}: "
-                f"{prev_data_scale} -> {post_data_scale} rows."
+                f"{prev_data_scale} -> {post_data_scale} rows. "
+                f"Est. # FNs: {introduced_fn}."
             ))
 
         # ==============================================

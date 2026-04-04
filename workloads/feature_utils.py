@@ -111,7 +111,7 @@ class ContrastiveSampleIterator:
 
 
 async def initialize_feature_space(
-    b_fs: int,
+    feature_budget: int,
     data_manager: LdbDataManager, 
     q_name: str,
     sem_cq: SemCQ,
@@ -168,7 +168,7 @@ async def initialize_feature_space(
                 feature_space=feature_space,
                 previous_feedback=previous_feedback,
                 iteration=sample_iterator.iter_num - 1,
-                feature_budget=b_fs,
+                feature_budget=feature_budget,
                 prompt_template=PROMPTS["GEN_FEAT_CANDIDATE_PROMPT"],
                 data_df=data_manager.coresets[q_name]["ldb_data"].df,
             )
@@ -205,10 +205,10 @@ async def initialize_feature_space(
             data_manager.coresets[q_name]["labels"]
         )
 
-        if len(feature_space) > b_fs:
+        if len(feature_space) > feature_budget:
             feature_can_be_removed = [
                 k for k, _ in feedback["feature_importance"].items() if k not in base_schema]
-            feature_to_be_removed = feature_can_be_removed[-(len(feature_space) - b_fs):]
+            feature_to_be_removed = feature_can_be_removed[-(len(feature_space) - feature_budget):]
             feature_space[:] = [
                 spec for spec in feature_space if spec.target_col not in feature_to_be_removed]
 
