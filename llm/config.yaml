@@ -116,4 +116,11 @@ LOCAL_MODELS:
       input_cost: 0
       output_cost: 0 
       output_cost_thinking: 0
+    - model: hosted_vllm//ssd_data/models/Qwen3-VL-2B-Instruct
+      api_key: "*"
+      mode: JSON
+      api_base: http://localhost:8006/v1
+      input_cost: 0
+      output_cost: 0 
+      output_cost_thinking: 0
     
