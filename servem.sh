@@ -123,6 +123,14 @@ MODEL_MAX_LEN[qwen3-vl-30b]=32768
 MODEL_TP_SIZE[qwen3-vl-30b]=2
 MODEL_GPU_UTIL[qwen3-vl-30b]=0.9
 
+MODEL_PATHS[qwen3-vl-2b]="/ssd_data/models/Qwen3-VL-2B-Instruct"
+MODEL_PORTS[qwen3-vl-2b]=8006
+MODEL_GPUS[qwen3-vl-2b]="2,3"
+MODEL_MAX_LEN[qwen3-vl-2b]=32768
+MODEL_TP_SIZE[qwen3-vl-2b]=2
+MODEL_GPU_UTIL[qwen3-vl-2b]=0.9
+
+MODEL_PATHS[llava-v1.6-7b]="/ssd_data/models/llava-v1___6-mistral-7b-hf"
 # Function to list available models
 list_models() {
     echo ""
