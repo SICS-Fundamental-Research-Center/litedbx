@@ -130,14 +130,15 @@ class LdbDataManager:
             )
 
 
-    def acquire_annotation_and_init_coreset(
-            self, b_lab: int, seed: int = 42) -> None:
+    async def acquire_annotation_and_init_coreset(
+            self, b_lab: int, seed: int = 42, use_hitl: bool = True) -> None:
         for q_name in self.queries.keys():
-            self._acquire_query_annotation_and_init_coreset(
+            await self._acquire_query_annotation_and_init_coreset(
                 b_lab=b_lab, 
                 q_name=q_name, 
                 stream_idx=0, 
-                seed=seed
+                seed=seed,
+                use_hitl=use_hitl,
             )
 
 
@@ -391,11 +392,15 @@ class LdbDataManager:
         ))
 
 
-    def _acquire_query_annotation_and_init_coreset(
-            self, q_name: str, b_lab: int, stream_idx: int = 0, seed: int = 42) -> None:
+    async def _acquire_query_annotation_and_init_coreset(
+            self, q_name: str, b_lab: int, stream_idx: int = 0, seed: int = 42, use_hitl: bool = True) -> None:
 
         data = self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"].df.copy()
         labels = self.sigma_satisfied_data[stream_idx][q_name]["labels"]
+        if use_hitl:
+            acquired_labels = self.sigma_satisfied_data[stream_idx][q_name]["labels"]
+        else:
+            acquired_labels = await self._acquire_pseudo_labels_by_llm(q_name)
 
         labeling_budget = b_lab
         if labeling_budget >= len(data):
@@ -411,26 +416,26 @@ class LdbDataManager:
         labeled_indices = data.sample(n=labeling_budget, random_state=seed).index
 
         # Check whether the sampled data contains both positive and negative samples.
-        num_pos_sampled = labels.loc[labeled_indices].sum()
+        num_pos_sampled = acquired_labels.loc[labeled_indices].sum()
         num_neg_sampled = len(labeled_indices) - num_pos_sampled
         minority_bias = min(2, b_lab - labeling_budget)  # Add bias to avoid single-class situation.
         if num_pos_sampled == 0 and minority_bias > 0:
-            pos_indices = labels[labels == True].index
+            pos_indices = acquired_labels[acquired_labels == True].index
             pos_to_add = min(minority_bias, len(pos_indices))
             labeled_indices = labeled_indices.union(pos_indices[:pos_to_add])
             logger.info((
                 f"Minority class (positive) is not sampled for query '{q_name}' in stream-{stream_idx}. "
                 f"Added {pos_to_add} positive samples to the labeled set. "
-                f"Current labeled set has {labels.loc[labeled_indices].sum()} pos samples out of {len(labeled_indices)} samples."
+                f"Current labeled set has {acquired_labels.loc[labeled_indices].sum()} pos samples out of {len(labeled_indices)} samples."
             ))
         if num_neg_sampled == 0 and minority_bias > 0:
-            neg_indices = labels[labels == False].index
+            neg_indices = acquired_labels[acquired_labels == False].index
             neg_to_add = min(minority_bias, len(neg_indices))
             labeled_indices = labeled_indices.union(neg_indices[:neg_to_add])
             logger.info((
                 f"Minority class (negative) is not sampled for query '{q_name}' in stream-{stream_idx}. "
                 f"Added {neg_to_add} negative samples to the labeled set. "
-                f"Current labeled set has {labels.loc[labeled_indices].sum()} neg samples out of {len(labeled_indices)} samples."
+                f"Current labeled set has {acquired_labels.loc[labeled_indices].sum()} neg samples out of {len(labeled_indices)} samples."
             ))
 
         remaining_indices = data.index.difference(labeled_indices)
@@ -441,7 +446,7 @@ class LdbDataManager:
                 "ldb_data": LdbData(
                     df=data.loc[labeled_indices].reset_index(drop=True).copy(), 
                     config=self.complete_dataset.config),
-                "labels": labels.loc[labeled_indices].reset_index(drop=True).copy(),
+                "labels": acquired_labels.loc[labeled_indices].reset_index(drop=True).copy(),
                 "observed_size": len(labeled_indices),
                 "lb": float('inf'),
                 "ub": float('-inf'),
@@ -456,7 +461,7 @@ class LdbDataManager:
             ], ignore_index=True)
             self.coresets[q_name]["labels"] = pd.concat([
                 self.coresets[q_name]["labels"],
-                labels.loc[labeled_indices].reset_index(drop=True).copy()
+                acquired_labels.loc[labeled_indices].reset_index(drop=True).copy()
             ], ignore_index=True)
             self.coresets[q_name]["observed_size"] += len(labeled_indices)
 
@@ -494,3 +499,45 @@ class LdbDataManager:
             f"{len(labeled_indices)} labeled samples. "
             f"Remaining Sigma-satisfied data has {len(remaining_indices)} samples."
         ))
+
+
+    async def _acquire_pseudo_labels_by_llm(
+            self, q_name: str, stream_idx: int = 0, enable_cache: bool = True) -> pd.Series:
+
+        ckpt_path = self.CKPT_path / q_name / f"pseudo_labels_{stream_idx}.csv"
+        if enable_cache and ckpt_path.exists():
+            logger.info("Loading pseudo labels generated by LLM.")
+            return pd.read_csv(ckpt_path, index_col=0).iloc[:, 0]
+
+        data = self.sigma_satisfied_data[stream_idx][q_name]["ldb_data"]
+        semcq = self.queries[q_name]
+
+        spec_labels = []
+        for idx, sem_pred in enumerate(semcq.Ps):
+            spec = PopulationSpec(
+                source_col=sem_pred.field,
+                source_modality=sem_pred.modality,  # type: ignore
+                target_col=f"llm_label_{idx}",
+                prompt=sem_pred.prompt,
+                feature_type="bool",
+            )
+
+            spec_label = await data._sem_map(
+                spec=spec,
+                llm_client=self.llm_client,
+                is_remote=False
+            )
+            spec_labels.append(spec_label)
+
+        assert len(spec_labels) > 0, f"Empty SemPredicates."
+
+        result = spec_labels[0]
+        for label in spec_labels[1:]:
+            result = result & label
+
+        # Save to cache
+        if enable_cache:
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            result.to_csv(ckpt_path, index=True, header=True)
+        
+        return result

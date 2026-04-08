@@ -47,6 +47,7 @@ class LdbWorkload:
         self.b_fs = config["b_fs"]
         self.eta = config["eta"]
         self.delta = config["delta"]
+        self.enable_hitl = config["enable_hitl"]
 
         self.data_manager = LdbDataManager(
             data_dir=self.data_dir,
@@ -109,6 +110,7 @@ class LdbWorkload:
         self.b_fs = self.config["b_fs"]
         self.eta = self.config["eta"]
         self.delta = self.config["delta"]
+        self.enable_hitl = self.config["enable_hitl"]
 
         exp_term = "_".join([str(v[0])+"="+str(v[1]) for v in list(zip(exp_patch.keys(), exp_patch.values()))])
         self.CKPT_path = Path(__file__).parent.parent / ".data_ckpt" / exp_group / self.scenario / exp_term \
@@ -204,7 +206,7 @@ class LdbWorkload:
 
     async def construct_feature_space(self, debug: bool = False):
 
-        self.data_manager.acquire_annotation_and_init_coreset(
+        await self.data_manager.acquire_annotation_and_init_coreset(
             b_lab=self.b_lab,
             seed=self.random_seed,
         )
