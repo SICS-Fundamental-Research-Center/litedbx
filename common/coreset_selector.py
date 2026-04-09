@@ -17,11 +17,17 @@ def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
         k_neighbors: int=5,
         mode: Literal["balanced", "empirical", "inc"] = "empirical",
         lb: float=float('inf'), 
-        ub: float=float('-inf')) -> Tuple[np.ndarray, pd.Series, float, float]:
+        ub: float=float('-inf'),
+        enable_conf_pred: bool = True,
+        enable_conf_struct: bool = True) -> Tuple[np.ndarray, pd.Series, float, float]:
 
     # Compute the confidence scores for all unlabeled samples.
     selectivity = sum(labeled_Y) / len(labeled_Y)
-    confs = est_conf(labeled_X, labeled_Y, unlabeled_X, selectivity, k_neighbors)
+    confs = est_conf(
+        labeled_X, labeled_Y, 
+        unlabeled_X, selectivity, k_neighbors,
+        enable_conf_pred=enable_conf_pred,
+        enable_conf_struct=enable_conf_struct)
     new_lb = confs.min()
     new_ub = confs.max()
 
@@ -63,7 +69,9 @@ def select_coreset(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
 def est_conf(labeled_X: pd.DataFrame, labeled_Y: pd.Series, 
         unlabeled_X: pd.DataFrame, 
         selectivity: float,
-        k_neighbors: int) -> np.ndarray:
+        k_neighbors: int,
+        enable_conf_pred: bool = True,
+        enable_conf_struct: bool = True) -> np.ndarray:
     
     # Preprocess
     labeled_X_proc = encode_features(labeled_X)
@@ -87,7 +95,9 @@ def est_conf(labeled_X: pd.DataFrame, labeled_Y: pd.Series,
     )
 
     # Combined confidence.
-    combined_probas = selectivity * pred_probas + (1 - selectivity) * struct_probas
+    combined_probas = \
+        selectivity * pred_probas * int(enable_conf_pred) + \
+            (1 - selectivity) * struct_probas * int(enable_conf_struct)
 
     return combined_probas
 

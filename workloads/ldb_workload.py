@@ -48,6 +48,8 @@ class LdbWorkload:
         self.eta = config["eta"]
         self.delta = config["delta"]
         self.enable_hitl = config["enable_hitl"]
+        self.enable_conf_pred = config["enable_conf_pred"]
+        self.enable_conf_struct = config["enable_conf_struct"]
 
         self.data_manager = LdbDataManager(
             data_dir=self.data_dir,
@@ -111,6 +113,8 @@ class LdbWorkload:
         self.eta = self.config["eta"]
         self.delta = self.config["delta"]
         self.enable_hitl = self.config["enable_hitl"]
+        self.enable_conf_pred = self.config["enable_conf_pred"]
+        self.enable_conf_struct = self.config["enable_conf_struct"]
 
         exp_term = "_".join([str(v[0])+"="+str(v[1]) for v in list(zip(exp_patch.keys(), exp_patch.values()))])
         self.CKPT_path = Path(__file__).parent.parent / ".data_ckpt" / exp_group / self.scenario / exp_term \
@@ -271,6 +275,8 @@ class LdbWorkload:
                 mode=mode,
                 lb=self.data_manager.coresets[q_name]["lb"],
                 ub=self.data_manager.coresets[q_name]["ub"],
+                enable_conf_pred=self.enable_conf_pred,
+                enable_conf_struct=self.enable_conf_struct,
             )
             self.data_manager.coresets[q_name]["lb"] = new_lb
             self.data_manager.coresets[q_name]["ub"] = new_ub
