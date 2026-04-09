@@ -68,7 +68,13 @@ class LdbEngine:
         qr_trim_duration = qr_trim_end - qr_start
 
         # (3.2) Select the best schema and translate the query.
-        _, execution_trace = self.workload.rewrite_and_execute_query()
+        execution_trace = {}
+        if not self.workload.enable_rewrite:
+            await self.workload.rewrite_and_execute_query_noRew()
+        elif not self.workload.enable_enrich:
+            self.workload.rewrite_and_execute_query_noEnr()
+        else:
+            _, execution_trace = self.workload.rewrite_and_execute_query()
         qr_rewrite_end = time()
         qr_rewrite_duration = qr_rewrite_end - qr_trim_end
         qr_duration = qr_rewrite_end - qr_start

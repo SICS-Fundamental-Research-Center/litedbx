@@ -50,6 +50,8 @@ class LdbWorkload:
         self.enable_hitl = config["enable_hitl"]
         self.enable_conf_pred = config["enable_conf_pred"]
         self.enable_conf_struct = config["enable_conf_struct"]
+        self.enable_enrich = config["enable_enrich"]
+        self.enable_rewrite = config["enable_rewrite"]
 
         self.data_manager = LdbDataManager(
             data_dir=self.data_dir,
@@ -115,6 +117,8 @@ class LdbWorkload:
         self.enable_hitl = self.config["enable_hitl"]
         self.enable_conf_pred = self.config["enable_conf_pred"]
         self.enable_conf_struct = self.config["enable_conf_struct"]
+        self.enable_enrich = self.config["enable_enrich"]
+        self.enable_rewrite = self.config["enable_rewrite"]
 
         exp_term = "_".join([str(v[0])+"="+str(v[1]) for v in list(zip(exp_patch.keys(), exp_patch.values()))])
         self.CKPT_path = Path(__file__).parent.parent / ".data_ckpt" / exp_group / self.scenario / exp_term \
@@ -510,6 +514,93 @@ class LdbWorkload:
         return best_statistics, execution_trace
 
 
+    def rewrite_and_execute_query_noEnr(self, debug: bool = False):
+        rules_trace = {}
+
+        for q_name, _ in self.queries.items():
+            # Propagate labels
+            active_external_features = []
+            train_X = self.data_manager.coresets[q_name]["ldb_data"].select_active_features(active_external_features)
+            train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
+            test_X = self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"].select_active_features(active_external_features)
+            test_Y = self.data_manager.sigma_satisfied_data[0][q_name]["labels"].astype(int)
+
+            clf, pred_Y_li = perform_label_propagation(train_X, train_Y, [test_X], [test_Y])
+            self.data_manager.sigma_satisfied_data[0][q_name]["propagated_labels"] = pred_Y_li[0]
+
+            # Translated the query.
+            if q_name not in rules_trace.keys():
+                rules_trace[q_name] = []
+            rules = clf_to_rules(
+                clf, feature_names=train_X.columns.tolist(), 
+                disjunction_budget=self.b_rew, 
+                X_train=encode_features(train_X).to_numpy(), 
+                y_train=train_Y.to_numpy(), debug=debug)
+
+            # Apply the rules.
+            trans_Y = apply_rules(rules, encode_features(test_X))
+
+            # Evaluate translations.
+            trans_eval_results = self.data_manager.eval_query_quality(
+                q_name=q_name, 
+                selected_cols=self.queries[q_name].selected,
+                stream_idx=0,
+                pred_labels=[trans_Y]
+            )
+
+            print("=" * 30)
+            print(trans_eval_results)
+            print("=" * 30)
+
+           
+
+    async def rewrite_and_execute_query_noRew(self, debug: bool = False):
+
+        from data_structure.llm_resp_templates import BooleanFeatureResponse
+
+        assert len(self.data_manager.trimmed_feature_names) > 0, "No available features to be selected."
+
+        for q_name, _ in self.queries.items():
+            # Propagate labels
+            active_external_features = [
+                spec.target_col for spec in self.data_manager.enriched_features[q_name] 
+                if spec.target_col in self.data_manager.trimmed_feature_names
+            ]
+            test_X = self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"].select_active_features(active_external_features)
+            test_Y = self.data_manager.sigma_satisfied_data[0][q_name]["labels"].astype(int)
+
+            # Construct the parallel invoking task.
+            sem_query = self.queries[q_name]
+
+            prompt = "Determine if the provided data item satisfies the following conditions: " + \
+                " AND ".join([pred.succ_cond for pred in sem_query.Ps])
+
+            data_items = [
+                [", ".join([f"{col}: {val}" for col, val in row.items()])]
+                for _, row in test_X.iterrows()
+            ]
+
+            resp = await self.llm_client.invoke_parallel(
+                is_remote=False,
+                modality="Text",
+                prompt=prompt,
+                data_items=data_items,
+                response_model=BooleanFeatureResponse,
+            )
+            pred_Y = pd.Series([r.value for r in resp])
+
+            pred_eval_results = self.data_manager.eval_query_quality(
+                q_name=q_name,
+                selected_cols=sem_query.selected,
+                stream_idx=0,
+                pred_labels=[pred_Y]
+            )
+            print("=" * 30)
+            print(pred_eval_results)
+            print("=" * 30)
+
+
+
     async def incremental_processing(self, debug: bool = False) -> Tuple[bool, list]:
 
         eval_results = []
@@ -622,6 +713,8 @@ class LdbWorkload:
         
 
     def _report_evaluation_trace(self, execution_trace: dict):
+        if execution_trace == {}:
+            return
         report_evaluation_trace(execution_trace)
 
 
