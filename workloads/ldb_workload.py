@@ -25,7 +25,10 @@ from workloads.workload_utils import (
     perform_label_propagation,
     compute_inc_error_certificate,
 )
-from workloads.feature_utils import initialize_feature_space
+from workloads.feature_utils import (
+    initialize_feature_space,
+    enforce_feature_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -244,11 +247,24 @@ class LdbWorkload:
             self.data_manager.enriched_features[q_name] = feature_space
             self._update_statistics("feature_space_init", usage_statistics)
             self.llm_client.reset_usage_statistics()
-
-            with open(ckpt_path, 'w') as f:
-                json.dump([spec.model_dump() for spec in feature_space], f, indent=2)
             with open(ckpt_usage_path, 'w') as f:
                 json.dump(usage_statistics, f, indent=2)        
+
+        # Enforce the feature budget for batched query.
+        if len(self.queries) > 1:
+            new_fs, stat = await enforce_feature_budget(
+                pop_specs=self.data_manager.enriched_features,
+                sem_preds=self.queries,
+                feature_budget=self.b_se,
+                llm_client=self.llm_client,
+            )
+            self.data_manager.enriched_features = new_fs
+            self._update_statistics("feature_space_init", stat)
+
+        for q_name, _ in self.queries.items():
+            feature_space = self.data_manager.enriched_features[q_name]
+            with open(ckpt_path, 'w') as f:
+                json.dump([spec.model_dump() for spec in feature_space], f, indent=2)
             logger.info(f"Saved feature space and usage statistics to checkpoint for query {q_name}.")
 
 

@@ -1,6 +1,6 @@
 import pandas as pd
 import logging
-from typing import Tuple, cast
+from typing import Optional, Tuple, cast
 from data_structure import SemCQ, PopulationSpec, FeatureRefinementResponse, LdbDataManager
 from llm import LdbLLMClient, PROMPTS
 from workloads.workload_utils import pred_and_eval
@@ -234,6 +234,71 @@ async def initialize_feature_space(
 
     return feature_space, usage_statistics
 
+async def enforce_feature_budget(
+    pop_specs: dict[str, list[PopulationSpec]],
+    sem_preds: dict[str, SemCQ],
+    feature_budget: int,
+    llm_client: LdbLLMClient,
+) -> Tuple[dict[str, list[PopulationSpec]], Optional[dict]]:
+
+    flattened_specs = []
+    for _, v in pop_specs.items():
+        flattened_specs.extend(v)
+
+    if len(flattened_specs) <= feature_budget:
+        return pop_specs, None
+
+    # Collect all success conditions from semantic predicates
+    joint_succ_conditions = "The joint success conditions for this query is:\n"
+    for q_name, sem_cq in sem_preds.items():
+        joint_succ_conditions += f"\nQuery: {q_name}\n"
+        for sem_pred in sem_cq.Ps:
+            joint_succ_conditions += f"  - {sem_pred.succ_cond}\n"
+
+    # Serialize population specs
+    features_str = "\n".join([
+        f"  - {spec.target_col} ({spec.feature_type}): {spec.prompt[:100]}..."
+        for spec in flattened_specs
+    ])
+
+    prompt = f"""You are given a set of features and need to select at most {feature_budget} features that can best meet the joint success conditions.
+
+=== Joint Success Conditions ===
+{joint_succ_conditions}
+
+=== Current Features ({len(flattened_specs)} total) ===
+{features_str}
+
+Your task is to identify which features can be eliminated while still meeting the requirements. Consider:
+1. Remove features that are duplicated or redundant
+2. Remove features that are not important for meeting the success conditions
+3. Keep the most discriminative and relevant features
+
+Response format:
+- Keep `to_add` as an empty list (do not add any new features)
+- Put the feature names that can be eliminated in `to_remove` (target_col values only)
+
+Please ensure you select exactly {len(flattened_specs) - feature_budget} features to remove."""
+
+    resp = cast(FeatureRefinementResponse, llm_client.invoke(
+        is_remote=True,
+        modality="Text",
+        prompt=prompt,
+        response_model=FeatureRefinementResponse,
+    ))
+    usage_stat = llm_client.get_usage_statistics()
+    llm_client.reset_usage_statistics()
+
+    # Filter out the removed features
+    specs_to_keep = [spec for spec in flattened_specs if spec.target_col not in resp.to_remove]
+
+    # Reconstruct the pop_specs dict with only kept features
+    result = {}
+    for q_name, specs in pop_specs.items():
+        kept_specs = [spec for spec in specs if spec.target_col not in resp.to_remove]
+        result[q_name] = kept_specs
+
+    return result, usage_stat
 
 def _build_feature_generation_prompt(
     sem_pred,
