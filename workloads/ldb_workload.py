@@ -99,6 +99,57 @@ class LdbWorkload:
             ]
         } for _ in range(len(self.dynamic_setting))]
 
+    
+    def query_router(self, q1: SemCQ, q2: SemCQ) -> Tuple[bool, dict]:
+        from data_structure.llm_resp_templates import BooleanFeatureResponse
+
+        # Extract basic information from q1 and q2
+        q1_info = []
+        for p in q1.Ps:
+            q1_info.append(f"Field: {p.field}, Success condition: {p.succ_cond}")
+
+        q2_info = []
+        for p in q2.Ps:
+            q2_info.append(f"Field: {p.field}, Success condition: {p.succ_cond}")
+
+        q1_desc = "\n".join(q1_info) if q1_info else "No semantic predicates"
+        q2_desc = "\n".join(q2_info) if q2_info else "No semantic predicates"
+
+        prompt = f"""You are an expert in query optimization and result reuse.
+
+Your task is to determine whether Query 1 can reuse the query results of Query 2.
+
+Query 1 can reuse Query 2's results if Query 2's results already contain or subsume the information needed by Query 1.
+For example, if Query 2 retrieves all "romantic comedy" movies (which includes both romance and comedy),
+then Query 1 asking for all "comedy" movies can reuse Query 2's results.
+
+=== Query 1 (wants to reuse results) ===
+{q1_desc}
+
+=== Query 2 (providing results) ===
+{q2_desc}
+
+=== Instructions ===
+
+Analyze whether Query 1's requirements can be satisfied by Query 2's results. Consider:
+1. Does Query 2's success condition cover or subsume Query 1's requirements?
+2. If Query 2 returns items that satisfy a broader or related category, do they include items that satisfy Query 1?
+3. Are the fields compatible between the two queries?
+
+Return True if Query 1 can reuse Query 2's results, False otherwise.
+"""
+
+        response = cast(BooleanFeatureResponse, self.llm_client.invoke(
+            is_remote=True,
+            modality="Text",
+            prompt=prompt,
+            response_model=BooleanFeatureResponse,
+        ))
+        usage_stat = self.llm_client.get_usage_statistics()
+        self.llm_client.reset_usage_statistics()
+
+        return response.value, usage_stat
+
 
     def inject_exp_setting(self, exp_group: str, exp_patch: dict):
         assert exp_group != "", "Exp group cannot be empty when injecting exp setting."
