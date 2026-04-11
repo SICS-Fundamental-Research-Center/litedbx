@@ -434,7 +434,12 @@ class LdbWorkload:
                 rules_trace[q_name].append(rules)
 
                 # Apply the rules.
+                start_execute = time()
                 trans_Y = apply_rules(rules, encode_features(test_X))
+                end_execute = time()
+                print("="*20)
+                print(f"Online execution time: {end_execute - start_execute}")
+                print("="*20)
 
                 # Evaluate the predications and translations.
                 pred_eval_results = self.data_manager.eval_query_quality(
