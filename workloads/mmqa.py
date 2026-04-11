@@ -39,6 +39,39 @@ Q3f = SemCQ(
         ))
 ])
 
+Q3c = SemCQ(
+    selected=["title"],
+    Sigma=[Predicate("text", "!=", "")],
+    Ps=[
+        SemPredicate(
+            field="text",
+            modality="Text",
+            succ_cond="The movie is romance",
+            prompt=(
+                "Please determine if the given text indicate "
+                "that the movie is romance. "
+                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                "Do NOT provide any explanations."
+        ))
+])
+
+
+Q3g = SemCQ(
+    selected=["title"],
+    Sigma=[Predicate("text", "!=", "")],
+    Ps=[
+        SemPredicate(
+            field="text",
+            modality="Text",
+            succ_cond="The movie is a biographical comedy",
+            prompt=(
+                "Please determine if the given text indicate "
+                "that the movie is a biographical comedy. "
+                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                "Do NOT provide any explanations."
+        ))
+])
+
 
 Q6a = SemCQ(
     selected=["Airlines"],
@@ -93,7 +126,9 @@ Q6c = SemCQ(
 
 SEM_QUERIES = {
     "Q3a": Q3a,
+    "Q3c": Q3c,
     "Q3f": Q3f,
+    "Q3g": Q3g,
     "Q6a": Q6a,
     "Q6b": Q6b,
     "Q6c": Q6c,
@@ -101,7 +136,9 @@ SEM_QUERIES = {
 
 DATA_MAP = {
     "Q3a": DATASET_PATH / "movie",
+    "Q3c": DATASET_PATH / "movie",
     "Q3f": DATASET_PATH / "movie",
+    "Q3g": DATASET_PATH / "movie",
     "Q6a": DATASET_PATH / "airport",
     "Q6b": DATASET_PATH / "airport",
     "Q6c": DATASET_PATH / "airport",

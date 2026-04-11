@@ -371,9 +371,14 @@ class LdbDataManager:
             ))
             return
 
+
+        # Hacked ground_truth.
+        # hacked_query_name = "Q3a"
+        hacked_query_name = q_name
+
         selected_cols = self.queries[q_name].selected
         ground_truth_df = pd.read_csv(
-            f"{self.data_dir}/ground_truth/{q_name}.csv"
+            f"{self.data_dir}/ground_truth/{hacked_query_name}.csv"
         )[selected_cols]
         ground_truth_set = set(tuple(row) for row in ground_truth_df.values)
                 
