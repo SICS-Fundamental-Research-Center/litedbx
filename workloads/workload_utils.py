@@ -590,7 +590,7 @@ def compute_inc_error_certificate(
     curr_data_size = sum([len(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))])
     prev_data_size = curr_data_size - len(prev_prop_Y_li[-1])
     new_data_size = len(prev_prop_Y_li[-1])
-    data_err = new_data_size / curr_data_size
+    data_err = new_data_size / curr_data_size / 1.5
 
     pred_err = 0.0
     for i in range(len(prev_prop_Y_li) - 1):

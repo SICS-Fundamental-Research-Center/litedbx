@@ -732,6 +732,8 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                     ],
                     prop_Y_li=pred_Y_li,
                 )
+                prev_err_certificate = eval_results[-1]["eval_results"][q_name]["error_certificate"] if eval_results else 0.0
+                err_certificate += prev_err_certificate * 0.5
                 logger.info(f"Inc-Round {inc_round}, Query {q_name}: Est. error certificate: {err_certificate:.4f}")
 
                 # Apply the rules.
