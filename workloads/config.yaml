@@ -5,10 +5,16 @@ b_rew: 5
 b_fs: 10
 k_beighbors: 5
 
+enable_hitl: True
+
+enable_conf_struct: True
+enable_conf_pred: True
+
+enable_enrich: True
+enable_rewrite: True
+
 loo_step: 10
 delta: 0.05  # Theorem 3 holds with probability at least 1 - delta.
 
 eta: 1000000000000000  
-# dynamic_setting: [0.6, 0.8, 1.0]
 dynamic_setting: [1.0]
-# dynamic_setting: [0.0625, 0.125, 0.25, 0.5, 1.0]
