@@ -19,8 +19,16 @@ A lightweight query engine for processing multi-modal data with semantic rule ex
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv) - Fast Python package installer
+- [vLLM](https://github.com/vllm-project/vllm) - For hosting local models (requires separate environment)
+
+### Hardware Configuration
+
+We host local models with vLLM on 4× NVIDIA GeForce RTX 3090 (24 GiB each)
+- Supports simultaneous 30B LLM and 30B VLM hosting in FP8 (text/image multi-modal)
 
 ### Installation
+
+#### 1. Main Project Installation
 
 ```bash
 # Install dependencies using uv
@@ -29,6 +37,23 @@ uv sync
 # Activate the virtual environment
 source .venv/bin/activate
 ```
+
+**Note**: The `uv sync` command does **not** include vLLM dependencies. You need to set up a separate environment for vLLM.
+
+#### 2. vLLM Environment Setup
+
+For hosting local models, you need to create a separate environment with vLLM:
+
+```bash
+# Create a dedicated venv for vLLM (recommended location: ~/venv/vllm)
+python -m venv ~/venv/vllm
+source ~/venv/vllm/bin/activate
+
+# Install vLLM
+pip install vllm
+```
+
+The [`servem.sh`](servem.sh) script automatically activates this venv at line 198. If your vLLM is installed in a different location, modify line 198 in [`servem.sh`](servem.sh:198) to point to your environment.
 
 ### Environment Configuration
 
@@ -49,7 +74,7 @@ Example `.env` file:
 BLSC_API_KEY=your_api_key_here
 BLSC_ENDPOINT=https://llmapi.blsc.cn/v1/
 DASHSCOPE_API_KEY=your_dashscope_key_here
-DASHSCOPE_ENDPOINT=thttps://dashscope.aliyuncs.com/compatible-mode/v1/
+DASHSCOPE_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1/
 ```
 
 ### Locally-Hosted Models
@@ -65,9 +90,11 @@ The script supports pre-configured models:
 | `llama3-8b` | Text | 8000 | 0 | 8192 |
 | `qwen3-4b` | Text | 8001 | 1 | 32768 |
 | `qwen3-30b-fp8` | Text | 8004 | 0,1 | 32768 |
+| `qwen3-vl-2b` | Vision | 8006 | 2,3 | 32768 |
+| `qwen3-vl-4b` | Vision | 8007 | 2,3 | 32768 |
 | `qwen3-vl-8b` | Vision | 8002 | 2,3 | 32768 |
-| `llava-v1.6-7b` | Vision | 8003 | 0,1 | 32768 |
-| `qwen3-vl-30b` | Vision | 8005 | 0,1,2,3 | 32768 |
+| `llava-v1.6-7b` | Vision | 8003 | 2,3 | 32768 |
+| `qwen3-vl-30b` | Vision | 8005 | 2,3 | 32768 |
 
 #### Usage
 
@@ -88,13 +115,13 @@ Each model is pre-configured with the following settings:
 - **Tensor Parallelism (TP)**: Automatically enabled for multi-GPU models
 - **GPU Memory Utilization**: Configured per model (0.8-0.9)
 - **Port Management**: Auto-increments if default port is in use
-- **Virtual Environment**: Automatically activates `~/venv/vllm`
+- **Virtual Environment**: Automatically activates `~/venv/vllm` (configurable at [line 198](servem.sh:198))
 
-To add new models, edit the configuration arrays in [`servem.sh`](servem.sh:75-117).
+To add new models, edit the configuration arrays in [`servem.sh`](servem.sh:75-139).
 
 ### Data Setup
 
-This project uses datasets from [SemBench](https://github.com/SemBench/SemBench). To set up the data:
+This project uses datasets from [SemBench](https://sembench.ngrok.io/). To set up the data:
 
 1. **Download the data directory**:
    ```bash
@@ -115,8 +142,8 @@ This project uses datasets from [SemBench](https://github.com/SemBench/SemBench)
    ls -la data/
 
    # You should see dataset directories like:
-   # medical/
-   # ```
+   # medical/ movie/ ecomm/ animals/ mmqa/
+   ```
 
 ## Usage
 
@@ -149,7 +176,7 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
     # Define which queries to run
-    queries = ["Q1", "Q3", "Q8"]
+    queries = ["Q1"]
 
     # Build the workload
     workload = medical.get_workload(queries=queries)
@@ -174,12 +201,14 @@ python main.py
 
 The `LdbEngine.execute()` method orchestrates the following phases:
 
-1. **Preprocessing (Phase 1.1)**: Apply static filters (Σ) to retrieve sigma-satisfied data
-2. **Coreset Initialization (Phase 2.1)**: Acquire human labels and initialize feature space
-3. **Feature Materialization (Phase 2.2)**: Populate features for unlabeled data
-4. **Coreset Expansion (Phase 2.3)**: Expand coreset using k-NN based selection
-5. **Feature Generation (Phase 3.1)**: Generate candidate external features
-6. **Schema Selection & Query Translation (Phase 3.2)**: Select optimal schema and translate queries
+1. **Preprocessing (Phase 1)**: Apply static filters (Σ) to retrieve sigma-satisfied data
+2. **Coreset Construction (Phase 2)**: 
+   - Initialize feature space with human labels
+   - Materialize features for unlabeled data
+   - Expand coreset using k-NN based selection
+3. **Schema Selection & Query Translation (Phase 3)**:
+   - Rank and trim feature space according to selection budget
+   - Select optimal schema and translate queries
 
 ## Workload Configuration
 
@@ -254,14 +283,16 @@ def get_workload(queries: list[str], config: Optional[dict] = None) -> LdbWorklo
 
 ## Parameters
 
-- `random_seed`: Random seed for reproducibility (default: 42)
-- `b_lab`: Number of human labels to acquire initially (default: 50)
-- `b_se`: Budget for selecting external features (default: 5)
-- `b_rew`: Budget for query rewriting disjunctions (default: 5)
-- `b_fs`: Budget for feature space generation (default: 10)
-- `k_neighbors`: Number of neighbors for coreset expansion (default: 5)
-- `loo_step`: Step size for leave-one-out validation (default: 10)
-- `delta`: Confidence parameter (1 - delta) for error bounds (default: 0.05)
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `random_seed` | Random seed for reproducibility | 42 |
+| `b_lab` | Number of human labels to acquire initially | 50 |
+| `b_se` | Budget for selecting external features | 5 |
+| `b_rew` | Budget for query rewriting disjunctions | 5 |
+| `b_fs` | Budget for feature space generation | 10 |
+| `k_neighbors` | Number of neighbors for coreset expansion | 5 |
+| `loo_step` | Step size for leave-one-out validation | 10 |
+| `delta` | Confidence parameter (1 - delta) for error bounds | 0.05 |
 
 ## Project Structure
 
@@ -269,24 +300,83 @@ def get_workload(queries: list[str], config: Optional[dict] = None) -> LdbWorklo
 litedbx/
 ├── ldb_engine.py          # Main query engine orchestration
 ├── main.py                # Entry point for running queries
+├── servem.sh              # vLLM model serving script
+├── workloads/             # Dataset-specific workloads
+│   ├── config.yaml           # Configuration parameters
+│   ├── ldb_workload.py       # LdbWorkload class
+│   ├── medical.py            # Medical dataset queries
+│   ├── movie.py              # Movie dataset queries
+│   ├── ecomm.py              # E-commerce dataset queries
+│   ├── animals.py            # Wildlife dataset queries
+│   ├── mmqa.py               # MMQA dataset queries
+│   ├── feature_utils.py      # Feature extraction utilities
+│   └── workload_utils.py     # Workload helper functions
 ├── common/                # Common utilities
 │   ├── coreset_selector.py   # Coreset selection algorithms
 │   └── utils.py              # Feature encoding, classifiers, evaluation
 ├── data_structure/         # Data structures
 │   ├── sem_query.py          # Semantic query (SemCQ, SemPredicate)
 │   ├── ldb_data.py           # LdbData wrapper
+│   ├── ldb_data_manager.py   # Data management
 │   └── llm_resp_templates.py # LLM response templates
 ├── llm/                   # LLM integration
+│   ├── config.yaml           # LLM configuration (remote/local)
 │   ├── ldb_llm_client.py     # LLM API client
 │   └── prompts.py            # LLM prompt templates
-├── workloads/             # Dataset-specific workloads
-│   ├── config.yaml           # Configuration parameters
-│   ├── ldb_workload.py       # LdbWorkload class
-│   └── medical.py            # Medical dataset queries
 ├── data/                  # Dataset directory
-│   └── medical/              # Medical dataset
-│       ├── data.csv
-│       └── ground_truth/
-└── .ckpt/                 # Cached checkpoints
-    └── medical/              # Medical dataset checkpoints
+│   ├── medical/              # Medical dataset
+│   ├── movie/                # Movie dataset
+│   ├── ecomm_sf_2000/        # E-commerce dataset (scale factor 2000)
+│   ├── animals/              # Wildlife dataset
+│   └── mmqa/                 # MMQA dataset
+├── .data_ckpt/            # Cached checkpoints
+│   ├── medical/
+│   ├── movie/
+│   ├── ecomm/
+│   └── ...
+├── files/                 # External reference files
+│   └── ...
+└── litedbx_full.pdf       # Full-version paper (with appendix)
 ```
+
+## Experimental Setup
+
+### Models
+
+**Remote (Cloud) Models:**
+- Default LLM: `Qwen3-235B-A22B`
+- Default VLM: `Qwen3-VL-235B-A22B-Instruct`
+
+**Local Models (hosted via vLLM):**
+- Default LLM: `Qwen3-30B-A3B-Instruct-2507-FP8`
+- Default VLM: `Qwen3-VL-30B-A3B-Instruct-FP8`
+
+### Benchmark
+
+LiteDBX is evaluated on [SemBench](https://sembench.ngrok.io/), a benchmark for semantic query processing over multi-modal data.
+
+**Datasets and Scale Factors:**
+
+| Dataset | Scale Factor | Note |
+|---------|--------------|------|
+| Movie | 2000 | |
+| Wildlife | 200 | |
+| E-Commerce | 2000 | SemBench uses 500; LiteDBX uses 2000 |
+| Medical | 11112 | |
+| MMQA | 200 | |
+
+### Query Mapping
+
+| SemBench | LiteDBX |
+|---------|---------|
+| Movie.Q1, Q2 | Movie.Q1, Q2 |
+| Wildlife.Q7 | Wildlife.Q1 |
+| E-Commerce.Q1, Q2, Q13 | E-Commerce.Q1, Q2, Q3 |
+| MMQA.Q3a, Q3f, Q6a, Q6b, Q6c | MMQA.Q1, Q2, Q3, Q4, Q5 |
+| Medical.Q1, Q3, Q8, Q9 | Medical.Q1, Q2, Q3, Q4 |
+
+### Evaluation Notes
+
+1. **Aggregation Queries**: Excluded from evaluation as they require human-provided annotations (e.g., `SUM`, `COUNT`).
+
+2. **LIMIT Clauses**: Removed from queries before execution (LIMIT optimization not supported).
