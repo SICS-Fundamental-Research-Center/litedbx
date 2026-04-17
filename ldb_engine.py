@@ -105,16 +105,11 @@ class LdbEngine:
         return rerun, result
 
 
-        # TODO: Add processing for the case when rerun is True.
-
-
-
-
 
     async def execute(self, debug=False):
         execution_trace = await self.p_eval(debug=debug)
         
-        rerun, results = await self.inc_eval()
+        _, results = await self.inc_eval()
 
         """
         Report the execution results.

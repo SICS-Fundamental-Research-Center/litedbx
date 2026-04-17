@@ -40,20 +40,18 @@ if __name__ == "__main__":
     assert workload_func is not None, f"Invalid workload: {workload}"
     workload = workload_func(queries=queries)
 
-    exp_group = "fs_construction"
+    """
+    Inject experiment settings here. 
+    For example, to set b_se to 6, you can do the following:
+
+    ```
+    exp_group = "vary_se"
     exp_patch = {
-        # "b_se": 1,
-        # "b_se": 2,
-        # "b_se": 3,
-        # "b_se": 4,
         "b_se": 5,
-        # "b_se": 9,
-        # "b_fs": 10,
-        # "b_rew": 9,
-        # "b_lab": 20,
-        # "enable_rewrite": False,
     }
-    # workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
+    workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
+    ```
+    """
 
     ldb_engine = LdbEngine(workload)
 
