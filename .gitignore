@@ -22,3 +22,5 @@ docs
 
 data/**/data_full.csv
 data/**/ground_truth
+
+*.todo
