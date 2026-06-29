@@ -290,6 +290,12 @@ def compute_subjective_error(
     if len(X) < 2:
         return 0.0, 0.0
 
+    # If no features are available, there is nothing to train on.
+    # Treat this as the trivial baseline instead of fitting sklearn on a
+    # zero-column matrix.
+    if X.shape[1] == 0:
+        return 0.0, 0.0
+
     Y_loo = []
     Y_true = []
 
@@ -437,7 +443,7 @@ def report_evaluation_trace(execution_trace: dict):
         for q_name in all_query_names:
             row = {
                 "Iter": iter_idx,
-                "NFeat": iter_idx + 1,
+                "NFeat": iter_idx,
                 "Query": q_name,
             }
 
@@ -481,7 +487,7 @@ def report_evaluation_trace(execution_trace: dict):
     # ========== SECTION 2: AVERAGE ERROR ==========
     avg_errors = [{
         "Iter": i,
-        "NFeat": i + 1,
+        "NFeat": i,
         "L_avg": f"{results.get('L_avg', 0):.2f}"
     } for i, results in execution_trace.items()]
 

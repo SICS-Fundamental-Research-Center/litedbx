@@ -448,7 +448,7 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
 
         assert len(self.data_manager.trimmed_feature_names) > 0, "No available features to be selected."
 
-        for i in range(len(self.data_manager.trimmed_feature_names)):
+        for i in range(len(self.data_manager.trimmed_feature_names) + 1):
 
             accumulated_error = 0
 
@@ -464,7 +464,7 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                 # Propagate labels
                 active_external_features = [
                     spec.target_col for spec in self.data_manager.enriched_features[q_name] 
-                    if spec.target_col in self.data_manager.trimmed_feature_names[:i+1]
+                    if spec.target_col in self.data_manager.trimmed_feature_names[:i]
                 ]
                 train_X = self.data_manager.coresets[q_name]["ldb_data"].select_active_features(active_external_features)
                 train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
@@ -475,18 +475,24 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                 memory_cost = self.memory_cost(train_X) + self.memory_cost(test_X) + self.memory_cost(train_Y) + self.memory_cost(test_Y)
 
 
-                clf, pred_Y_li = perform_label_propagation(train_X, train_Y, [test_X], [test_Y])
-                self.data_manager.sigma_satisfied_data[0][q_name]["propagated_labels"] = pred_Y_li[0]
-
                 # Translated the query.
                 if q_name not in rules_trace.keys():
                     rules_trace[q_name] = []
-                rules = clf_to_rules(
-                    clf, feature_names=train_X.columns.tolist(), 
-                    disjunction_budget=self.b_rew, 
-                    X_train=encode_features(train_X).to_numpy(), 
-                    y_train=train_Y.to_numpy(), debug=debug)
+                # With enrichment disabled, some scenarios have no usable features.
+                # Treat that as the empty-rule baseline instead of fitting sklearn on
+                # a zero-column matrix.
+                if train_X.shape[1] == 0:
+                    pred_Y_li = [pd.Series(1, index=test_Y.index, dtype=int)]
+                    rules = []
+                else:
+                    clf, pred_Y_li = perform_label_propagation(train_X, train_Y, [test_X], [test_Y])
+                    rules = clf_to_rules(
+                        clf, feature_names=train_X.columns.tolist(), 
+                        disjunction_budget=self.b_rew, 
+                        X_train=encode_features(train_X).to_numpy(), 
+                        y_train=train_Y.to_numpy(), debug=debug)
                 rules_trace[q_name].append(rules)
+                self.data_manager.sigma_satisfied_data[0][q_name]["propagated_labels"] = pred_Y_li[0]
 
                 # Apply the rules.
                 start_execute = time()
@@ -593,7 +599,6 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
 
 
     def rewrite_and_execute_query_noEnr(self, debug: bool = False):
-        rules_trace = {}
 
         for q_name, _ in self.queries.items():
             # Propagate labels
@@ -619,10 +624,6 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                     X_train=encode_features(train_X).to_numpy(), 
                     y_train=train_Y.to_numpy(), debug=debug)
             self.data_manager.sigma_satisfied_data[0][q_name]["propagated_labels"] = pred_Y_li[0]
-
-            # Translated the query.
-            if q_name not in rules_trace.keys():
-                rules_trace[q_name] = []
 
             # Apply the rules.
             trans_Y = apply_rules(rules, encode_features(test_X))
