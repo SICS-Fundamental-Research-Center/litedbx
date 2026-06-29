@@ -409,7 +409,7 @@ def report_evaluation_trace(execution_trace: dict):
         for key in results.keys():
             if key not in ["rules", "features", "pred_eval", "trans_eval",
                            "L_rew", "penalty_rew", "L_LOO", "penalty_LOO",
-                           "L_obj", "L_subj", "L_static", "L_avg"]:
+                           "L_obj", "L_subj", "L_static", "L_avg", "memory_cost"]:
                 all_query_names.add(key)
 
     # Find best iteration for each query (highest trans_f1) AND global best (lowest L_avg)
@@ -460,6 +460,7 @@ def report_evaluation_trace(execution_trace: dict):
             row["L_obj"] = f"{results.get('L_obj', {}).get(q_name, 0):.2f}"
             row["L_subj"] = f"{results.get('L_subj', {}).get(q_name, 0):.2f}"
             row["L_static"] = f"{results.get('L_static', {}).get(q_name, 0):.2f}"
+            row["memory_cost"] = f"{results.get('memory_cost', {}).get(q_name, 0):.2f}"
 
             overview_data.append(row)
 
@@ -467,15 +468,15 @@ def report_evaluation_trace(execution_trace: dict):
     col_order = ["Iter", "NFeat", "Query", "pred_f1", "pred_p", "pred_r",
                  "trans_f1", "trans_p", "trans_r",
                  "L_rew", "penalty_rew", "L_obj",
-                 "L_LOO", "penalty_LOO", "L_subj", "L_static"]
+                 "L_LOO", "penalty_LOO", "L_subj", "L_static", "memory_cost"]
     col_order = [c for c in col_order if c in df_overview.columns]
     df_overview = df_overview[col_order]
 
-    print("\n" + "="*123)
+    print("\n" + "="*150)
     print("OVERVIEW - Evaluation Metrics per Iteration")
-    print("="*123)
+    print("="*150)
     print(df_overview.to_string(index=False))
-    print("="*123)
+    print("="*150)
 
     # ========== SECTION 2: AVERAGE ERROR ==========
     avg_errors = [{

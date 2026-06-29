@@ -23,9 +23,9 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    workload = "movie"
+    workload = "mmqa"
     queries = [
-        "Q1",
+        "Q6b",
     ]
 
     workload_mapping = {
@@ -52,6 +52,12 @@ if __name__ == "__main__":
     workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
     ```
     """
+
+    # exp_group = "vary_se"
+    # exp_patch = {
+    #     "b_se": 7,
+    # }
+    # workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
 
     ldb_engine = LdbEngine(workload)
 

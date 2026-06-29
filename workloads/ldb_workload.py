@@ -454,7 +454,7 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
 
             stats = [
                 "rules", "features", "pred_eval", "trans_eval", "L_rew",
-                "penalty_rew", "L_LOO", "penalty_LOO", "L_obj", "L_subj", "L_static"
+                "penalty_rew", "L_LOO", "penalty_LOO", "L_obj", "L_subj", "L_static", "memory_cost"
             ]
 
             execution_results: dict[str, Any] = {stat: {} for stat in stats}
@@ -470,6 +470,10 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                 train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
                 test_X = self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"].select_active_features(active_external_features)
                 test_Y = self.data_manager.sigma_satisfied_data[0][q_name]["labels"].astype(int)
+
+
+                memory_cost = self.memory_cost(train_X) + self.memory_cost(test_X) + self.memory_cost(train_Y) + self.memory_cost(test_Y)
+
 
                 clf, pred_Y_li = perform_label_propagation(train_X, train_Y, [test_X], [test_Y])
                 self.data_manager.sigma_satisfied_data[0][q_name]["propagated_labels"] = pred_Y_li[0]
@@ -543,6 +547,7 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                     "L_obj": L_obj,
                     "L_subj": L_subj,
                     "L_static": L_static,
+                    "memory_cost": memory_cost
                 }
                 execution_results["rules"][q_name] = rules
                 execution_results["features"][q_name] = active_external_features
@@ -555,6 +560,7 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                 execution_results["L_obj"][q_name] = L_obj
                 execution_results["L_subj"][q_name] = L_subj
                 execution_results["L_static"][q_name] = L_static
+                execution_results["memory_cost"][q_name] = memory_cost
 
                 if debug:
                     logger.info(
@@ -940,3 +946,10 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                 print(results)
         except Exception as e:
             print(eval_results)
+
+
+    def memory_cost(self, obj: pd.DataFrame | pd.Series) -> float:
+        usage = obj.memory_usage(deep=True)
+        if hasattr(usage, 'sum'):
+            usage = usage.sum()  # type: ignore
+        return usage  # type: ignore
