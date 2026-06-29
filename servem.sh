@@ -96,7 +96,7 @@ MODEL_GPU_UTIL[qwen3-4b]=0.9
 
 MODEL_PATHS[qwen3-30b-fp8]="/ssd_data/models/Qwen3-30B-A3B-Instruct-2507-FP8"
 MODEL_PORTS[qwen3-30b-fp8]=8004
-MODEL_GPUS[qwen3-30b-fp8]="0,1"
+MODEL_GPUS[qwen3-30b-fp8]="2,3"
 MODEL_MAX_LEN[qwen3-30b-fp8]=32768
 MODEL_TP_SIZE[qwen3-30b-fp8]=2
 MODEL_GPU_UTIL[qwen3-30b-fp8]=0.8
