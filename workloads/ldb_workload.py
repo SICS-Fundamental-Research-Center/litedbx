@@ -189,6 +189,7 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
             logger.info(f"Augmenting Sigma for query {q_name}...")
 
             df_clean = self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"].exclude_fk_and_id()
+            schema_cols = set(df_clean.columns)
             schema_info = self._collect_table_schema(df_clean)
             query_desc = self._build_query_description(sem_cq)
 
@@ -197,7 +198,28 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
             if cache_path.exists():
                 with open(cache_path, 'r') as f:
                     cached_results = json.load(f)
+                cached_ucq = cached_results.get("ucq_resp", {}).get("value", [])
+                cached_fields = set()
+                for group in cached_ucq:
+                    for pred in group:
+                        if not isinstance(pred, dict):
+                            continue
+                        field = pred.get("field")
+                        if isinstance(field, list):
+                            cached_fields.update(field)
+                        elif field is not None:
+                            cached_fields.add(field)
+                if not cached_fields.issubset(schema_cols):
+                    logger.warning(
+                        f"Cached UCQ for query {q_name} is incompatible with current schema. "
+                        f"Recomputing cache."
+                    )
+                    cache_path.unlink(missing_ok=True)
+                    cached_results = None
             else:
+                cached_results = None
+
+            if cached_results is None:
                 # ========== Step 1: Identify Query-Relevant Fields ==========
                 logger.info(f"Step 1: Identifying query-relevant fields for query {q_name}...")
                 identify_fields_prompt = PROMPTS["IDENTIFY_RELEVANT_FIELDS_PROMPT"].format(
@@ -256,6 +278,10 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
             new_ucq = self._expand_ucq([
                 [PredicateResponse(**pred) for pred in group] \
                     for group in cached_results["ucq_resp"]["value"]])
+            new_ucq = [
+                group for group in new_ucq
+                if all(pred.field in schema_cols for pred in group)
+            ]
             if not new_ucq:
                 logger.info(f"No UCQ predicates suggested for query {q_name}")
 
