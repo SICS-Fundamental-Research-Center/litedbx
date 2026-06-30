@@ -1,4 +1,5 @@
 from time import time
+import argparse
 import logging
 import sys
 from workloads import (
@@ -10,6 +11,8 @@ from workloads import (
 )
 from ldb_engine import LdbEngine
 import asyncio
+from exp.experiment_runner import run_config, export_results
+from pathlib import Path
     
 ENABLE_DEBUG=True
 
@@ -23,9 +26,21 @@ if __name__ == "__main__":
     )
     logger = logging.getLogger(__name__)
 
-    workload = "mmqa"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--exp-config", action="append", help="Experiment config under exp/")
+    args = parser.parse_args()
+
+    if args.exp_config:
+        for config_name in args.exp_config:
+            config_path = Path("exp") / config_name
+            results = asyncio.run(run_config(config_path))
+            out_path = export_results(config_path, results)
+            logger.info(f"Exported experiment results to {out_path}")
+        sys.exit(0)
+
+    workload = "movie"
     queries = [
-        "Q3a",
+        "Q1",
     ]
 
     workload_mapping = {
@@ -68,4 +83,3 @@ if __name__ == "__main__":
     end = time()
 
     logger.info(f"Total execution time: {end - start} seconds")
-
