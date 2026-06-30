@@ -120,3 +120,12 @@ class LdbEngine:
             self.workload._report_dynamic_results(results)
 
         self.workload._report_usage_statistics()
+
+        return {
+            "scenario": self.workload.scenario,
+            "queries": list(self.workload.queries.keys()),
+            "dynamic_setting": self.dynamic_setting,
+            "execution_trace": execution_trace,
+            "incremental_results": results,
+            "usage_statistics": self.workload.usage_statistics[0],
+        }
