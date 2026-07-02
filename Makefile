@@ -41,7 +41,7 @@ lint:
 	fi
 	uv run ruff format $(LINT_FILES)
 	uv run ruff check --fix $(LINT_FILES)
-	uv run pylint $(LINT_FILES)
+	PYTHONPATH=. uv run pylint $(LINT_FILES)
 
 clean_cache:
 	@if [ -z "$(DATASET)" ]; then \
