@@ -13,6 +13,6 @@ repos:
         types: [python]
       - id: pylint
         name: pylint
-        entry: uv run pylint
+        entry: bash -c 'PYTHONPATH=. uv run pylint "$@"' --
         language: system
         types: [python]
