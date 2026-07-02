@@ -15,5 +15,25 @@ dependencies = [
     "tqdm>=4.67.1",
 ]
 
+[tool.ruff]
+line-length = 80
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pylint.main]
+py-version = "3.12"
+
+[tool.pylint.format]
+max-line-length = 80
+
 [[tool.uv.index]]
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pylint>=4.0.6",
+    "ruff>=0.15.20",
+]
