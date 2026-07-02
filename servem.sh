@@ -7,11 +7,10 @@ set -euo pipefail
 # Supported commands:
 #   ./servem.sh                 # list models
 #   ./servem.sh list            # list models
-#   ./servem.sh probe [MODEL]   # inspect GPU availability
 #   ./servem.sh start MODEL     # stop prior session, probe GPUs, start in tmux
 #   ./servem.sh stop MODEL      # stop tmux session and release resources
-#   ./servem.sh restart MODEL   # stop then start
-#   ./servem.sh status [MODEL]   # show session status
+#   ./servem.sh status [MODEL]  # show session status
+#   ./servem.sh state MODEL KEY  # print a saved state value
 #
 # Backward compatibility:
 #   ./servem.sh <MODEL>         # same as start MODEL
@@ -83,13 +82,8 @@ trim() {
     echo "$s"
 }
 
-script_dir() {
-    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
-}
-
 HOST_STATE_DIR="${HOST_STATE_DIR:-/tmp/litedbx-model-hosting}"
-LANG_TMUX_PREFIX="${LANG_TMUX_PREFIX:-vllm}"
-VISION_TMUX_PREFIX="${VISION_TMUX_PREFIX:-vllmv}"
+TMUX_PREFIX="${TMUX_PREFIX:-vllm}"
 VLLM_VENV_PATH="${VLLM_VENV_PATH:-$HOME/venv/vllm}"
 GPU_POOL_OVERRIDE="${SERVEM_GPU_POOL:-auto}"
 
@@ -161,21 +155,7 @@ MODEL_MIN_FREE_MB[qwen3-vl-4b]=8000
 
 session_name() {
     local model_key=$1
-    echo "$(session_prefix_for_model "$model_key")-$model_key"
-}
-
-session_prefix_for_model() {
-    local model_key=$1
-    if is_vision_model "$model_key"; then
-        echo "$VISION_TMUX_PREFIX"
-    else
-        echo "$LANG_TMUX_PREFIX"
-    fi
-}
-
-is_vision_model() {
-    local model_key=$1
-    [[ "$model_key" == *"-vl-"* || "$model_key" == llava-* ]]
+    echo "$TMUX_PREFIX-$model_key"
 }
 
 state_file() {
@@ -230,24 +210,6 @@ kill_pid_tree() {
     done
 
     kill -s "$signal" "$root_pid" 2>/dev/null || true
-}
-
-peek_tmux_session() {
-    local model_key=$1
-    local session
-    session=$(session_name "$model_key")
-
-    if ! tmux has-session -t "$session" 2>/dev/null; then
-        print_warning "$model_key is not running in tmux session $session"
-        return 1
-    fi
-
-    echo "Session: $session"
-    echo "Current command: $(tmux display-message -p -t "$session" '#{pane_current_command}' 2>/dev/null || echo unknown)"
-    echo "Last pane output:"
-    echo "--------------------------------------------------------------"
-    tmux capture-pane -pt "$session" -S -40 2>/dev/null || true
-    echo "--------------------------------------------------------------"
 }
 
 probe_gpu_inventory() {
@@ -501,12 +463,10 @@ vLLM Model Hosting Scaffold
 Usage:
   $0                    # list models
   $0 list               # list models
-  $0 probe [MODEL]      # inspect GPU inventory
   $0 start MODEL        # stop previous session, probe GPUs, start in tmux
   $0 stop MODEL        # stop tmux session and clear state
-  $0 restart MODEL     # stop then start
   $0 status [MODEL]    # show session status
-  $0 peek MODEL        # show tmux pane output and current command
+  $0 state MODEL KEY   # print a saved state value
 
 Backwards compatible:
   $0 <MODEL>
@@ -518,16 +478,6 @@ main() {
     case "$cmd" in
         list)
             list_models
-            ;;
-        probe)
-            if [[ $# -ge 2 ]]; then
-                local model_key
-                model_key=$(echo "$2" | tr '[:upper:]' '[:lower:]')
-                [[ -v "MODEL_PATHS[$model_key]" ]] || { print_error "Unknown model: $2"; exit 1; }
-                print_gpu_probe "$model_key"
-            else
-                print_gpu_probe
-            fi
             ;;
         start)
             [[ $# -ge 2 ]] || { usage; exit 1; }
@@ -543,14 +493,6 @@ main() {
             [[ -v "MODEL_PATHS[$model_key]" ]] || { print_error "Unknown model: $2"; exit 1; }
             stop_model "$model_key"
             ;;
-        restart)
-            [[ $# -ge 2 ]] || { usage; exit 1; }
-            local model_key
-            model_key=$(echo "$2" | tr '[:upper:]' '[:lower:]')
-            [[ -v "MODEL_PATHS[$model_key]" ]] || { print_error "Unknown model: $2"; exit 1; }
-            stop_model "$model_key" || true
-            start_model "$model_key"
-            ;;
         status)
             if [[ $# -ge 2 ]]; then
                 local model_key
@@ -561,12 +503,12 @@ main() {
                 status_model
             fi
             ;;
-        peek)
-            [[ $# -ge 2 ]] || { usage; exit 1; }
+        state)
+            [[ -n "$3" ]] || { usage; exit 1; }
             local model_key
             model_key=$(echo "$2" | tr '[:upper:]' '[:lower:]')
             [[ -v "MODEL_PATHS[$model_key]" ]] || { print_error "Unknown model: $2"; exit 1; }
-            peek_tmux_session "$model_key"
+            load_state_value "$model_key" "$3"
             ;;
         help|-h|--help)
             usage
