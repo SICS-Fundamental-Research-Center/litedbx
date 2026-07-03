@@ -1,0 +1,8 @@
+tasks:
+  - name: default
+    models: [qwen3-30b-fp8]
+    release_model_after_task: false
+    objects:
+      - workload: movie
+        queries:
+          - [Q1]
