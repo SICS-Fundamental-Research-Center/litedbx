@@ -1,6 +1,8 @@
 """DataFrame-backed LiteDBX data operations."""
 
 import logging
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import yaml
@@ -29,28 +31,28 @@ class LdbData:
     ):
 
         if df is None:
-            assert data_dir is not None, (
-                "Data directory must be provided when DataFrame is not "
-                "directly passed."
-            )
-            self.df = pd.read_csv(f"{data_dir}/data_full.csv")
-            with open(f"{data_dir}/config.yaml", encoding="utf-8") as f:
-                self.config = yaml.safe_load(f)
-            self.base_features = self.config["base_features"]
-            self.id_features = self.config["id_features"]
-            self.foreign_keys = self.config["foreign_keys"]
+            if data_dir is None:
+                raise ValueError("data_dir is required when df is not provided")
+            self.df, self.config = self._load_from_dir(data_dir)
         else:
-            assert config is not None, (
-                "Config must be provided when DataFrame is directly passed."
-            )
-            self.df = df
+            if config is None:
+                raise ValueError("config is required when df is provided")
+            self.df = df.copy()
             self.config = config
-            self.base_features = self.config["base_features"]
-            self.id_features = self.config["id_features"]
-            self.foreign_keys = self.config["foreign_keys"]
 
-        # Preprocessing
+        self.base_features = self.config["base_features"]
+        self.id_features = self.config["id_features"]
+        self.foreign_keys = self.config["foreign_keys"]
         self.df = self.df.fillna("")
+
+    @staticmethod
+    def _load_from_dir(data_dir: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Load the full data frame and schema config from a data directory."""
+        data_path = Path(data_dir)
+        df = pd.read_csv(data_path / "data_full.csv")
+        with (data_path / "config.yaml").open(encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+        return df, config
 
     def exclude_fk_and_id(self) -> pd.DataFrame:
         """Return data without ID and foreign-key columns."""
@@ -61,14 +63,18 @@ class LdbData:
     ) -> pd.DataFrame:
         """Return base features plus selected active external features."""
         selected_features = self.base_features + active_external_features
-        ret = self.df[selected_features]
-        return ret
+        missing_features = [
+            feature for feature in selected_features if feature not in self.df
+        ]
+        if missing_features:
+            raise ValueError(f"Missing active features: {missing_features}")
+        return self.df[selected_features]
 
     def sigma_retrieve_ucq(self, sigma: list[list[Predicate]]) -> pd.Index:
         """Return rows satisfying a union of conjunctive predicates."""
         # If Sigma is empty or contains empty groups, return all data
         if not sigma or all(not group for group in sigma):
-            logger.info("UCQ is empty - returning all data")
+            logger.debug("UCQ is empty - returning all data")
             return self.df.index
 
         # Start with all rows as False (no match)
@@ -77,14 +83,13 @@ class LdbData:
         # Process each conjunctive group (OR logic between groups)
         for group_idx, conjunctive_group in enumerate(sigma):
             if not conjunctive_group:
-                # Empty group means no filter for this group
                 logger.warning(
-                    "Empty conjunctive group at index %s - skipping",
+                    "Empty conjunctive group at index %s matches all rows",
                     group_idx,
                 )
-                continue
+                return self.df.index
 
-            logger.info(
+            logger.debug(
                 "Processing conjunctive group %s: %s",
                 group_idx,
                 conjunctive_group,
@@ -133,10 +138,11 @@ class LdbData:
 
         # Add new features to the DataFrame with default values
         for spec in features_to_add:
-            assert spec.target_col not in self.df.columns, (
-                f"Target column '{spec.target_col}' already exists "
-                "in DataFrame. "
-            )
+            if spec.target_col in self.df.columns:
+                raise ValueError(
+                    f"Target column '{spec.target_col}' already exists "
+                    "in DataFrame."
+                )
             self.df[spec.target_col] = await self._sem_map(
                 spec=spec, llm_client=llm_client, is_remote=is_remote
             )
@@ -181,9 +187,8 @@ class LdbData:
             response_model = BooleanFeatureResponse
         else:
             raise ValueError(f"Unsupported feature type: {spec.feature_type}")
-        assert response_model is not None, (
-            f"Fail to set resp. model with feature type: {spec.feature_type}."
-        )
+        if spec.source_col not in self.df:
+            raise ValueError(f"Source column not found: {spec.source_col}")
 
         data_items = self.df[spec.source_col].tolist()
         data_items_wrapped = [
