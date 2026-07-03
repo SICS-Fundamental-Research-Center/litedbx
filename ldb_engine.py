@@ -1,131 +1,155 @@
+"""LiteDBX engine orchestration."""
+
 import logging
-from typing import Tuple
-from workloads.ldb_workload import LdbWorkload
 from time import time
+from typing import Any
+
+from workloads.ldb_workload import LdbWorkload
 
 logger = logging.getLogger(__name__)
 
 
 class LdbEngine:
+    """Coordinate partial and incremental evaluation for one workload."""
+
     def __init__(self, workload: LdbWorkload) -> None:
+        """Initialize the engine with a workload instance."""
         self.workload = workload
         self.dynamic_setting = workload.dynamic_setting
 
+    def _log_launch(self) -> None:
+        """Log the initial workload execution context."""
+        logger.info(
+            "Launching LiteDBX Engine for queries: %s in scenario: %s "
+            "with dynamic setting: %s.",
+            list(self.workload.queries.keys()),
+            self.workload.scenario,
+            self.dynamic_setting,
+        )
+        logger.info(
+            "Start PEval with %s%%-data partition.",
+            self.dynamic_setting[0] * 100,
+        )
 
+    @staticmethod
+    def _log_phase_durations(durations: dict[str, float]) -> None:
+        """Log measured phase durations."""
+        phases = [
+            "preprocessing",
+            "coreset_feature_space",
+            "coreset_sync",
+            "coreset_expand",
+            "coreset_total",
+            "query_trim",
+            "query_rewrite",
+            "query_total",
+        ]
+        for phase in phases:
+            if phase not in durations:
+                logger.warning("Duration for phase '%s' is missing.", phase)
+                continue
+            logger.debug(
+                "Duration for phase '%s': %.2f seconds",
+                phase,
+                durations[phase],
+            )
 
-    async def p_eval(self, debug=False):
-        logger.info((
-            "Launching LiteDBX Engine for queries: "
-            f"{list(self.workload.queries.keys())} "
-            f"in scenario: {self.workload.scenario} with "
-            f"dynamic setting: {self.dynamic_setting}."
-        ))
-        logger.info(f"Start PEval with {self.dynamic_setting[0] * 100}%-data partition.")
+    def _report_results(
+        self, execution_trace: dict[str, Any], results: list[Any]
+    ) -> None:
+        """Report evaluation, incremental, and usage results."""
+        # LdbWorkload exposes reporting hooks as protected methods today.
+        # Keep that coupling local until the workload API grows public wrappers.
+        # pylint: disable=protected-access
+        self.workload._report_evaluation_trace(execution_trace)
 
-        """
-        [Phase 1] Preprocessing.
-        """
-        preprocessing_start = time()
-        # (1.1) Initialize the data stream for the dynamic setting.
+        if results:
+            self.workload._report_dynamic_results(results)
+
+        self.workload._report_usage_statistics()
+
+    async def p_eval(
+        self, debug: bool = False
+    ) -> tuple[dict[str, Any], dict[str, float]]:
+        """Run partial evaluation and return the trace and durations."""
+        self._log_launch()
+        durations: dict[str, float] = {}
+
+        # Phase 1: preprocessing.
+        phase_start = time()
         self.workload.data_manager.init_data_stream()
-
-        # (1.2) Sigma retrieval.
         self.workload.data_manager.init_sigma_satisfied_data()
-
-        # (1.3) [Optional] Augment the Sigma with high-confidence 
-        #   LLM-suggested predicates to narrow down the data scale.
         self.workload.refine_sigma_satisfied_data()
-        preprocessing_end = time()
-        preprocessing_duration = preprocessing_end - preprocessing_start
+        durations["preprocessing"] = time() - phase_start
 
-        """
-        [Phase 2] Construct the feature space and the coreset.
-        """
-        coreset_start = time()
-        # (2.1) Construct the feature space.
+        # Phase 2: feature space and coreset construction.
+        phase_start = time()
+        step_start = phase_start
         await self.workload.construct_feature_space(debug=debug)
-        coreset_fs_end = time()
-        coreset_fs_duration = coreset_fs_end - coreset_start
+        step_end = time()
+        durations["coreset_feature_space"] = step_end - step_start
 
-        # (2.2) Populate the dataset with the selected features.
+        step_start = step_end
         await self.workload.sync_with_enriched_features(tag="init")
-        coreset_fs_sync_end = time()
-        coreset_fs_sync_duration = coreset_fs_sync_end - coreset_fs_end
+        step_end = time()
+        durations["coreset_sync"] = step_end - step_start
 
-        # (2.3) Expand the coreset.
+        step_start = step_end
         self.workload.expand_coresets(inc_round=0)
-        coreset_end = time()
-        coreset_expand_duration = coreset_end - coreset_fs_sync_end
-        coreset_duration = coreset_end - coreset_start
+        step_end = time()
+        durations["coreset_expand"] = step_end - step_start
+        durations["coreset_total"] = step_end - phase_start
 
-        """
-        [Phase 3] Schema selection and query rewriting.
-        """
-        qr_start = time()
-        # (3.1) Rank and trim the feature space according the feature selection budget.
+        # Phase 3: schema selection and query rewriting.
+        phase_start = time()
+        step_start = phase_start
         await self.workload.rank_and_trim_feature_space()
-        qr_trim_end = time()
-        qr_trim_duration = qr_trim_end - qr_start
+        step_end = time()
+        durations["query_trim"] = step_end - step_start
 
-        # (3.2) Select the best schema and translate the query.
-        execution_trace = {}
+        execution_trace: dict[str, Any] = {}
+        step_start = step_end
         if not self.workload.enable_rewrite:
             await self.workload.rewrite_and_execute_query_noRew()
         elif not self.workload.enable_enrich:
             self.workload.rewrite_and_execute_query_noEnr()
         else:
             _, execution_trace = self.workload.rewrite_and_execute_query()
-        qr_rewrite_end = time()
-        qr_rewrite_duration = qr_rewrite_end - qr_trim_end
-        qr_duration = qr_rewrite_end - qr_start
+        step_end = time()
+        durations["query_rewrite"] = step_end - step_start
+        durations["query_total"] = step_end - phase_start
 
-        logger.info(f"Preprocessing duration: {preprocessing_duration:.2f} seconds")
-        logger.info(f"Feature space construction duration: {coreset_fs_duration:.2f} seconds")
-        logger.info(f"Feature space sync duration: {coreset_fs_sync_duration:.2f} seconds")
-        logger.info(f"Coreset expansion duration: {coreset_expand_duration:.2f} seconds")
-        logger.info(f"Total coreset construction duration: {coreset_duration:.2f} seconds")
-        logger.info(f"Query rewriting trim duration: {qr_trim_duration:.2f} seconds")
-        logger.info(f"Query rewriting duration: {qr_rewrite_duration:.2f} seconds")
-        logger.info(f"Total query rewriting duration: {qr_duration:.2f} seconds")
+        self._log_phase_durations(durations)
+        return execution_trace, durations
 
-        return execution_trace
-
-
-
-    async def inc_eval(self) -> Tuple[bool, list]:
+    async def inc_eval(self) -> tuple[bool, list[Any]]:
+        """Run incremental evaluation when the dynamic setting requires it."""
         if len(self.dynamic_setting) <= 1:
-            logger.info("No incremental evaluation setting found. Skipping inc_eval.")
+            logger.info(
+                "No incremental evaluation setting found. Skipping inc_eval."
+            )
             return False, []
 
         rerun, result = await self.workload.incremental_processing()
 
-        if result == []:
+        if not result:
             logger.info("No incremental processing results to report.")
 
         return rerun, result
 
-
-
-    async def execute(self, debug=False):
-        execution_trace = await self.p_eval(debug=debug)
-        
+    async def execute(self, debug: bool = False) -> dict[str, Any]:
+        """Run the workload and return all engine result payloads."""
+        execution_trace, phase_durations = await self.p_eval(debug=debug)
         _, results = await self.inc_eval()
 
-        """
-        Report the execution results.
-        """
-        self.workload._report_evaluation_trace(execution_trace)
-        
-        if len(results) > 0:
-            self.workload._report_dynamic_results(results)
-
-        self.workload._report_usage_statistics()
+        self._report_results(execution_trace, results)
 
         return {
             "scenario": self.workload.scenario,
             "queries": list(self.workload.queries.keys()),
             "dynamic_setting": self.dynamic_setting,
             "execution_trace": execution_trace,
+            "phase_durations": phase_durations,
             "incremental_results": results,
             "usage_statistics": self.workload.usage_statistics[0],
         }
