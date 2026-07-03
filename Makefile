@@ -1,4 +1,4 @@
-.PHONY: clean clean_cache help lint
+.PHONY: clean clean_cache code-stat help lint
 
 # Default values (can be overridden by CLI arguments)
 DYNAMIC_SETTING ?= 0.6_0.8_1.0
@@ -11,6 +11,7 @@ help:
 	@echo "  make lint LINT_FILES=path/to/file.py"
 	@echo "  make lint-fix LINT_FILES=path/to/file.py"
 	@echo "  make clean_cache DATASET=movie DYNAMIC_SETTING=0.6_0.8_1.0 QUERY_ID=Q1 DRY_RUN=false"
+	@echo "  make code-stat"
 	@echo ""
 	@echo "Linting:"
 	@echo "  LINT_FILES       - Required Python file list for Ruff and Pylint"
@@ -24,6 +25,9 @@ help:
 	@echo "  QUERY_ID         - Query ID to delete (e.g., Q1, Q2, Q3a)"
 	@echo "  DRY_RUN          - Show command only (true) or execute (false), default: true"
 	@echo ""
+	@echo "Code statistics:"
+	@echo "  code-stat        - Count source lines with ../cloc/cloc, excluding third-party files/ and CSV/JSON data"
+	@echo ""
 	@echo "Examples:"
 	@echo "  make lint LINT_FILES=main.py"
 	@echo "  make lint-fix LINT_FILES=main.py"
@@ -33,6 +37,9 @@ help:
 	@echo "  make clean_cache DATASET=movie QUERY_ID=Q1 DRY_RUN=false"
 	@echo "  make clean_cache DATASET=medical QUERY_ID=Q3 DRY_RUN=false"
 	@echo "  make clean_cache DATASET=mmqa QUERY_ID=Q6a DRY_RUN=false"
+
+code-stat:
+	../cloc/cloc . --exclude-dir=files --exclude-ext=csv,json,md
 
 lint:
 	@if [ -z "$(LINT_FILES)" ]; then \
