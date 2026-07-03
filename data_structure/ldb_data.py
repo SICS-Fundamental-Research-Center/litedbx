@@ -143,35 +143,11 @@ class LdbData:
                     f"Target column '{spec.target_col}' already exists "
                     "in DataFrame."
                 )
-            self.df[spec.target_col] = await self._sem_map(
+            self.df[spec.target_col] = await self.sem_map(
                 spec=spec, llm_client=llm_client, is_remote=is_remote
             )
 
-    def _cq_map(self, predicate: Predicate) -> pd.Series:
-        """Evaluate one conjunctive-query predicate over the DataFrame."""
-        # Check whether field is within the DataFrame columns
-        if predicate.field not in self.df.columns:
-            raise ValueError(
-                f"Field '{predicate.field}' not found in DataFrame columns. "
-                f"Available columns: {list(self.df.columns)}"
-            )
-
-        # Apply the predicate to generate the mask
-        if predicate.op == ">":
-            return self.df[predicate.field] > predicate.value
-        if predicate.op == ">=":
-            return self.df[predicate.field] >= predicate.value
-        if predicate.op == "<":
-            return self.df[predicate.field] < predicate.value
-        if predicate.op == "<=":
-            return self.df[predicate.field] <= predicate.value
-        if predicate.op == "==":
-            return self.df[predicate.field] == predicate.value
-        if predicate.op == "!=":
-            return self.df[predicate.field] != predicate.value
-        raise ValueError(f"Unsupported operator: {predicate.op}")
-
-    async def _sem_map(
+    async def sem_map(
         self,
         spec: PopulationSpec,
         llm_client: LdbLLMClient,
@@ -205,3 +181,27 @@ class LdbData:
 
         values = [r.value for r in resp]  # type: ignore[attr-defined]
         return pd.Series(values, index=self.df.index)
+
+    def _cq_map(self, predicate: Predicate) -> pd.Series:
+        """Evaluate one conjunctive-query predicate over the DataFrame."""
+        # Check whether field is within the DataFrame columns
+        if predicate.field not in self.df.columns:
+            raise ValueError(
+                f"Field '{predicate.field}' not found in DataFrame columns. "
+                f"Available columns: {list(self.df.columns)}"
+            )
+
+        # Apply the predicate to generate the mask
+        if predicate.op == ">":
+            return self.df[predicate.field] > predicate.value
+        if predicate.op == ">=":
+            return self.df[predicate.field] >= predicate.value
+        if predicate.op == "<":
+            return self.df[predicate.field] < predicate.value
+        if predicate.op == "<=":
+            return self.df[predicate.field] <= predicate.value
+        if predicate.op == "==":
+            return self.df[predicate.field] == predicate.value
+        if predicate.op == "!=":
+            return self.df[predicate.field] != predicate.value
+        raise ValueError(f"Unsupported operator: {predicate.op}")
