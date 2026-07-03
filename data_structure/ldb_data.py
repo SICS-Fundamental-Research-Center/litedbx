@@ -1,37 +1,48 @@
-import pandas as pd
+"""DataFrame-backed LiteDBX data operations."""
+
 import logging
+
+import pandas as pd
 import yaml
-from typing import Optional, Tuple
+
 from llm import LdbLLMClient
-from .sem_query import Predicate
+
 from .llm_resp_templates import (
-    PopulationSpec, 
-    IntFeatureResponse, 
-    FloatFeatureResponse, 
-    BooleanFeatureResponse
+    BooleanFeatureResponse,
+    FloatFeatureResponse,
+    IntFeatureResponse,
+    PopulationSpec,
 )
+from .sem_query import Predicate
 
 logger = logging.getLogger(__name__)
 
+
 class LdbData:
+    """Wrap a DataFrame with LiteDBX schema and feature operations."""
+
     def __init__(
-            self, 
-            data_dir: Optional[str] = None, 
-            df: Optional[pd.DataFrame] = None, 
-            config: Optional[dict] = None):
+        self,
+        data_dir: str | None = None,
+        df: pd.DataFrame | None = None,
+        config: dict | None = None,
+    ):
 
         if df is None:
-            assert data_dir is not None, \
-                "Data directory must be provided when DataFrame is not directly passed."
+            assert data_dir is not None, (
+                "Data directory must be provided when DataFrame is not "
+                "directly passed."
+            )
             self.df = pd.read_csv(f"{data_dir}/data_full.csv")
-            with open(f"{data_dir}/config.yaml", "r") as f:
+            with open(f"{data_dir}/config.yaml", encoding="utf-8") as f:
                 self.config = yaml.safe_load(f)
             self.base_features = self.config["base_features"]
             self.id_features = self.config["id_features"]
             self.foreign_keys = self.config["foreign_keys"]
         else:
-            assert config is not None, \
+            assert config is not None, (
                 "Config must be provided when DataFrame is directly passed."
+            )
             self.df = df
             self.config = config
             self.base_features = self.config["base_features"]
@@ -41,21 +52,22 @@ class LdbData:
         # Preprocessing
         self.df = self.df.fillna("")
 
-
-    def exclude_fk_and_id(self):
+    def exclude_fk_and_id(self) -> pd.DataFrame:
+        """Return data without ID and foreign-key columns."""
         return self.df.drop(columns=self.id_features + self.foreign_keys)
 
-
-    def select_active_features(self, active_external_features: list[str])  -> pd.DataFrame:
+    def select_active_features(
+        self, active_external_features: list[str]
+    ) -> pd.DataFrame:
+        """Return base features plus selected active external features."""
         selected_features = self.base_features + active_external_features
         ret = self.df[selected_features]
         return ret
 
-
-    def sigma_retrieve_ucq(
-            self, Sigma: list[list[Predicate]]) -> pd.Index:
+    def sigma_retrieve_ucq(self, sigma: list[list[Predicate]]) -> pd.Index:
+        """Return rows satisfying a union of conjunctive predicates."""
         # If Sigma is empty or contains empty groups, return all data
-        if not Sigma or all(not group for group in Sigma):
+        if not sigma or all(not group for group in sigma):
             logger.info("UCQ is empty - returning all data")
             return self.df.index
 
@@ -63,15 +75,23 @@ class LdbData:
         mask = pd.Series([False] * len(self.df), index=self.df.index)
 
         # Process each conjunctive group (OR logic between groups)
-        for group_idx, conjunctive_group in enumerate(Sigma):
+        for group_idx, conjunctive_group in enumerate(sigma):
             if not conjunctive_group:
                 # Empty group means no filter for this group
-                logger.warning(f"Empty conjunctive group at index {group_idx} - skipping")
+                logger.warning(
+                    "Empty conjunctive group at index %s - skipping",
+                    group_idx,
+                )
                 continue
 
-            logger.info(f"Processing conjunctive group {group_idx}: {conjunctive_group}")
+            logger.info(
+                "Processing conjunctive group %s: %s",
+                group_idx,
+                conjunctive_group,
+            )
 
-            # Start with all rows as True for this group (AND logic within group)
+            # Start with all rows as True for this group.
+            # Predicates within the group use AND logic.
             group_mask = pd.Series([True] * len(self.df), index=self.df.index)
 
             # Apply all predicates in this conjunctive group with AND logic
@@ -83,34 +103,46 @@ class LdbData:
 
         return self.df[mask].index
 
-
     async def sync_with_enriched_features(
-            self, 
-            enriched_features: list[PopulationSpec], 
-            llm_client: LdbLLMClient,
-            is_remote: bool = False) -> None:
-        current_external_features = set(self.df.columns) - set(self.base_features) \
-            - set(self.id_features) - set(self.foreign_keys)
-        
-        features_to_remove = [col for col in current_external_features
-                              if col not in {spec.target_col for spec in enriched_features}]
-        features_to_add = [spec for spec in enriched_features 
-                           if spec.target_col not in current_external_features]
-        
+        self,
+        enriched_features: list[PopulationSpec],
+        llm_client: LdbLLMClient,
+        is_remote: bool = False,
+    ) -> None:
+        """Synchronize DataFrame columns with enriched feature specs."""
+        current_external_features = (
+            set(self.df.columns)
+            - set(self.base_features)
+            - set(self.id_features)
+            - set(self.foreign_keys)
+        )
+
+        features_to_remove = [
+            col
+            for col in current_external_features
+            if col not in {spec.target_col for spec in enriched_features}
+        ]
+        features_to_add = [
+            spec
+            for spec in enriched_features
+            if spec.target_col not in current_external_features
+        ]
+
         # Remove features that are no longer in the enriched feature space
         self.df.drop(columns=features_to_remove, inplace=True)
 
         # Add new features to the DataFrame with default values
         for spec in features_to_add:
             assert spec.target_col not in self.df.columns, (
-                f"Target column '{spec.target_col}' already exists in DataFrame. "
+                f"Target column '{spec.target_col}' already exists "
+                "in DataFrame. "
             )
             self.df[spec.target_col] = await self._sem_map(
                 spec=spec, llm_client=llm_client, is_remote=is_remote
             )
 
-
     def _cq_map(self, predicate: Predicate) -> pd.Series:
+        """Evaluate one conjunctive-query predicate over the DataFrame."""
         # Check whether field is within the DataFrame columns
         if predicate.field not in self.df.columns:
             raise ValueError(
@@ -121,23 +153,25 @@ class LdbData:
         # Apply the predicate to generate the mask
         if predicate.op == ">":
             return self.df[predicate.field] > predicate.value
-        elif predicate.op == ">=":
+        if predicate.op == ">=":
             return self.df[predicate.field] >= predicate.value
-        elif predicate.op == "<":
+        if predicate.op == "<":
             return self.df[predicate.field] < predicate.value
-        elif predicate.op == "<=":
+        if predicate.op == "<=":
             return self.df[predicate.field] <= predicate.value
-        elif predicate.op == "==":
+        if predicate.op == "==":
             return self.df[predicate.field] == predicate.value
-        elif predicate.op == "!=":
+        if predicate.op == "!=":
             return self.df[predicate.field] != predicate.value
-        else:
-            raise ValueError(f"Unsupported operator: {predicate.op}")
-
+        raise ValueError(f"Unsupported operator: {predicate.op}")
 
     async def _sem_map(
-            self, spec: PopulationSpec, llm_client: LdbLLMClient, 
-            is_remote: bool=True) -> pd.Series:
+        self,
+        spec: PopulationSpec,
+        llm_client: LdbLLMClient,
+        is_remote: bool = True,
+    ) -> pd.Series:
+        """Map one semantic feature spec into a pandas Series."""
         response_model = None
         if spec.feature_type == "int":
             response_model = IntFeatureResponse
@@ -147,11 +181,14 @@ class LdbData:
             response_model = BooleanFeatureResponse
         else:
             raise ValueError(f"Unsupported feature type: {spec.feature_type}")
-        assert response_model is not None, \
+        assert response_model is not None, (
             f"Fail to set resp. model with feature type: {spec.feature_type}."
+        )
 
         data_items = self.df[spec.source_col].tolist()
-        data_items_wrapped = [[item] for item in data_items]  # Wrap each item in a list
+        data_items_wrapped = [
+            [item] for item in data_items
+        ]  # Wrap each item in a list
 
         resp = await llm_client.invoke_parallel(
             is_remote=is_remote,
@@ -161,5 +198,5 @@ class LdbData:
             response_model=response_model,
         )
 
-        return pd.Series([r.value for r in resp], index=self.df.index)  # type: ignore
-
+        values = [r.value for r in resp]  # type: ignore[attr-defined]
+        return pd.Series(values, index=self.df.index)
