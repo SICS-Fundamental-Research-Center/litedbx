@@ -1,85 +1,104 @@
-from time import time
+"""Command-line entrance for LiteDBX experiment configs."""
+
 import argparse
+import asyncio
 import logging
 import sys
-from workloads import (
-    medical,
-    movie,
-    ecomm,
-    mmqa,
-    animals,
-)
-from ldb_engine import LdbEngine
-import asyncio
-from exp.experiment_runner import run_config, export_results
+from collections.abc import Sequence
 from pathlib import Path
-    
-ENABLE_DEBUG=True
+from time import time
 
-if __name__ == "__main__":
-    # Configure logging
+from exp.experiment_runner import (
+    export_results,
+    run_config,
+)
+
+ROOT_DIR = Path(__file__).parent
+EXP_DIR = ROOT_DIR / "exp"
+DEFAULT_CONFIG = "default.yaml"
+LOG_FORMAT = (
+    "%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
+)
+
+
+def configure_logging() -> logging.Logger:
+    """Configure process logging and return the module logger."""
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[logging.StreamHandler(sys.stdout)]
+        format=LOG_FORMAT,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
-    logger = logging.getLogger(__name__)
+    return logging.getLogger(__name__)
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--exp-config", action="append", help="Experiment config under exp/")
-    args = parser.parse_args()
 
-    if args.exp_config:
-        for config_name in args.exp_config:
-            config_path = Path("exp") / config_name
-            results = asyncio.run(run_config(config_path))
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for config-based execution."""
+    parser = argparse.ArgumentParser(description="LiteDBX entrance")
+    parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable debug execution for tasks that do not set debug.",
+    )
+    parser.add_argument(
+        "--config",
+        action="append",
+        help="Experiment config path or file under exp/.",
+    )
+    parser.add_argument(
+        "--ls-configs",
+        action="store_true",
+        help="List experiment configs under exp/.",
+    )
+    return parser
+
+
+def has_collectable_rows(results: Sequence[object]) -> bool:
+    """Return whether any task result has rows to export."""
+    return any(getattr(result, "rows", None) for result in results)
+
+
+async def run_configs(
+    config_names: list[str], debug: bool, logger: logging.Logger
+) -> None:
+    """Run experiment configs and export results when rows are collected."""
+    for config_name in config_names:
+        config_path = Path(config_name)
+        if not config_path.exists():
+            config_path = EXP_DIR / "configs" / config_path
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config not found: {config_name}")
+
+        results = await run_config(config_path, debug=debug)
+
+        if has_collectable_rows(results):
             out_path = export_results(config_path, results)
-            logger.info(f"Exported experiment results to {out_path}")
-        sys.exit(0)
+            logger.info("Exported experiment results to %s", out_path)
+        else:
+            logger.info("No experiment rows collected for %s", config_path)
 
-    workload = "movie"
-    queries = [
-        "Q1",
-    ]
 
-    workload_mapping = {
-        "medical": medical.get_workload,
-        "movie": movie.get_workload,
-        "ecomm": ecomm.get_workload,
-        "mmqa": mmqa.get_workload,
-        "animals": animals.get_workload,
-    }
+def main() -> None:
+    """Parse arguments and execute the requested config path."""
+    logger = configure_logging()
+    args = build_parser().parse_args()
 
-    workload_func = workload_mapping.get(workload)
-    assert workload_func is not None, f"Invalid workload: {workload}"
-    workload = workload_func(queries=queries)
+    if args.ls_configs:
+        config_paths = sorted(p for p in (EXP_DIR / "configs").glob("*.yaml"))
 
-    """
-    Inject experiment settings here. 
-    For example, to set b_se to 6, you can do the following:
+        for path in config_paths:
+            print(path.name)
+        return
 
-    ```
-    exp_group = "vary_se"
-    exp_patch = {
-        "b_se": 5,
-    }
-    workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
-    ```
-    """
-
-    # exp_group = "vary_se"
-    # exp_patch = {
-    #     "b_se": 7,
-    # }
-    # workload.inject_exp_setting(exp_group=exp_group, exp_patch=exp_patch)
-
-    ldb_engine = LdbEngine(workload)
+    config_names = args.config or [DEFAULT_CONFIG]
 
     start = time()
-
-    asyncio.run(ldb_engine.execute(debug=ENABLE_DEBUG))
-
+    asyncio.run(run_configs(config_names, args.debug, logger))
     end = time()
 
-    logger.info(f"Total execution time: {end - start} seconds")
+    logger.info("Total execution time: %s seconds", end - start)
+
+
+if __name__ == "__main__":
+    main()

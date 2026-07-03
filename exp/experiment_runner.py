@@ -1,71 +1,57 @@
-from __future__ import annotations
+"""Run LiteDBX experiment configurations and export collected metrics."""
 
-import argparse
-import asyncio
 import csv
 import itertools
 import logging
-import os
-import subprocess
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from exp.model_hosting import ensure_models, release_models
 from ldb_engine import LdbEngine
-from workloads import medical, movie, ecomm, mmqa, animals
+from workloads.registry import build_workload
 
 logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-EXP_DIR = ROOT_DIR / "exp"
-RESULTS_DIR = EXP_DIR / "results"
-SERVEM = ROOT_DIR / "servem.sh"
-MODEL_STATE_DIR = Path(os.environ.get("HOST_STATE_DIR", "/tmp/litedbx-model-hosting"))
-DEFAULT_MODEL_PORTS = {
-    "llama3-8b": 8000,
-    "qwen3-4b": 8001,
-    "qwen3-vl-8b": 8002,
-    "llava-v1.6-7b": 8003,
-    "qwen3-30b-fp8": 8004,
-    "qwen3-vl-30b": 8005,
-    "qwen3-vl-2b": 8006,
-    "qwen3-vl-4b": 8007,
-}
-
-WORKLOAD_MAPPING = {
-    "medical": medical.get_workload,
-    "movie": movie.get_workload,
-    "ecomm": ecomm.get_workload,
-    "mmqa": mmqa.get_workload,
-    "animals": animals.get_workload,
-}
+RESULTS_DIR = ROOT_DIR / "exp" / "results"
 
 
 @dataclass
 class TaskResult:
+    """Result metadata and collected rows for one experiment task."""
+
     config_name: str
     task_name: str
-    status: str
     started_at: str
     ended_at: str
-    task_config: dict[str, Any]
     rows: list[dict[str, Any]] | None = None
-    error: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskRunContext:
+    """Shared state for one task execution."""
+
+    config_name: str
+    task: dict[str, Any]
+    models: list[str]
+    debug: bool
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML mapping from disk."""
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data or {}
 
 
-def save_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+def save_csv(
+    path: Path, rows: list[dict[str, Any]], fieldnames: list[str]
+) -> None:
+    """Write rows to a CSV file with the given field order."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -73,299 +59,201 @@ def save_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> N
         writer.writerows(rows)
 
 
-def start_model_session(model_key: str) -> None:
-    subprocess.run(["bash", str(SERVEM), "start", model_key], check=True, cwd=ROOT_DIR)
+def collect_execution_trace_info(
+    query_name: str,
+    trace_spec: Any,
+    execution_trace: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Collect rows from engine_result.execution_trace only."""
+    if trace_spec is None:
+        return []
 
+    iterations = trace_spec.get("iterations", "ALL")
+    features = trace_spec.get("features", [])
+    if iterations == "ALL":
+        iterations = sorted(execution_trace.keys())
+    if features == []:
+        return []
 
-def stop_model_session(model_key: str) -> None:
-    subprocess.run(["bash", str(SERVEM), "stop", model_key], check=True, cwd=ROOT_DIR)
+    execution_trace_info = []
 
-
-def session_name(model_key: str) -> str:
-    if model_key.startswith("llava") or "-vl-" in model_key:
-        return f"vllmv-{model_key}"
-    return f"vllm-{model_key}"
-
-
-def state_file(model_key: str) -> Path:
-    return MODEL_STATE_DIR / f"{model_key}.env"
-
-
-def read_state_env(model_key: str) -> dict[str, str]:
-    path = state_file(model_key)
-    if not path.exists():
-        return {}
-    state: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        state[key.strip()] = value.strip()
-    return state
-
-
-def model_port(model_key: str) -> int | None:
-    state = read_state_env(model_key)
-    if "MODEL_PORT" in state:
-        try:
-            return int(state["MODEL_PORT"])
-        except ValueError:
-            return None
-    return DEFAULT_MODEL_PORTS.get(model_key)
-
-
-def model_ready(model_key: str) -> bool:
-    port = model_port(model_key)
-    if port is None:
-        return False
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=2) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
-
-
-def check_model_running(model_key: str) -> bool:
-    proc = subprocess.run(
-        ["tmux", "has-session", "-t", session_name(model_key)],
-        cwd=ROOT_DIR,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return proc.returncode == 0
-
-
-async def wait_for_model_ready(model_key: str, timeout_s: int = 600) -> None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if model_ready(model_key):
-            logger.info("Model ready: %s", model_key)
-            return
-        await asyncio.sleep(2)
-    raise TimeoutError(f"Timed out waiting for model readiness: {model_key}")
-
-
-async def ensure_models(models: list[str]) -> None:
-    for model_key in models:
-        if check_model_running(model_key):
-            logger.info("Model already running: %s", model_key)
-        else:
-            logger.info("Starting model: %s", model_key)
-            start_model_session(model_key)
-        await wait_for_model_ready(model_key)
-
-
-def release_models(models: list[str], release_after: bool) -> None:
-    if not release_after:
-        return
-    for model_key in models:
-        logger.info("Releasing model: %s", model_key)
-        stop_model_session(model_key)
-
-
-def build_workload(workload_name: str, queries: list[str], config_override: dict[str, Any]):
-    workload_func = WORKLOAD_MAPPING.get(workload_name)
-    if workload_func is None:
-        raise ValueError(f"Invalid workload: {workload_name}")
-
-    workload = workload_func(queries=queries)
-    if config_override:
-        workload.inject_exp_setting(
-            exp_group=config_override.get("exp_group", "experiment"),
-            exp_patch={k: v for k, v in config_override.items() if k != "exp_group"},
+    for iter_num in iterations:
+        assert iter_num in execution_trace, (
+            f"Missing execution trace iteration: {iter_num}"
         )
-    return workload
+        assert query_name in execution_trace[iter_num], (
+            f"Missing query {query_name} in execution "
+            f"trace iteration: {iter_num}"
+        )
+
+        execution_trace_info.append(
+            {
+                "iter_num": iter_num,
+                **{
+                    feature: execution_trace[iter_num]
+                    .get(query_name)
+                    .get(feature)
+                    for feature in features
+                },
+            }
+        )
+
+    return execution_trace_info
 
 
+def parse_collect_spec(
+    workload: str,
+    query_group: list[str],
+    collect_specs: dict[str, Any],
+    engine_result: dict[str, Any],
+    override_map: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Expand structured collect config into result rows."""
+    if not collect_specs:
+        return []
 
-def expand_value(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    return [value]
+    collected_info = []
 
+    # Collect static fields from the config and overrides.
+    static_info = {
+        "workload": workload,
+        **{k: str(v) for k, v in override_map.items()},
+    }
 
-def iter_selected_iterations(execution_trace: dict[str, Any], selector: str) -> list[tuple[int, Any]]:
-    items = sorted(execution_trace.items(), key=lambda kv: int(kv[0]))
-    if selector == "*":
-        return [(int(k), v) for k, v in items]
-    selected = []
-    for token in selector.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        idx = int(token)
-        if str(idx) in execution_trace:
-            selected.append((idx, execution_trace[str(idx)]))
-    return selected
+    # Collect desired fields from the engine_result.
+    for query in query_group:
+        # Collect fields from execution trace.
+        trace_spec = collect_specs.get("execution_trace", None)
+        trace_info_list = collect_execution_trace_info(
+            query_name=query,
+            trace_spec=trace_spec,
+            execution_trace=engine_result.get("execution_trace", {}),
+        )
 
+        collected_info.extend(
+            [
+                {
+                    **static_info,
+                    **trace_info,
+                }
+                for trace_info in trace_info_list
+            ]
+        )
 
-def collect_path_values(
-    source: dict[str, Any],
-    parts: list[str],
-) -> list[tuple[dict[str, Any], Any]]:
-    states: list[tuple[dict[str, Any], Any]] = [({}, source)]
-    for part in parts:
-        next_states: list[tuple[dict[str, Any], Any]] = []
-        for metadata, value in states:
-            if part == "*":
-                if not isinstance(value, dict):
-                    continue
-                for child_key, child_value in sorted(value.items(), key=lambda kv: int(kv[0])):
-                    child_metadata = dict(metadata)
-                    if "iter_num" not in child_metadata:
-                        child_metadata["iter_num"] = int(child_key)
-                    else:
-                        child_metadata[part] = child_key
-                    next_states.append((child_metadata, child_value))
-                continue
-
-            if isinstance(value, dict) and part in value:
-                next_states.append((metadata, value[part]))
-        states = next_states
-    return states
+    return collected_info
 
 
-def parse_collect_spec(collect: list[str], engine_result: dict[str, Any], base_row: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = [base_row]
-    for spec in collect:
-        parts = spec.split(".")
-        if not parts or any(part == "" for part in parts):
-            raise ValueError(f"Unsupported collect spec: {spec}")
-
-        output_name = parts[-1]
-        next_rows: list[dict[str, Any]] = []
-        for row in rows:
-            for metadata, value in collect_path_values(engine_result, parts):
-                if isinstance(value, dict) and row.get("query") in value:
-                    value = value[row["query"]]
-                new_row = dict(row)
-                new_row.update(metadata)
-                new_row[output_name] = value
-                next_rows.append(new_row)
-        rows = next_rows
-    return rows
+def iter_override_maps(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expand task override settings into concrete override maps."""
+    override_specs = task.get("config_override", {})
+    override_keys = list(override_specs.keys())
+    override_values = [override_specs[k] for k in override_keys]
+    if not override_values:
+        return [{}]
+    return [
+        dict(zip(override_keys, override_combo, strict=True))
+        for override_combo in itertools.product(*override_values)
+    ]
 
 
-async def run_task(config_name: str, task: dict[str, Any]) -> TaskResult:
-    started_at = datetime.now(timezone.utc).isoformat()
+async def run_query_group(
+    context: TaskRunContext,
+    workload_name: str,
+    query_group: list[str],
+    override_map: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Run one workload query group and return collected rows."""
+    exp_group = context.task.get("exp_group", "default")
+    workload = build_workload(
+        workload_name,
+        query_group,
+        override_map,
+        exp_group=exp_group,
+    )
+    engine = LdbEngine(workload)
+    engine_result = await engine.execute(
+        debug=bool(context.task.get("debug", context.debug))
+    )
+
+    collect_specs = context.task.get("collect", {})
+    if not collect_specs:
+        return []
+
+    return parse_collect_spec(
+        workload=workload_name,
+        query_group=query_group,
+        collect_specs=collect_specs,
+        engine_result=engine_result,
+        override_map=override_map,
+    )
+
+
+async def run_task(context: TaskRunContext) -> TaskResult:
+    """Run one expanded experiment task."""
+    started_at = datetime.now(UTC).isoformat()
     rows: list[dict[str, Any]] = []
+
     try:
-        models = task.get("models", [])
-        await ensure_models(models)
-
-        workload_entries = task.get("objects", [])
-        override_specs = task.get("config_override", {})
-        override_keys = list(override_specs.keys())
-        override_values = [expand_value(override_specs[k]) for k in override_keys]
-        override_combinations = list(itertools.product(*override_values)) if override_values else [()]
-
-        for obj in workload_entries:
+        await ensure_models(context.models)
+        for obj in context.task.get("objects", []):
             workload_name = obj["workload"]
-            query_groups = obj["queries"]
-            for query_group in query_groups:
-                for override_combo in override_combinations:
-                    override_map = dict(zip(override_keys, override_combo))
-                    override_map["exp_group"] = task.get("exp_group", "experiment")
-
-                    workload = build_workload(workload_name, query_group, override_map)
-                    engine = LdbEngine(workload)
-                    engine_result = await engine.execute(debug=bool(task.get("debug", False)))
-
-                    base_row = {
-                        "config": config_name,
-                        "task": task.get("name", config_name),
-                        "workload": workload_name,
-                        "query": ",".join(query_group),
-                        "model": ",".join(models),
-                        **override_map,
-                    }
-                    rows.extend(parse_collect_spec(task.get("collect", []), engine_result, base_row))
-
-        status = "ok"
-        error = None
-    except Exception as exc:  # pragma: no cover
-        status = "error"
-        error = repr(exc)
-        logger.exception("Task failed: %s", task.get("name", "<unnamed>"))
+            for query_group in obj["queries"]:
+                for override_map in iter_override_maps(context.task):
+                    rows.extend(
+                        await run_query_group(
+                            context,
+                            workload_name,
+                            query_group,
+                            override_map,
+                        )
+                    )
     finally:
-        release_models(task.get("models", []), task.get("release_model_after_task", False))
+        release_models(
+            context.task.get("models", []),
+            context.task.get("release_model_after_task", False),
+        )
 
-    ended_at = datetime.now(timezone.utc).isoformat()
+    ended_at = datetime.now(UTC).isoformat()
     return TaskResult(
-        config_name=config_name,
-        task_name=task.get("name", config_name),
-        status=status,
+        config_name=context.config_name,
+        task_name=context.task.get("name", context.config_name),
         started_at=started_at,
         ended_at=ended_at,
-        task_config=task,
         rows=rows if rows else None,
-        error=error,
     )
 
 
-async def run_config(config_path: Path) -> list[TaskResult]:
+async def run_config(
+    config_path: Path, debug: bool = False
+) -> list[TaskResult]:
+    """Run all tasks declared in one experiment config."""
     config = load_yaml(config_path)
     tasks = config.get("tasks", [])
     results: list[TaskResult] = []
     for task in tasks:
-        results.append(await run_task(config_path.stem, task))
+        task_context = TaskRunContext(
+            config_name=config_path.stem,
+            task=task,
+            models=task.get("models", []),
+            debug=debug,
+        )
+        results.append(await run_task(task_context))
     return results
 
 
-def list_configs() -> list[Path]:
-    return sorted(p for p in EXP_DIR.glob("*.yaml") if p.name != "config.yaml")
-
-
 def export_results(config_path: Path, results: list[TaskResult]) -> Path:
+    """Export collected task results to CSV."""
     rows: list[dict[str, Any]] = []
     for result in results:
         if result.rows:
             rows.extend(result.rows)
 
+    fieldnames: list[str] = []
+    for row in rows:
+        for field in row:
+            if field not in fieldnames:
+                fieldnames.append(field)
+
     out_path = RESULTS_DIR / f"{config_path.stem}.csv"
-    fieldnames = ["workload", "query", "model", "b_se", "iter_num", "memory_cost"]
-    rows = [
-        {
-            "workload": row.get("workload"),
-            "query": row.get("query"),
-            "model": row.get("model"),
-            "b_se": row.get("b_se"),
-            "iter_num": row.get("iter_num"),
-            "memory_cost": row.get("memory_cost"),
-        }
-        for row in rows
-        if "workload" in row and "query" in row and "model" in row
-    ]
     save_csv(out_path, rows, fieldnames)
     return out_path
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="LiteDBX experiment platform")
-    parser.add_argument("--config", action="append", help="Experiment config file under exp/")
-    parser.add_argument("--list", action="store_true", help="List available experiment configs")
-    args = parser.parse_args()
-
-    if args.list:
-        for path in list_configs():
-            print(path.name)
-        return
-
-    config_names = args.config or [p.name for p in list_configs()]
-    if not config_names:
-        raise SystemExit("No experiment configs found under exp/")
-
-    for config_name in config_names:
-        config_path = Path(config_name)
-        if not config_path.exists():
-            config_path = EXP_DIR / config_name
-        if not config_path.exists():
-            raise SystemExit(f"Config not found: {config_path}")
-        results = asyncio.run(run_config(config_path))
-        out_path = export_results(config_path, results)
-        print(out_path)
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    main()
