@@ -59,6 +59,53 @@ def save_csv(
         writer.writerows(rows)
 
 
+def selected_execution_trace_iterations(
+    trace_spec: dict[str, Any], execution_trace: dict[str, Any]
+) -> list[Any]:
+    """Return execution trace iteration keys selected by the collect spec."""
+    iterations = trace_spec.get("iterations", "ALL")
+    if iterations == "ALL":
+        return sorted(execution_trace.keys())
+    if isinstance(iterations, list):
+        return iterations
+    raise ValueError("execution_trace.iterations must be ALL or a list")
+
+
+def execution_trace_features(trace_spec: dict[str, Any]) -> list[Any]:
+    """Return feature names selected by the collect spec."""
+    features = trace_spec.get("features", [])
+    if not isinstance(features, list):
+        raise ValueError("execution_trace.features must be a list")
+    return features
+
+
+def query_trace_for_iteration(
+    execution_trace: dict[str, Any], iter_num: Any, query_name: str
+) -> dict[str, Any]:
+    """Return the per-query trace payload for one iteration."""
+    if iter_num not in execution_trace:
+        raise ValueError(f"Missing execution trace iteration: {iter_num}")
+
+    iter_trace = execution_trace[iter_num]
+    if not isinstance(iter_trace, dict):
+        raise ValueError(
+            f"Execution trace iteration {iter_num} must be a mapping"
+        )
+    if query_name not in iter_trace:
+        raise ValueError(
+            f"Missing query {query_name} in execution "
+            f"trace iteration: {iter_num}"
+        )
+
+    query_trace = iter_trace[query_name]
+    if not isinstance(query_trace, dict):
+        raise ValueError(
+            f"Execution trace for query {query_name} in iteration "
+            f"{iter_num} must be a mapping"
+        )
+    return query_trace
+
+
 def collect_execution_trace_info(
     query_name: str,
     trace_spec: Any,
@@ -67,34 +114,38 @@ def collect_execution_trace_info(
     """Collect rows from engine_result.execution_trace only."""
     if trace_spec is None:
         return []
+    if not isinstance(trace_spec, dict):
+        raise ValueError("execution_trace collect spec must be a mapping")
+    if not isinstance(execution_trace, dict):
+        raise ValueError("engine_result.execution_trace must be a mapping")
 
-    iterations = trace_spec.get("iterations", "ALL")
-    features = trace_spec.get("features", [])
-    if iterations == "ALL":
-        iterations = sorted(execution_trace.keys())
-    if features == []:
+    iterations = selected_execution_trace_iterations(
+        trace_spec, execution_trace
+    )
+    features = execution_trace_features(trace_spec)
+    if not features:
         return []
 
     execution_trace_info = []
 
     for iter_num in iterations:
-        assert iter_num in execution_trace, (
-            f"Missing execution trace iteration: {iter_num}"
+        query_trace = query_trace_for_iteration(
+            execution_trace, iter_num, query_name
         )
-        assert query_name in execution_trace[iter_num], (
-            f"Missing query {query_name} in execution "
-            f"trace iteration: {iter_num}"
-        )
+        missing_features = [
+            feature for feature in features if feature not in query_trace
+        ]
+        if missing_features:
+            raise ValueError(
+                f"Missing features {missing_features} for query {query_name} "
+                f"in execution trace iteration: {iter_num}"
+            )
 
         execution_trace_info.append(
             {
                 "iter_num": iter_num,
-                **{
-                    feature: execution_trace[iter_num]
-                    .get(query_name)
-                    .get(feature)
-                    for feature in features
-                },
+                "query": query_name,
+                **{feature: query_trace[feature] for feature in features},
             }
         )
 
@@ -102,23 +153,18 @@ def collect_execution_trace_info(
 
 
 def parse_collect_spec(
-    workload: str,
+    static_info: dict[str, Any],
     query_group: list[str],
     collect_specs: dict[str, Any],
     engine_result: dict[str, Any],
-    override_map: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Expand structured collect config into result rows."""
     if not collect_specs:
         return []
+    if not isinstance(collect_specs, dict):
+        raise ValueError("collect must be a mapping")
 
     collected_info = []
-
-    # Collect static fields from the config and overrides.
-    static_info = {
-        "workload": workload,
-        **{k: str(v) for k, v in override_map.items()},
-    }
 
     # Collect desired fields from the engine_result.
     for query in query_group:
@@ -148,6 +194,13 @@ def iter_override_maps(task: dict[str, Any]) -> list[dict[str, Any]]:
     override_specs = task.get("config_override", {})
     override_keys = list(override_specs.keys())
     override_values = [override_specs[k] for k in override_keys]
+
+    for override_val in override_values:
+        if not isinstance(override_val, list):
+            raise ValueError(
+                f"Override values must be lists, got: {override_val}"
+            )
+
     if not override_values:
         return [{}]
     return [
@@ -179,12 +232,17 @@ async def run_query_group(
     if not collect_specs:
         return []
 
+    static_info = {
+        "config": context.config_name,
+        "task": context.task.get("name", context.config_name),
+        "workload": workload_name,
+        **{k: str(v) for k, v in override_map.items()},
+    }
     return parse_collect_spec(
-        workload=workload_name,
+        static_info=static_info,
         query_group=query_group,
         collect_specs=collect_specs,
         engine_result=engine_result,
-        override_map=override_map,
     )
 
 
