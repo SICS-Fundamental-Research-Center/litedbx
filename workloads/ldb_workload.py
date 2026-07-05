@@ -181,7 +181,7 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
             (self.CKPT_path / q_name).mkdir(parents=True, exist_ok=True)
 
         # Update the ckpt path of data manager.
-        self.data_manager.CKPT_path = self.CKPT_path
+        self.data_manager.set_ckpt_path(self.CKPT_path)
 
 
     def refine_sigma_satisfied_data(self):
