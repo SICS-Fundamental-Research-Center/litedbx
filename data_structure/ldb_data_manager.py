@@ -40,6 +40,7 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
 
         self.enriched_features: dict[str, list[PopulationSpec]] = {}
         self.trimmed_feature_names: list[str] = []
+        self.rewrite_rules: dict[str, dict] = {}
 
         self.ckpt_path = self._default_ckpt_path()
         self._ensure_ckpt_path()

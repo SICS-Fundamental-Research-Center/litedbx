@@ -1,11 +1,14 @@
+# pylint: disable=missing-module-docstring,missing-function-docstring
+# pylint: disable=unspecified-encoding,duplicate-code,invalid-name
 from pathlib import Path
-from typing import Optional
-import yaml
-from data_structure import Predicate, SemPredicate, SemCQ
-from .ldb_workload import LdbWorkload
 
-DATASET_PATH = Path(__file__).parent.parent / "data/mmqa"
-CURRENT_DIR = Path(__file__).parent
+import yaml
+
+from data_structure import Predicate, SemCQ, SemPredicate
+from workloads.ldb_workload import LdbWorkload
+
+DATASET_PATH = Path(__file__).parent.parent.parent / "data/mmqa"
+CURRENT_DIR = Path(__file__).parent.parent
 
 Q3a = SemCQ(
     selected=["title"],
@@ -18,10 +21,12 @@ Q3a = SemCQ(
             prompt=(
                 "Please determine if the given text indicate "
                 "that the movie is a comedy. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
-        ))
-])
+            ),
+        )
+    ],
+)
 
 Q3f = SemCQ(
     selected=["title"],
@@ -34,10 +39,12 @@ Q3f = SemCQ(
             prompt=(
                 "Please determine if the given text indicate "
                 "that the movie is a romantic comedy. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
-        ))
-])
+            ),
+        )
+    ],
+)
 
 Q3c = SemCQ(
     selected=["title"],
@@ -50,10 +57,12 @@ Q3c = SemCQ(
             prompt=(
                 "Please determine if the given text indicate "
                 "that the movie is romance. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
-        ))
-])
+            ),
+        )
+    ],
+)
 
 
 Q3g = SemCQ(
@@ -67,10 +76,12 @@ Q3g = SemCQ(
             prompt=(
                 "Please determine if the given text indicate "
                 "that the movie is a biographical comedy. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
-        ))
-])
+            ),
+        )
+    ],
+)
 
 
 Q6a = SemCQ(
@@ -84,10 +95,12 @@ Q6a = SemCQ(
             prompt=(
                 "Please determine if the given text indicate "
                 "that the airline has destinations in Frankfurt. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
-        ))
-])
+            ),
+        )
+    ],
+)
 
 
 Q6b = SemCQ(
@@ -101,10 +114,12 @@ Q6b = SemCQ(
             prompt=(
                 "Please determine if the given text indicate "
                 "that the airline has destinations in Germany. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
-        ))
-])
+            ),
+        )
+    ],
+)
 
 
 Q6c = SemCQ(
@@ -118,10 +133,12 @@ Q6c = SemCQ(
             prompt=(
                 "Please determine if the given text indicate "
                 "that the airline has destinations in Europe. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
+                'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
-        ))
-])
+            ),
+        )
+    ],
+)
 
 
 SEM_QUERIES = {
@@ -145,20 +162,27 @@ DATA_MAP = {
 }
 
 
-def get_workload(queries: list[str], config: Optional[dict] = None) -> LdbWorkload:
+def get_workload(queries: list[str], config: dict | None = None) -> LdbWorkload:
     sem_queries = {}
     dataset_path = None
     for q in queries:
         assert q in SEM_QUERIES, f"Invalid query {q} in mmqa dataset."
         if dataset_path is not None:
-            assert dataset_path == DATA_MAP[q], \
-                f"Queries from different datasets: {dataset_path} and {DATA_MAP[q]}"
+            assert dataset_path == DATA_MAP[q], (
+                "Queries from different datasets: "
+                f"{dataset_path} and {DATA_MAP[q]}"
+            )
         sem_queries[q] = SEM_QUERIES[q]
         dataset_path = DATA_MAP[q]
-    
+
     if config is None:
         with open(CURRENT_DIR / "config.yaml") as f:
             config = yaml.safe_load(f)
     assert config is not None, "Fail to load the workload config."
 
-    return LdbWorkload(data_dir=str(dataset_path), scenario="mmqa", queries=sem_queries, config=config)
+    return LdbWorkload(
+        data_dir=str(dataset_path),
+        scenario="mmqa",
+        queries=sem_queries,
+        config=config,
+    )

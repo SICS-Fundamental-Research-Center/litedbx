@@ -2,8 +2,8 @@
 
 from typing import Any
 
-from workloads import animals, ecomm, medical, mmqa, movie
 from workloads.ldb_workload import LdbWorkload
+from workloads.scenarios import animals, ecomm, medical, mmqa, movie
 
 WORKLOAD_FACTORIES = {
     "medical": medical.get_workload,

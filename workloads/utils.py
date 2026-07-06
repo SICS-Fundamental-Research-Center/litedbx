@@ -1,11 +1,18 @@
-import pandas as pd
-import numpy as np
+# ruff: noqa: B023
+# pylint: disable=missing-function-docstring,invalid-name
+# pylint: disable=too-many-arguments,too-many-positional-arguments
+# pylint: disable=too-many-locals,too-many-branches,too-many-statements
+# pylint: disable=consider-using-enumerate,logging-fstring-interpolation
+# pylint: disable=cell-var-from-loop,unnecessary-lambda
+"""Workload-level modeling, rule, and feature helpers."""
+
 import logging
-from typing import Tuple, List
+
+import numpy as np
+import pandas as pd
 from sklearn.calibration import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +20,7 @@ logger = logging.getLogger(__name__)
 def encode_features(df: pd.DataFrame) -> pd.DataFrame:
     """Encode categorical variables."""
     df_proc = df.copy()
-    for col in df_proc.select_dtypes(include=['object']).columns:
+    for col in df_proc.select_dtypes(include=["object"]).columns:
         encoded = LabelEncoder().fit_transform(df_proc[col].astype(str))
         df_proc[col] = pd.Series(encoded, index=df_proc.index, dtype=int)
     return df_proc
@@ -25,7 +32,9 @@ def norm_features(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(df_norm, columns=df.columns, index=df.index)
 
 
-def weight_features(df: pd.DataFrame, feat_importance: pd.DataFrame) -> pd.DataFrame:
+def weight_features(
+    df: pd.DataFrame, feat_importance: pd.DataFrame
+) -> pd.DataFrame:
     df_proc = df.copy()
 
     feature_weight = np.ones(len(df.columns.tolist()))
@@ -40,17 +49,16 @@ def weight_features(df: pd.DataFrame, feat_importance: pd.DataFrame) -> pd.DataF
 
 
 def train_classifier(
-        X: pd.DataFrame, Y: pd.Series,
-        n_estimators=100,
-        max_depth=10) -> RandomForestClassifier:
+    X: pd.DataFrame, Y: pd.Series, n_estimators=100, max_depth=10
+) -> RandomForestClassifier:
 
-    # Convert labels to integers (sklearn requires integer dtype for classification)
+    # Sklearn classifiers require integer labels.
     Y = Y.astype(int)
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
         random_state=42,
-        class_weight='balanced'
+        class_weight="balanced",
     )
     clf.fit(X, Y)
 
@@ -75,50 +83,53 @@ def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series) -> dict:
 
     precision = TP / (TP + FP) if (TP + FP) > 0 else 0
     recall = TP / (TP + FN) if (TP + FN) > 0 else 0
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    f1 = (
+        2 * (precision * recall) / (precision + recall)
+        if (precision + recall) > 0
+        else 0
+    )
 
     return {
-        'f1': f1,
-        'precision': precision,
-        'recall': recall,
-        'TP': TP,
-        'FP': FP,
-        'TN': TN,
-        'FN': FN,
+        "f1": f1,
+        "precision": precision,
+        "recall": recall,
+        "TP": TP,
+        "FP": FP,
+        "TN": TN,
+        "FN": FN,
     }
 
-def compute_feature_importance(
-        X: pd.DataFrame, Y: pd.Series,
-        n_estimators=100,
-        max_depth=10) -> pd.DataFrame:
 
-    # Convert labels to integers (sklearn requires integer dtype for classification)
+def compute_feature_importance(
+    X: pd.DataFrame, Y: pd.Series, n_estimators=100, max_depth=10
+) -> pd.DataFrame:
+
+    # Sklearn classifiers require integer labels.
     Y = Y.astype(int)
 
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
         random_state=42,
-        class_weight='balanced'
+        class_weight="balanced",
     )
     clf.fit(X, Y)
 
-    feat_importances = pd.DataFrame({
-        "feature": X.columns.tolist(),
-        "importance": clf.feature_importances_
-    }).sort_values("importance", ascending=False)
+    feat_importances = pd.DataFrame(
+        {"feature": X.columns.tolist(), "importance": clf.feature_importances_}
+    ).sort_values("importance", ascending=False)
 
     return feat_importances
 
 
 def clf_to_rules(
     clf: RandomForestClassifier,
-    feature_names: List[str],
+    feature_names: list[str],
     disjunction_budget: int,
     X_train: np.ndarray,
     y_train: np.ndarray,
-    debug: bool = False
-) -> List[List[Tuple[str, float, str]]]:
+    debug: bool = False,
+) -> list[list[tuple[str, float, str]]]:
 
     assert len(feature_names) == clf.n_features_in_
 
@@ -126,8 +137,8 @@ def clf_to_rules(
     y_train = y_train.astype(int)
 
     N = len(y_train)
-    pos_mask = (y_train == 1)
-    neg_mask = (y_train == 0)
+    pos_mask = y_train == 1
+    neg_mask = y_train == 0
 
     # Fallback: if all samples are of the same class, return empty rule set
     if len(np.unique(y_train)) == 1:
@@ -135,12 +146,19 @@ def clf_to_rules(
         for feature_name in feature_names:
             if not feature_name.startswith("llm_label_"):
                 continue
-            fallback_rules.append([(feature_name, 0.5, ">")])  # Return the LLM predicated label.
+            fallback_rules.append(
+                [(feature_name, 0.5, ">")]
+            )  # Return the LLM predicated label.
         if len(fallback_rules) > 0:
-            logger.warning(f"Generated fallback rules based on LLM-predicated labels.")
+            logger.warning(
+                "Generated fallback rules based on LLM-predicated labels."
+            )
         else:
-            logger.warning(f"All training samples belong to the same class ({y_train[0]}). "
-                          f"Returning empty rule set.")
+            logger.warning(
+                "All training samples belong to the same class (%s). "
+                "Returning empty rule set.",
+                y_train[0],
+            )
         return fallback_rules
 
     _lambda = sum(neg_mask) / max(1, sum(pos_mask))
@@ -161,8 +179,7 @@ def clf_to_rules(
                 intervals[feat][0] = max(intervals[feat][0], thresh)
 
         return tuple(
-            (feat, low, high)
-            for feat, (low, high) in sorted(intervals.items())
+            (feat, low, high) for feat, (low, high) in sorted(intervals.items())
         )
 
     # ------------------------------------------------------------
@@ -175,9 +192,9 @@ def clf_to_rules(
             idx = feature_names.index(feat)
 
             if low != -np.inf:
-                mask &= (X_train[:, idx] > low)
+                mask &= X_train[:, idx] > low
             if high != np.inf:
-                mask &= (X_train[:, idx] <= high)
+                mask &= X_train[:, idx] <= high
 
         return mask
 
@@ -189,7 +206,7 @@ def clf_to_rules(
     for tree in clf.estimators_:
         tree_ = tree.tree_
 
-        cl = tree_.children_left  # type: ignore 
+        cl = tree_.children_left  # type: ignore
         cr = tree_.children_right  # type: ignore
         feat = tree_.feature  # type: ignore
         thr = tree_.threshold  # type: ignore
@@ -229,13 +246,11 @@ def clf_to_rules(
     uncovered_pos = pos_mask.copy()
 
     for _ in range(disjunction_budget):
-
         best_rule = None
         best_gain = -1 * np.inf
         best_mask = None
 
         for rule in candidates:
-
             mask = evaluate_rule(rule)
 
             new_pos = np.sum(mask & uncovered_pos)
@@ -255,7 +270,9 @@ def clf_to_rules(
         selected.append(best_rule)
 
         # Remove covered positives
-        assert best_mask is not None, "best_mask should not be None when best_rule is selected."
+        assert best_mask is not None, (
+            "best_mask should not be None when best_rule is selected."
+        )
         uncovered_pos &= ~best_mask
 
         # Remove rule from candidates
@@ -284,9 +301,13 @@ def clf_to_rules(
     return rules
 
 
-def apply_rules(rules: list, df: pd.DataFrame, debug: bool = False) -> pd.Series:
+def apply_rules(
+    rules: list, df: pd.DataFrame, debug: bool = False
+) -> pd.Series:
     if not rules:
-        return pd.Series(1, index=df.index)  # Empty rule means accept all tuples.
+        return pd.Series(
+            1, index=df.index
+        )  # Empty rule means accept all tuples.
 
     result = pd.Series(False, index=df.index)
 
@@ -295,10 +316,10 @@ def apply_rules(rules: list, df: pd.DataFrame, debug: bool = False) -> pd.Series
 
         mask = pd.Series(True, index=df.index)
         for feat_name, thresh, op in rule:
-            if op == '<=':
-                mask &= (df[feat_name] <= thresh)
+            if op == "<=":
+                mask &= df[feat_name] <= thresh
             else:
-                mask &= (df[feat_name] > thresh)
+                mask &= df[feat_name] > thresh
         if debug:
             logger.info(f"Applied: {_visualize_rule(rule)}")
             logger.info(f"  Rule coverage: {mask.sum()} / {len(df)} samples")
@@ -332,9 +353,8 @@ def loss_by_selectivity(Y_A: pd.Series, Y_B: pd.Series, pi: float) -> float:
     avg_loss = losses.mean()
 
     return avg_loss
-    
+
 
 def _visualize_rule(rule: list) -> str:
     conditions = [f"{feat} {op} {thresh:.3f}" for feat, thresh, op in rule]
     return " AND ".join(conditions)
-

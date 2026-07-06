@@ -161,7 +161,7 @@ The query pipeline consists of three main steps:
 from time import time
 import logging
 import sys
-from workloads import medical
+from workloads.scenarios import medical
 from ldb_engine import LdbEngine
 import asyncio
 
@@ -301,19 +301,22 @@ litedbx/
 ├── ldb_engine.py          # Main query engine orchestration
 ├── main.py                # Entry point for running queries
 ├── servem.sh              # vLLM model serving script
-├── workloads/             # Dataset-specific workloads
+├── workloads/             # Workload facade, core implementation, scenarios
 │   ├── config.yaml           # Configuration parameters
-│   ├── ldb_workload.py       # LdbWorkload class
-│   ├── medical.py            # Medical dataset queries
-│   ├── movie.py              # Movie dataset queries
-│   ├── ecomm.py              # E-commerce dataset queries
-│   ├── animals.py            # Wildlife dataset queries
-│   ├── mmqa.py               # MMQA dataset queries
-│   ├── feature_utils.py      # Feature extraction utilities
-│   └── workload_utils.py     # Workload helper functions
-├── common/                # Common utilities
-│   ├── coreset_selector.py   # Coreset selection algorithms
-│   └── utils.py              # Feature encoding, classifiers, evaluation
+│   ├── ldb_workload.py       # Engine-facing workload facade
+│   ├── core/                 # LiteDBX workload implementation components
+│   │   ├── feature_pipeline.py   # Feature generation, sync, and selection
+│   │   ├── coreset_maintainer.py # Coreset expansion and thresholds
+│   │   ├── query_execution.py    # Query rewrite, errors, and incremental execution
+│   │   ├── preprocessing.py      # Query reuse and Sigma refinement
+│   │   └── reporting.py          # Usage and result reporting
+│   ├── utils.py              # Feature encoding, classifiers, rules, losses
+│   └── scenarios/            # Dataset-specific query definitions
+│       ├── medical.py
+│       ├── movie.py
+│       ├── ecomm.py
+│       ├── animals.py
+│       └── mmqa.py
 ├── data_structure/         # Data structures
 │   ├── sem_query.py          # Semantic query (SemCQ, SemPredicate)
 │   ├── ldb_data.py           # LdbData wrapper
