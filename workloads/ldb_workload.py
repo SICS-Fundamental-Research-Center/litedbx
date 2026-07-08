@@ -29,7 +29,6 @@ class LdbWorkload:
         config: dict,
     ) -> None:
         self.llm_client = LdbLLMClient()
-        self.dynamic_setting = config["dynamic_setting"]
 
         self.data_dir = data_dir
         self.scenario = scenario
@@ -254,6 +253,7 @@ class LdbWorkload:
         self.enable_conf_struct = self.config["enable_conf_struct"]
         self.enable_enrich = self.config["enable_enrich"]
         self.enable_rewrite = self.config["enable_rewrite"]
+        self.dynamic_setting = self.config["dynamic_setting"]
 
     def _ensure_query_ckpts(self) -> None:
         for q_name in self.queries:
