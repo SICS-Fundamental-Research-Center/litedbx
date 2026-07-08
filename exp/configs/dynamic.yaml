@@ -13,7 +13,7 @@ tasks:
       execution_trace:
         iterations: ALL
         features: [
-          pred_eval, trans_eval, L_static,
+          pred_eval.f1, trans_eval.f1, L_static,
           L_rew, penalty_rew, L_obj,
           L_LOO, penalty_LOO, L_subj, 
           overall_selectivity, total_size,

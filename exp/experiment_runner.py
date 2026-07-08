@@ -90,6 +90,31 @@ def execution_trace_features(trace_spec: dict[str, Any]) -> list[Any]:
     return features
 
 
+def get_nested_field_value(
+    payload: dict[str, Any], field: str, query_name: str, iter_num: Any
+) -> Any:
+    """Return a possibly dotted field value from an execution trace payload."""
+    value: Any = payload
+    traversed = []
+    for part in field.split("."):
+        traversed.append(part)
+        if not isinstance(value, dict):
+            path = ".".join(traversed[:-1])
+            raise ValueError(
+                f"Cannot access nested field '{field}' for query "
+                f"{query_name} in execution trace iteration {iter_num}: "
+                f"'{path}' is not a mapping"
+            )
+        if part not in value:
+            path = ".".join(traversed)
+            raise ValueError(
+                f"Missing field '{path}' for query {query_name} in "
+                f"execution trace iteration: {iter_num}"
+            )
+        value = value[part]
+    return value
+
+
 def query_trace_for_iteration(
     execution_trace: dict[str, Any], iter_num: Any, query_name: str
 ) -> dict[str, Any]:
@@ -143,20 +168,18 @@ def collect_execution_trace_info(
         query_trace = query_trace_for_iteration(
             execution_trace, iter_num, query_name
         )
-        missing_features = [
-            feature for feature in features if feature not in query_trace
-        ]
-        if missing_features:
-            raise ValueError(
-                f"Missing features {missing_features} for query {query_name} "
-                f"in execution trace iteration: {iter_num}"
+        feature_values = {
+            feature: get_nested_field_value(
+                query_trace, feature, query_name, iter_num
             )
+            for feature in features
+        }
 
         execution_trace_info.append(
             {
                 "iter_num": iter_num,
                 "query": query_name,
-                **{feature: query_trace[feature] for feature in features},
+                **feature_values,
             }
         )
 
