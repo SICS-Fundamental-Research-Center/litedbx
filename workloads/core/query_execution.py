@@ -133,7 +133,10 @@ class QueryExecution:
             "L_subj",
             "L_static",
             "memory_cost",
-            "selectivity",
+            "stream_selectivities",
+            "overall_selectivity",
+            "stream_sizes",
+            "total_size",
         ]
         execution_results: dict[str, Any] = {stat: {} for stat in stats}
         execution_results["L_avg"] = float("inf")
@@ -251,6 +254,9 @@ class QueryExecution:
                 penalty_LOO,
             )
 
+        stream_stat = (
+            self.data_manager.sigma_satisfied_data.compute_stream_stat(q_name)
+        )
         return {
             "rules": rules,
             "features": active_external_features,
@@ -264,11 +270,10 @@ class QueryExecution:
             "L_subj": L_subj,
             "L_static": L_static,
             "memory_cost": memory_cost,
-            "selectivity": (
-                self.data_manager.sigma_satisfied_data.compute_selectivity(
-                    q_name
-                )
-            ),
+            "stream_selectivities": stream_stat["stream_selectivities"],
+            "overall_selectivity": stream_stat["overall_selectivity"],
+            "stream_sizes": stream_stat["stream_sizes"],
+            "total_size": stream_stat["total_size"],
         }
 
     def _propagate_and_extract_rules(

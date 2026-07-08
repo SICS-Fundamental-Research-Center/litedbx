@@ -176,7 +176,10 @@ def report_evaluation_trace(execution_trace: dict):
                 "L_static",
                 "L_avg",
                 "memory_cost",
-                "selectivity",
+                "stream_selectivities",
+                "overall_selectivity",
+                "stream_sizes",
+                "total_size",
             ]:
                 all_query_names.add(key)
 
@@ -239,12 +242,10 @@ def report_evaluation_trace(execution_trace: dict):
             row["memory_cost"] = (
                 f"{results.get('memory_cost', {}).get(q_name, 0):.2f}"
             )
-            selectivity = results.get("selectivity", {}).get(q_name, {})
             row["overall_selectivity"] = (
-                f"{selectivity.get('overall_selectivity', 0):.4f}"
-                if isinstance(selectivity, dict)
-                else "0.0000"
+                f"{results.get('overall_selectivity', {}).get(q_name, 0):.4f}"
             )
+            row["total_size"] = results.get("total_size", {}).get(q_name, 0)
 
             overview_data.append(row)
 
@@ -268,6 +269,7 @@ def report_evaluation_trace(execution_trace: dict):
         "L_static",
         "memory_cost",
         "overall_selectivity",
+        "total_size",
     ]
     col_order = [c for c in col_order if c in df_overview.columns]
     df_overview = df_overview[col_order]

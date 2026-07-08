@@ -191,11 +191,14 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         fn = len(ground_truth - retrieved_data)
         return _quality_metrics(q_name, stream_idx, tp, fp, fn)
 
-    def compute_selectivity(self, q_name: str) -> dict[str, list[float] | float]:
-        """Compute per-stream and overall selectivity for one query."""
+    def compute_stream_stat(
+        self, q_name: str
+    ) -> dict[str, list[float] | list[int] | float | int]:
+        """Compute per-stream and overall statistics for one query."""
         stream_selectivities = []
+        stream_sizes = []
         total_positive = 0
-        total_labels = 0
+        total_size = 0
 
         for stream_idx, stream_records in enumerate(self):
             if q_name not in stream_records:
@@ -213,21 +216,24 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
                     stream_idx,
                 )
 
-            label_count = len(labels)
+            stream_size = len(labels)
             positive_count = int(labels.sum())
             stream_selectivity = (
-                positive_count / label_count if label_count > 0 else 0.0
+                positive_count / stream_size if stream_size > 0 else 0.0
             )
             stream_selectivities.append(float(stream_selectivity))
+            stream_sizes.append(stream_size)
             total_positive += positive_count
-            total_labels += label_count
+            total_size += stream_size
 
         overall_selectivity = (
-            total_positive / total_labels if total_labels > 0 else 0.0
+            total_positive / total_size if total_size > 0 else 0.0
         )
         return {
             "stream_selectivities": stream_selectivities,
             "overall_selectivity": float(overall_selectivity),
+            "stream_sizes": stream_sizes,
+            "total_size": total_size,
         }
 
     @staticmethod
