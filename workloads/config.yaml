@@ -13,7 +13,7 @@ enable_conf_pred: True
 enable_enrich: True
 enable_rewrite: True
 
-loo_step: 10
+loo_step: 1
 delta: 0.05  # Theorem 3 holds with probability at least 1 - delta.
 
 eta: 1000000000000000  

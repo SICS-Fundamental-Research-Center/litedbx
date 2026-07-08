@@ -215,21 +215,18 @@ class QueryExecution:
         L_rew, penalty_rew = compute_objective_error(
             pred_Y=pred_Y_li[0],
             trans_Y=trans_Y,
+            observed_Y=train_Y[:observed_size],
             b_rew=self.b_rew,
             schema_arity=len(train_X.columns.tolist()),
             query_size=len(self.queries),
-            selected_data_size=len(pred_Y_li[0]) + self.b_lab,
+            selected_data_size=len(pred_Y_li[0]) + observed_size,
             delta=self.delta,
         )
         L_obj = L_rew + penalty_rew
 
         L_LOO, penalty_LOO = compute_subjective_error(
-            X=self.data_manager.sigma_satisfied_data[0][q_name]["ldb_data"]
-            .select_active_features(active_external_features)
-            .iloc[:observed_size],
-            Y=self._required_sigma_labels(q_name, 0).astype(int)[
-                :observed_size
-            ],
+            X=train_X.iloc[:observed_size],
+            Y=train_Y.iloc[:observed_size],
             query_size=len(self.queries),
             data_size=observed_size,
             delta=self.delta,
@@ -498,7 +495,6 @@ class QueryExecution:
         self.data_manager.sigma_satisfied_data[inc_round][q_name][
             "propagated_labels"
         ] = pred_Y_li[-1]
-        observed_data_size = self.data_manager.coresets[q_name]["observed_size"]
         prev_prop_Y_li: list[pd.Series] = []
         for i in range(inc_round + 1):
             stream_record = self.data_manager.sigma_satisfied_data[i][q_name]
@@ -514,9 +510,6 @@ class QueryExecution:
             prev_prop_Y_li.append(propagated_labels)
 
         err_certificate = compute_inc_error_certificate(
-            label_Y=self.data_manager.coresets[q_name]["labels"][
-                :observed_data_size
-            ].astype(int),
             prev_prop_Y_li=prev_prop_Y_li,
             prop_Y_li=pred_Y_li,
         )
@@ -570,6 +563,7 @@ class QueryExecution:
 def compute_objective_error(
     pred_Y: pd.Series,
     trans_Y: pd.Series,
+    observed_Y: pd.Series,
     b_rew: int,
     schema_arity: int,
     query_size: int,
@@ -581,6 +575,7 @@ def compute_objective_error(
     Args:
         pred_Y: Predicted labels
         trans_Y: Translated labels
+        observed_Y: Observed labels
         schema_arity: Number of features in schema
         query_size: Number of queries
         selected_data_size: Size of selected data
@@ -589,13 +584,14 @@ def compute_objective_error(
     Returns:
         Tuple of (L_rew, penalty)
     """
-    pi = sum(pred_Y) / len(pred_Y)
+    pi = (sum(pred_Y) + sum(observed_Y)) / (len(pred_Y) + len(observed_Y))
     pi = max(
         1e-6, min(1 - 1e-6, pi)
     )  # Ensure pi is in (0, 1) to avoid extreme penalties
 
     # Compute rewriting loss
     L_rew = loss_by_selectivity(pred_Y, trans_Y, pi)
+    L_rew = L_rew * len(pred_Y) / (len(pred_Y) + len(observed_Y))
 
     # Compute the penalty
     Gamma_rew = max(pi, 1 - pi) / min(pi, 1 - pi)
@@ -737,7 +733,6 @@ def perform_label_propagation(
 
 
 def compute_inc_error_certificate(
-    label_Y: pd.Series,
     prev_prop_Y_li: list[pd.Series],
     prop_Y_li: list[pd.Series],
 ) -> float:
@@ -749,25 +744,24 @@ def compute_inc_error_certificate(
     if len(prop_Y_li) == 1:
         return 0.0  # The first iteration introduces no error.
 
-    pi = sum(label_Y) / len(label_Y)
-    piE = sum(
-        [sum(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))]
-    ) / sum([len(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))])
-    Gamma = max(pi, 1 - pi) / (min(pi, 1 - pi) + 1e-6)
-    GammaE = max(piE, 1 - piE) / (min(piE, 1 - piE) + 1e-6)
-
+    """
+    Data error = |D_{added}| / |D_{total}|
+    """
     curr_data_size = sum(
         [len(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))]
     )
     prev_data_size = curr_data_size - len(prev_prop_Y_li[-1])
     new_data_size = len(prev_prop_Y_li[-1])
-    data_err = new_data_size / curr_data_size / 1.5
+    data_err = new_data_size / curr_data_size
 
+    """
+    Prediction error = |Err_{shared}| / |D_{shared}|
+    """
     pred_err = 0.0
     for i in range(len(prev_prop_Y_li) - 1):
         pred_err += sum(prev_prop_Y_li[i] != prop_Y_li[i])
     pred_err /= prev_data_size
 
-    err_certificate = (Gamma + GammaE) * (data_err + pred_err)
+    err_certificate = data_err + pred_err
 
     return err_certificate
