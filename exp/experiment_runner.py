@@ -2,6 +2,7 @@
 
 import csv
 import itertools
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,6 +49,13 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data or {}
 
 
+def _csv_cell(value: Any) -> Any:
+    """Return a CSV-safe scalar representation for structured values."""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, sort_keys=True)
+    return value
+
+
 def save_csv(
     path: Path, rows: list[dict[str, Any]], fieldnames: list[str]
 ) -> None:
@@ -56,7 +64,10 @@ def save_csv(
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(
+            {field: _csv_cell(row.get(field, "")) for field in fieldnames}
+            for row in rows
+        )
 
 
 def selected_execution_trace_iterations(

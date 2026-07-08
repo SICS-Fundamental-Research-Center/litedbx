@@ -176,6 +176,7 @@ def report_evaluation_trace(execution_trace: dict):
                 "L_static",
                 "L_avg",
                 "memory_cost",
+                "selectivity",
             ]:
                 all_query_names.add(key)
 
@@ -238,6 +239,12 @@ def report_evaluation_trace(execution_trace: dict):
             row["memory_cost"] = (
                 f"{results.get('memory_cost', {}).get(q_name, 0):.2f}"
             )
+            selectivity = results.get("selectivity", {}).get(q_name, {})
+            row["overall_selectivity"] = (
+                f"{selectivity.get('overall_selectivity', 0):.4f}"
+                if isinstance(selectivity, dict)
+                else "0.0000"
+            )
 
             overview_data.append(row)
 
@@ -260,6 +267,7 @@ def report_evaluation_trace(execution_trace: dict):
         "L_subj",
         "L_static",
         "memory_cost",
+        "overall_selectivity",
     ]
     col_order = [c for c in col_order if c in df_overview.columns]
     df_overview = df_overview[col_order]

@@ -191,6 +191,45 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         fn = len(ground_truth - retrieved_data)
         return _quality_metrics(q_name, stream_idx, tp, fp, fn)
 
+    def compute_selectivity(self, q_name: str) -> dict[str, list[float] | float]:
+        """Compute per-stream and overall selectivity for one query."""
+        stream_selectivities = []
+        total_positive = 0
+        total_labels = 0
+
+        for stream_idx, stream_records in enumerate(self):
+            if q_name not in stream_records:
+                raise ValueError(
+                    f"Query {q_name!r} is missing in stream-{stream_idx}."
+                )
+
+            labels = stream_records[q_name]["labels"]
+            if labels is None:
+                labels = pd.Series(dtype=bool)
+                logger.warning(
+                    "Ground-truth labels for query '%s' in stream-%s are "
+                    "not assigned. Assuming empty labels.",
+                    q_name,
+                    stream_idx,
+                )
+
+            label_count = len(labels)
+            positive_count = int(labels.sum())
+            stream_selectivity = (
+                positive_count / label_count if label_count > 0 else 0.0
+            )
+            stream_selectivities.append(float(stream_selectivity))
+            total_positive += positive_count
+            total_labels += label_count
+
+        overall_selectivity = (
+            total_positive / total_labels if total_labels > 0 else 0.0
+        )
+        return {
+            "stream_selectivities": stream_selectivities,
+            "overall_selectivity": float(overall_selectivity),
+        }
+
     @staticmethod
     def new_record(ldb_data: LdbData) -> SigmaRecord:
         """Create the standard Sigma-satisfied data record."""

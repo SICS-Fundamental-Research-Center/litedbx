@@ -133,6 +133,7 @@ class QueryExecution:
             "L_subj",
             "L_static",
             "memory_cost",
+            "selectivity",
         ]
         execution_results: dict[str, Any] = {stat: {} for stat in stats}
         execution_results["L_avg"] = float("inf")
@@ -263,6 +264,11 @@ class QueryExecution:
             "L_subj": L_subj,
             "L_static": L_static,
             "memory_cost": memory_cost,
+            "selectivity": (
+                self.data_manager.sigma_satisfied_data.compute_selectivity(
+                    q_name
+                )
+            ),
         }
 
     def _propagate_and_extract_rules(
