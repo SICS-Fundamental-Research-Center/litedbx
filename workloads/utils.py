@@ -51,7 +51,6 @@ def weight_features(
 def train_classifier(
     X: pd.DataFrame, Y: pd.Series, n_estimators=100, max_depth=10
 ) -> RandomForestClassifier:
-
     # Sklearn classifiers require integer labels.
     Y = Y.astype(int)
     clf = RandomForestClassifier(
@@ -103,6 +102,13 @@ def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series) -> dict:
 def compute_feature_importance(
     X: pd.DataFrame, Y: pd.Series, n_estimators=100, max_depth=10
 ) -> pd.DataFrame:
+
+    if X.shape[1] == 0:
+        logger.warning(
+            "No features available for feature importance computation. "
+            "Returning empty feature-importance table."
+        )
+        return pd.DataFrame({"feature": [], "importance": []})
 
     # Sklearn classifiers require integer labels.
     Y = Y.astype(int)

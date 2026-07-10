@@ -218,6 +218,18 @@ def est_conf(
     labeled_X_proc = encode_features(labeled_X)
     unlabeled_X_proc = encode_features(unlabeled_X)
 
+    # If FK/ID removal leaves no usable features, sklearn confidence models
+    # cannot be fit. Use the empirical selectivity as a neutral confidence so
+    # coreset expansion can continue without changing the experiment design.
+    if labeled_X_proc.shape[1] == 0 or unlabeled_X_proc.shape[1] == 0:
+        logger.warning(
+            "No features available for coreset confidence estimation. "
+            "Returning empirical selectivity %.4f for %s unlabeled samples.",
+            selectivity,
+            len(unlabeled_X_proc),
+        )
+        return np.full(len(unlabeled_X_proc), selectivity, dtype=float)
+
     # Predication confidence.
     pred_probas, feat_importance = est_prediction_conf(
         labeled_X_proc=labeled_X_proc,

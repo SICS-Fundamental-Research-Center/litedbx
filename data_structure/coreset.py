@@ -159,8 +159,19 @@ class CoresetStore(dict[str, CoresetRecord]):
             logger.debug(
                 "Loading enriched coreset for query '%s' from cache.", q_name
             )
-            self[q_name]["ldb_data"].df = pd.read_csv(ckpt_path)
-            return llm_client.get_usage_statistics()
+            cached_df = pd.read_csv(ckpt_path)
+            label_count = len(self[q_name]["labels"])
+            if len(cached_df) == label_count:
+                self[q_name]["ldb_data"].df = cached_df
+                return llm_client.get_usage_statistics()
+
+            logger.warning(
+                "Ignoring cached enriched coreset for query '%s' because "
+                "row count %s does not match label count %s.",
+                q_name,
+                len(cached_df),
+                label_count,
+            )
 
         if q_name not in enriched_features:
             raise ValueError(
@@ -357,13 +368,13 @@ def _include_missing_minority_classes(  # pylint: disable=too-many-arguments,too
     del b_lab, labeling_budget
     num_pos_sampled = acquired_labels.loc[labeled_indices].sum()
     num_neg_sampled = len(labeled_indices) - num_pos_sampled
-    minority_bias = 5
+    minority_bias = max(min(num_pos_sampled - 1, num_neg_sampled - 1, 2), 0)
 
     if num_pos_sampled == 0:
         pos_indices = acquired_labels[acquired_labels].index
         pos_to_add = min(minority_bias, len(pos_indices))
         labeled_indices = labeled_indices.union(pos_indices[:pos_to_add])
-        logger.debug(
+        logger.info(
             "Minority class (positive) is not sampled for query '%s' "
             "in stream-%s. Added %s positive samples. Current labeled "
             "set has %s pos samples out of %s samples.",
@@ -377,7 +388,7 @@ def _include_missing_minority_classes(  # pylint: disable=too-many-arguments,too
         neg_indices = acquired_labels[~acquired_labels].index
         neg_to_add = min(minority_bias, len(neg_indices))
         labeled_indices = labeled_indices.union(neg_indices[:neg_to_add])
-        logger.debug(
+        logger.info(
             "Minority class (negative) is not sampled for query '%s' "
             "in stream-%s. Added %s negative samples. Current labeled "
             "set has %s neg samples out of %s samples.",

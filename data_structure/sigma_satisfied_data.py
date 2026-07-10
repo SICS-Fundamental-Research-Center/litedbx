@@ -151,8 +151,26 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
                 q_name,
                 stream_idx,
             )
-            self[stream_idx][q_name]["ldb_data"].df = pd.read_csv(ckpt_path)
-            return llm_client.get_usage_statistics()
+            cached_df = pd.read_csv(ckpt_path)
+            labels = self[stream_idx][q_name]["labels"]
+            label_count = (
+                len(labels)
+                if labels is not None
+                else len(self[stream_idx][q_name]["ldb_data"].df)
+            )
+            if len(cached_df) == label_count:
+                self[stream_idx][q_name]["ldb_data"].df = cached_df
+                return llm_client.get_usage_statistics()
+
+            logger.warning(
+                "Ignoring cached enriched Sigma-satisfied data for query "
+                "'%s' in stream-%s because row count %s does not match "
+                "label count %s.",
+                q_name,
+                stream_idx,
+                len(cached_df),
+                label_count,
+            )
 
         if q_name not in enriched_features:
             raise ValueError(
@@ -346,7 +364,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             LdbData(df=selected_data, config=complete_config)
         )
         post_data_scale = len(self[stream_idx][q_name]["ldb_data"].df)
-        logger.debug(
+        logger.info(
             "Applied Sigma retrieval for query '%s' in stream-%s: "
             "%s -> %s rows.",
             q_name,
@@ -404,7 +422,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
 
         introduced_fn = sum(record["discarded_labels"])
         post_data_scale = len(record["ldb_data"].df)
-        logger.debug(
+        logger.info(
             "Refined Sigma-satisfied data for query '%s' in stream-%s: "
             "%s -> %s rows.",
             q_name,

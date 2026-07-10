@@ -50,7 +50,7 @@ class DataStream(list[LdbData]):
             )
             data_stream.append(LdbData(df=df, config=complete_dataset.config))
 
-        logger.debug(
+        logger.info(
             "Built %s data stream partitions from %s rows.",
             len(data_stream),
             total_rows,

@@ -36,14 +36,6 @@ class LdbWorkload:
         self.config = config
         self._load_config_values()
 
-        self.data_manager = LdbDataManager(
-            data_dir=self.data_dir,
-            scenario=self.scenario,
-            queries=self.queries,
-            llm_client=self.llm_client,
-            dynamic_steps=self.dynamic_setting,
-        )
-
         self.CKPT_path = (
             Path(__file__).parent.parent
             / ".data_ckpt"
@@ -254,6 +246,13 @@ class LdbWorkload:
         self.enable_enrich = self.config["enable_enrich"]
         self.enable_rewrite = self.config["enable_rewrite"]
         self.dynamic_setting = self.config["dynamic_setting"]
+        self.data_manager = LdbDataManager(
+            data_dir=self.data_dir,
+            scenario=self.scenario,
+            queries=self.queries,
+            llm_client=self.llm_client,
+            dynamic_steps=self.dynamic_setting,
+        )
 
     def _ensure_query_ckpts(self) -> None:
         for q_name in self.queries:

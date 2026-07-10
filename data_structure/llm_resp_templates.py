@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Literal
 
 
@@ -37,6 +37,24 @@ class FeatureRefinementResponse(BaseModel):
     """Response model for feature space refinement."""
     to_add: list[PopulationSpec]
     to_remove: list[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_unsupported_feature_types(cls, data):
+        """Ignore generated features the executor cannot materialize."""
+        if not isinstance(data, dict):
+            return data
+        allowed = {"bool", "float", "int", "undefined"}
+        to_add = data.get("to_add")
+        if isinstance(to_add, list):
+            data = dict(data)
+            data["to_add"] = [
+                item
+                for item in to_add
+                if not isinstance(item, dict)
+                or item.get("feature_type") in allowed
+            ]
+        return data
 
 
 class PredicateResponse(BaseModel):
