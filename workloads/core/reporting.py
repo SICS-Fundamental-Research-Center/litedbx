@@ -57,6 +57,12 @@ class Reporting:
                     res["error_certificate"] if res else None
                     for res in eval_q_single_step
                 ]
+                data_errs = [
+                    res["data_err"] if res else None for res in eval_q_single_step
+                ]
+                pred_errs = [
+                    res["pred_err"] if res else None for res in eval_q_single_step
+                ]
 
                 results = pd.DataFrame(
                     {
@@ -65,6 +71,8 @@ class Reporting:
                         "trans_f1": trans_f1s,
                         "pred_f1": pred_f1s,
                         "error_certificate": error_certificates,
+                        "data_err": data_errs,
+                        "pred_err": pred_errs,
                         "eval_time": eval_time,
                     }
                 )
@@ -308,7 +316,7 @@ def report_evaluation_trace(execution_trace: dict):
 
             print(
                 f"\n[Highest trans_f1={trans_f1:.2f}] @ Iter "
-                f"{iter_idx} (NFeat={iter_idx + 1})"
+                f"{iter_idx} (NFeat={iter_idx})"
             )
 
             if "features" in results and q_name in results["features"]:
@@ -332,7 +340,7 @@ def report_evaluation_trace(execution_trace: dict):
 
         print(
             f"\n[Lowest L_avg={l_avg:.2f}] @ Iter "
-            f"{global_best_iter} (NFeat={global_best_iter + 1})"
+            f"{global_best_iter} (NFeat={global_best_iter})"
         )
 
         if "features" in results and q_name in results["features"]:

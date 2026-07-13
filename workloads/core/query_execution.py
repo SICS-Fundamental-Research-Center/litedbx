@@ -104,18 +104,35 @@ class QueryExecution:
             if average_error < best_static_error:
                 best_static_error = average_error
                 best_statistics = execution_results
-
-        for q_name, rules in rules_trace.items():
-            trimmed_feature_names = self.data_manager.trimmed_feature_names
-            active_feature_names = [
-                spec.target_col
-                for spec in self.data_manager.enriched_features[q_name]
-                if spec.target_col in trimmed_feature_names
-            ]
-            self.data_manager.rewrite_rules[q_name] = {
-                "active_external_features": active_feature_names,
-                "ucq": rules[-1],
-            }
+                for q_name in self.queries:
+                    self.data_manager.rewrite_rules[q_name] = {
+                        "active_external_features": list(
+                            execution_results["features"][q_name]
+                        ),
+                        "ucq": list(execution_results["rules"][q_name]),
+                    }
+                    logger.info(
+                        "Best rewrite for iter %s; query %s with %s external features: "
+                        "%s; "
+                        "L_obj = %.4f, L_subj = %.4f, L_static = %.4f",
+                        i,
+                        q_name,
+                        len(execution_results["features"][q_name]),
+                        str(execution_results["features"][q_name]),
+                        execution_results["L_obj"][q_name],
+                        execution_results["L_subj"][q_name],
+                        execution_results["L_static"][q_name],
+                    )
+            else:
+                logger.info(
+                    "No improvement in average error with %s external features: "
+                    "%s; "
+                    "L_avg = %.4f (best L_avg = %.4f)",
+                    i,
+                    str(execution_results["features"][q_name]),
+                    average_error,
+                    best_static_error,
+                )
 
         return best_statistics, execution_trace
 
@@ -226,6 +243,7 @@ class QueryExecution:
             selected_data_size=len(pred_Y_li[0]) + observed_size,
             delta=self.delta,
         )
+        penalty_rew *= 0.01
         L_obj = L_rew + penalty_rew
 
         L_LOO, penalty_LOO = compute_subjective_error(
@@ -236,7 +254,9 @@ class QueryExecution:
             delta=self.delta,
             loo_step=self.config["loo_step"],
         )
+        penalty_LOO *= 0.01
         L_subj = L_LOO + penalty_LOO
+
         L_static = L_obj + L_subj
 
         if debug:
@@ -520,10 +540,11 @@ class QueryExecution:
                 )
             prev_prop_Y_li.append(propagated_labels)
 
-        err_certificate = compute_inc_error_certificate(
+        data_err, pred_err = compute_inc_error_certificate(
             prev_prop_Y_li=prev_prop_Y_li,
             prop_Y_li=pred_Y_li,
         )
+        err_certificate = data_err + pred_err
         prev_err_certificate = (
             eval_results[-1]["eval_results"][q_name]["error_certificate"]
             if eval_results
@@ -550,6 +571,8 @@ class QueryExecution:
 
         return {
             "error_certificate": err_certificate,
+            "data_err": data_err,
+            "pred_err": pred_err,
             "pred_eval": self.data_manager.eval_query_quality(
                 q_name=q_name,
                 selected_cols=self.queries[q_name].selected,
@@ -746,14 +769,14 @@ def perform_label_propagation(
 def compute_inc_error_certificate(
     prev_prop_Y_li: list[pd.Series],
     prop_Y_li: list[pd.Series],
-) -> float:
+) -> tuple[float, float]:
     assert len(prev_prop_Y_li) == len(prop_Y_li), (
         f"Length of prev_prop_Y_li and prop_Y_li must be the same. "
         f"Got {len(prev_prop_Y_li)} and {len(prop_Y_li)}."
     )
 
     if len(prop_Y_li) == 1:
-        return 0.0  # The first iteration introduces no error.
+        return 0.0, 0.0  # The first iteration introduces no error.
 
     """
     Data error = |D_{added}| / |D_{total}|
@@ -773,6 +796,4 @@ def compute_inc_error_certificate(
         pred_err += sum(prev_prop_Y_li[i] != prop_Y_li[i])
     pred_err /= prev_data_size
 
-    err_certificate = data_err + pred_err
-
-    return err_certificate
+    return data_err, pred_err

@@ -52,6 +52,15 @@ class CoresetMaintainer:
         labeled_y = coreset["labels"]
         unlabeled_x = sigma_record["ldb_data"].exclude_fk_and_id()
 
+        if not labeled_x.columns.equals(unlabeled_x.columns):
+            labeled_x = labeled_x.loc[:, labeled_x.columns.isin(unlabeled_x.columns)]
+            if not labeled_x.columns.equals(unlabeled_x.columns):
+                raise ValueError(
+                    f"Schema mismatch after alignment for query '{q_name}' "
+                    f"in stream-{inc_round}. Labeled columns: {labeled_x.columns.tolist()}, "
+                    f"Unlabeled columns: {unlabeled_x.columns.tolist()}"
+                )
+
         mode = "empirical" if inc_round == 0 else "inc"
         selected_x_idx, selected_y, new_lb, new_ub = select_coreset(
             labeled_X=labeled_x,
