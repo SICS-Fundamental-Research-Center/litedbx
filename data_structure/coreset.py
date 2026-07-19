@@ -371,11 +371,11 @@ def _include_missing_minority_classes(  # pylint: disable=too-many-arguments,too
     del b_lab, labeling_budget
     num_pos_sampled = acquired_labels.loc[labeled_indices].sum()
     num_neg_sampled = len(labeled_indices) - num_pos_sampled
-    minority_bias = 5 - min(num_pos_sampled, num_neg_sampled)
+    minority_bias = 5
 
     if num_pos_sampled < minority_bias:
         pos_indices = acquired_labels[acquired_labels].index
-        pos_to_add = min(minority_bias, len(pos_indices))
+        pos_to_add = min(minority_bias - num_pos_sampled, len(pos_indices))
         labeled_indices = labeled_indices.union(pos_indices[:pos_to_add])
         logger.info(
             "Minority class (positive) is not sampled for query '%s' "
@@ -389,7 +389,7 @@ def _include_missing_minority_classes(  # pylint: disable=too-many-arguments,too
         )
     if num_neg_sampled < minority_bias:
         neg_indices = acquired_labels[~acquired_labels].index
-        neg_to_add = min(minority_bias, len(neg_indices))
+        neg_to_add = min(minority_bias - num_neg_sampled, len(neg_indices))
         labeled_indices = labeled_indices.union(neg_indices[:neg_to_add])
         logger.info(
             "Minority class (negative) is not sampled for query '%s' "
