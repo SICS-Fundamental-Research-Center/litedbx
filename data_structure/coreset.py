@@ -368,7 +368,7 @@ def _include_missing_minority_classes(  # pylint: disable=too-many-arguments,too
     del b_lab, labeling_budget
     num_pos_sampled = acquired_labels.loc[labeled_indices].sum()
     num_neg_sampled = len(labeled_indices) - num_pos_sampled
-    minority_bias = max(min(num_pos_sampled - 1, num_neg_sampled - 1, 2), 0)
+    minority_bias = 5
 
     if num_pos_sampled == 0:
         pos_indices = acquired_labels[acquired_labels].index
