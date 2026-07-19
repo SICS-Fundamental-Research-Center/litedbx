@@ -136,10 +136,13 @@ class CoresetStore(dict[str, CoresetRecord]):
         )
         logger.info(
             "Initialized coreset for query '%s' in stream-%s with %s "
-            "labeled samples. Remaining Sigma-satisfied data has %s samples.",
+            "labeled samples (%s pos / %s neg) "
+            "Remaining Sigma-satisfied data has %s samples.",
             q_name,
             stream_idx,
             len(labeled_indices),
+            acquired_labels.loc[labeled_indices].sum(),
+            len(labeled_indices) - acquired_labels.loc[labeled_indices].sum(),
             len(remaining_indices),
         )
 
@@ -368,9 +371,9 @@ def _include_missing_minority_classes(  # pylint: disable=too-many-arguments,too
     del b_lab, labeling_budget
     num_pos_sampled = acquired_labels.loc[labeled_indices].sum()
     num_neg_sampled = len(labeled_indices) - num_pos_sampled
-    minority_bias = 5
+    minority_bias = 5 - min(num_pos_sampled, num_neg_sampled)
 
-    if num_pos_sampled == 0:
+    if num_pos_sampled < minority_bias:
         pos_indices = acquired_labels[acquired_labels].index
         pos_to_add = min(minority_bias, len(pos_indices))
         labeled_indices = labeled_indices.union(pos_indices[:pos_to_add])
@@ -384,7 +387,7 @@ def _include_missing_minority_classes(  # pylint: disable=too-many-arguments,too
             acquired_labels.loc[labeled_indices].sum(),
             len(labeled_indices),
         )
-    if num_neg_sampled == 0:
+    if num_neg_sampled < minority_bias:
         neg_indices = acquired_labels[~acquired_labels].index
         neg_to_add = min(minority_bias, len(neg_indices))
         labeled_indices = labeled_indices.union(neg_indices[:neg_to_add])

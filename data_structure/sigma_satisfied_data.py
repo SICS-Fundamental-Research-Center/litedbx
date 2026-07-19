@@ -207,7 +207,21 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         tp = len(ground_truth.intersection(retrieved_data))
         fp = len(retrieved_data - ground_truth)
         fn = len(ground_truth - retrieved_data)
-        return _quality_metrics(q_name, stream_idx, tp, fp, fn)
+        metrics = _quality_metrics(q_name, stream_idx, tp, fp, fn)
+
+        logger.info(
+            "Query '%s' quality metrics in stream-%s: "
+            "TP=%s, FP=%s, FN=%s, Precision=%.4f, Recall=%.4f, F1=%.4f",
+            q_name,
+            stream_idx,
+            metrics["TP"],
+            metrics["FP"],
+            metrics["FN"],
+            metrics["precision"],
+            metrics["recall"],
+            metrics["f1"],
+        )
+        return metrics
 
     def compute_stream_stat(
         self, q_name: str
