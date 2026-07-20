@@ -1,14 +1,28 @@
 tasks:
-  - name: medical_q1_0.6
+  - name: dynamic_data
     exp_group: re_vary_delta
-    models: [qwen3-30b-fp8]
+    models: [
+            # qwen3-30b-fp8,
+            qwen3-vl-30b,
+            ]
     release_model_after_task: false
     config_override:
-      dynamic_setting: [[0.6]]
+      dynamic_setting: [[
+                        #  0.6, 
+                        # 0.7, 
+                        # 0.8, 
+                        # 0.9, 
+                         1.0,
+                         ]]
     objects:
       - workload: medical
         queries:
-          - [Q1]
+          - [
+            # Q1,
+            # Q3,
+            Q8,
+            # Q9,
+            ]
     collect:
       execution_trace:
         iterations: ALL
