@@ -1,0 +1,27 @@
+tasks:
+  - name: annotation_test
+    exp_group: re_vary_b_lab
+    models: [
+      qwen3-30b-fp8
+    ]
+    release_model_after_task: false
+    config_override:
+      b_lab: [
+        20
+      ]
+    objects:
+      - workload: medical
+        queries:
+          - [
+            Q1,
+          ]
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj, 
+          overall_selectivity, total_size,
+          features,
+        ]
