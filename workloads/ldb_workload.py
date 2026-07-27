@@ -1,5 +1,5 @@
 # pylint: disable=invalid-name,too-many-instance-attributes
-# pylint: disable=missing-function-docstring
+# pylint: disable=missing-function-docstring,duplicate-code
 """Engine-facing LiteDBX workload facade."""
 
 import logging
@@ -9,6 +9,7 @@ from typing import Any
 
 from data_structure import LdbDataManager, SemCQ
 from llm import LdbLLMClient
+from workloads.config_schema import validate_workload_config
 from workloads.core.coreset_maintainer import CoresetMaintainer
 from workloads.core.feature_pipeline import FeaturePipeline
 from workloads.core.preprocessing import Preprocessing
@@ -16,6 +17,22 @@ from workloads.core.query_execution import QueryExecution
 from workloads.core.reporting import Reporting
 
 logger = logging.getLogger(__name__)
+
+
+def experiment_checkpoint_path(
+    exp_group: str,
+    scenario: str,
+    exp_patch: dict,
+    dynamic_setting: list[float],
+) -> Path:
+    """Build an experiment checkpoint path from its complete identity."""
+    path = Path(__file__).parent.parent / ".data_ckpt" / exp_group / scenario
+    if exp_patch:
+        exp_term = "_".join(
+            f"{key}={value}" for key, value in exp_patch.items()
+        )
+        path /= exp_term
+    return path / "_".join(str(step) for step in dynamic_setting)
 
 
 class LdbWorkload:
@@ -33,7 +50,8 @@ class LdbWorkload:
         self.data_dir = data_dir
         self.scenario = scenario
         self.queries = queries
-        self.config = config
+        validate_workload_config(config)
+        self.config = dict(config)
         self._load_config_values()
 
         self.CKPT_path = (
@@ -67,6 +85,8 @@ class LdbWorkload:
             random_seed=self.random_seed,
             b_lab=self.b_lab,
             b_se=self.b_se,
+            b_fs=self.b_fs,
+            enable_hitl=self.enable_hitl,
         )
         self._coreset_maintainer = CoresetMaintainer(
             data_manager=self.data_manager,
@@ -84,7 +104,6 @@ class LdbWorkload:
             b_rew=self.b_rew,
             b_lab=self.b_lab,
             delta=self.delta,
-            eta=self.eta,
         )
         self._reporting = Reporting(self.usage_statistics)
 
@@ -129,14 +148,19 @@ class LdbWorkload:
 
         phase_start = time()
         step_start = phase_start
-        await self._feature_pipeline.construct_feature_space(debug=debug)
+        await self._feature_pipeline.construct_feature_space()
         step_end = time()
         durations["coreset_feature_space"] = step_end - step_start
 
         step_start = step_end
-        await self._feature_pipeline.sync_with_enriched_features(tag="init")
+        await self._feature_pipeline.sync_coreset_features(tag="init")
         step_end = time()
         durations["coreset_sync"] = step_end - step_start
+
+        step_start = step_end
+        await self._feature_pipeline.rank_and_trim_feature_space()
+        step_end = time()
+        durations["query_trim"] = step_end - step_start
 
         step_start = step_end
         self._coreset_maintainer.expand_coresets(inc_round=0)
@@ -146,11 +170,6 @@ class LdbWorkload:
 
         phase_start = time()
         step_start = phase_start
-        await self._feature_pipeline.rank_and_trim_feature_space()
-        step_end = time()
-        durations["query_trim"] = step_end - step_start
-
-        step_start = step_end
         execution_trace = await self._query_execution.execute_queries(
             enable_rewrite=self.enable_rewrite,
             enable_enrich=self.enable_enrich,
@@ -205,28 +224,19 @@ class LdbWorkload:
         assert exp_patch is not None, (
             "Exp patch cannot be None when injecting exp setting."
         )
-        for k, v in exp_patch.items():
-            assert k in self.config, f"Invalid config key in exp patch: {k}"
-            self.config[k] = v
-            logger.info("Exp patch applied: %s=%s", k, v)
+        updated_config = {**self.config, **exp_patch}
+        validate_workload_config(updated_config)
+        self.config = updated_config
+        for key, value in exp_patch.items():
+            logger.info("Exp patch applied: %s=%s", key, value)
 
         self._load_config_values()
 
-        exp_term = "_".join(
-            [
-                str(v[0]) + "=" + str(v[1])
-                for v in list(
-                    zip(exp_patch.keys(), exp_patch.values(), strict=True)
-                )
-            ]
-        )
-        self.CKPT_path = (
-            Path(__file__).parent.parent
-            / ".data_ckpt"
-            / exp_group
-            / self.scenario
-            / exp_term
-            / "_".join(str(step) for step in self.dynamic_setting)
+        self.CKPT_path = experiment_checkpoint_path(
+            exp_group=exp_group,
+            scenario=self.scenario,
+            exp_patch=exp_patch,
+            dynamic_setting=self.dynamic_setting,
         )
         self._ensure_query_ckpts()
         self.data_manager.set_ckpt_path(self.CKPT_path)
@@ -238,7 +248,6 @@ class LdbWorkload:
         self.b_se = self.config["b_se"]
         self.b_rew = self.config["b_rew"]
         self.b_fs = self.config["b_fs"]
-        self.eta = self.config["eta"]
         self.delta = self.config["delta"]
         self.enable_hitl = self.config["enable_hitl"]
         self.enable_conf_pred = self.config["enable_conf_pred"]
