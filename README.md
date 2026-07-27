@@ -1,6 +1,6 @@
 # LiteDBX
 
-A lightweight query engine for processing multi-modal data with semantic rule extraction, LLM-based inference, and intelligent query translation.
+A lightweight query engine for processing multi-modal data with LLM-based feature extraction and query translation.
 
 ## Features
 
@@ -218,12 +218,12 @@ Configure your queries in the `workloads/` directory. Each dataset should have i
 
 ```yaml
 random_seed: 42
-b_lab: 50          # Number of human labels to acquire
+b_lab: 20          # Number of human labels to acquire
 b_se: 5            # External feature selection budget
 b_rew: 5           # Query rewriting (disjunction) budget
 b_fs: 10           # Feature space generation budget
 k_neighbors: 5     # Number of neighbors for coreset expansion
-loo_step: 10       # Step size for leave-one-out validation
+loo_step: 1        # Step size for leave-one-out validation
 delta: 0.05        # Confidence level for error estimation
 ```
 
@@ -286,12 +286,12 @@ def get_workload(queries: list[str], config: Optional[dict] = None) -> LdbWorklo
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `random_seed` | Random seed for reproducibility | 42 |
-| `b_lab` | Number of human labels to acquire initially | 50 |
+| `b_lab` | Number of human labels to acquire initially | 20 |
 | `b_se` | Budget for selecting external features | 5 |
 | `b_rew` | Budget for query rewriting disjunctions | 5 |
 | `b_fs` | Budget for feature space generation | 10 |
 | `k_neighbors` | Number of neighbors for coreset expansion | 5 |
-| `loo_step` | Step size for leave-one-out validation | 10 |
+| `loo_step` | Step size for leave-one-out validation | 1 |
 | `delta` | Confidence parameter (1 - delta) for error bounds | 0.05 |
 
 ## Project Structure
