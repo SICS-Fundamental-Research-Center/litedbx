@@ -164,7 +164,7 @@ class LdbLLMClient:
             "max_tokens": self.config.get("max_tokens"),
             "top_p": self.config.get("top_p"),
             "temperature": self.config.get("temperature"),
-            "random_seed": self.config.get("random_seed"),
+            "seed": self.config.get("random_seed"),
         }
 
     def get_usage_statistics(self):
