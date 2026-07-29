@@ -108,6 +108,43 @@ class LdbData:
 
         return self.df[mask].index
 
+    def expected_enriched_columns(
+        self, enriched_features: list[PopulationSpec]
+    ) -> set[str]:
+        """Return the complete schema expected after feature enrichment."""
+        return set(
+            self.base_features
+            + self.id_features
+            + self.foreign_keys
+            + [spec.target_col for spec in enriched_features]
+        )
+
+    def reuse_cached_features(self, cached_df: pd.DataFrame) -> bool:
+        """Reuse cached feature columns when base rows match exactly."""
+        base_columns = self.base_features + self.id_features + self.foreign_keys
+        if len(cached_df) != len(self.df) or any(
+            column not in cached_df for column in base_columns
+        ):
+            return False
+        current_base = self.df[base_columns].reset_index(drop=True)
+        cached_base = cached_df[base_columns].reset_index(drop=True)
+        current_base = current_base.where(current_base.notna(), "")
+        cached_base = cached_base.where(cached_base.notna(), "")
+        try:
+            pd.testing.assert_frame_equal(
+                current_base, cached_base, check_dtype=False
+            )
+        except AssertionError:
+            return False
+
+        external_columns = [
+            column for column in cached_df.columns if column not in base_columns
+        ]
+        for column in external_columns:
+            if column not in self.df:
+                self.df[column] = cached_df[column].to_numpy()
+        return True
+
     async def sync_with_enriched_features(
         self,
         enriched_features: list[PopulationSpec],

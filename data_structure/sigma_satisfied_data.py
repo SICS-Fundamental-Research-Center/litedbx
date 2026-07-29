@@ -130,7 +130,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             data_dir=data_dir,
         )
 
-    async def sync_features(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    async def sync_features(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         q_name: str,
         stream_idx: int,
@@ -144,6 +144,12 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         """Synchronize enriched features for one Sigma-satisfied dataset."""
         filename = f"stream_{stream_idx}_sigma_satisfied_data_{tag}.csv"
         ckpt_path = ckpt_root / q_name / filename
+        if q_name not in enriched_features:
+            raise ValueError(f"Enriched features for query {q_name} not found")
+        ldb_data = self[stream_idx][q_name]["ldb_data"]
+        expected_columns = ldb_data.expected_enriched_columns(
+            enriched_features[q_name]
+        )
         if enable_cache and ckpt_path.exists():
             logger.debug(
                 "Loading enriched Sigma-satisfied data for query '%s' "
@@ -154,28 +160,30 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             cached_df = pd.read_csv(ckpt_path)
             labels = self[stream_idx][q_name]["labels"]
             label_count = (
-                len(labels)
-                if labels is not None
-                else len(self[stream_idx][q_name]["ldb_data"].df)
+                len(labels) if labels is not None else len(ldb_data.df)
             )
-            if len(cached_df) == label_count:
-                self[stream_idx][q_name]["ldb_data"].df = cached_df
+            cache_schema = set(cached_df.columns)
+            cache_compatible = ldb_data.reuse_cached_features(cached_df)
+            if cache_compatible and cache_schema == expected_columns:
                 return llm_client.get_usage_statistics()
-
-            logger.warning(
-                "Ignoring cached enriched Sigma-satisfied data for query "
-                "'%s' in stream-%s because row count %s does not match "
-                "label count %s.",
-                q_name,
-                stream_idx,
-                len(cached_df),
-                label_count,
-            )
-
-        if q_name not in enriched_features:
-            raise ValueError(
-                f"Enriched features for query '{q_name}' not found"
-            )
+            if cache_compatible:
+                logger.info(
+                    "Reusing compatible Sigma feature cache for query %s in "
+                    "stream-%s; missing columns=%s, obsolete columns=%s.",
+                    q_name,
+                    stream_idx,
+                    sorted(expected_columns - cache_schema),
+                    sorted(cache_schema - expected_columns),
+                )
+            else:
+                logger.warning(
+                    "Ignoring incompatible Sigma cache for query %s in "
+                    "stream-%s: rows=%s (expected %s).",
+                    q_name,
+                    stream_idx,
+                    len(cached_df),
+                    label_count,
+                )
 
         await self[stream_idx][q_name]["ldb_data"].sync_with_enriched_features(
             enriched_features=enriched_features[q_name],

@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 """LiteDBX data lifecycle manager."""
 
 from pathlib import Path
@@ -43,7 +44,9 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
         self.rewrite_rules: dict[str, dict] = {}
 
         self.ckpt_path = self._default_ckpt_path()
+        self.annotation_ckpt_path = self._default_annotation_ckpt_path()
         self._ensure_ckpt_path()
+        self.annotation_ckpt_path.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Public workflow API
@@ -78,8 +81,11 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
             data_dir=self.data_dir,
         )
 
-    async def acquire_annotation_and_init_coreset(
-        self, b_lab: int, seed: int = 42, use_hitl: bool = True
+    async def acquire_annotation_and_init_coreset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        b_lab: int,
+        seed: int = 42,
+        use_hitl: bool = True,
     ) -> None:
         """Acquire labels and initialize query coresets."""
         await self.coresets.acquire_annotation_and_init(
@@ -88,7 +94,9 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
             complete_config=self.complete_dataset.config,
             llm_client=self.llm_client,
             ckpt_root=self.ckpt_path,
+            pseudo_ckpt_root=self.annotation_ckpt_path,
             b_lab=b_lab,
+            feature_spaces=self.enriched_features,
             seed=seed,
             use_hitl=use_hitl,
         )
@@ -164,6 +172,16 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
         return (
             Path(__file__).parent.parent
             / ".data_ckpt"
+            / self.scenario
+            / "_".join(str(step) for step in self.dynamic_steps)
+        )
+
+    def _default_annotation_ckpt_path(self) -> Path:
+        """Return a cache root shared across labeling-budget variants."""
+        return (
+            Path(__file__).parent.parent
+            / ".data_ckpt"
+            / "annotation_cache"
             / self.scenario
             / "_".join(str(step) for step in self.dynamic_steps)
         )
