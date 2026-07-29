@@ -1,7 +1,7 @@
 GEN_FEAT_CANDIDATE_PROMPT = """
 You are an expert in feature engineering for information retrieval and query optimization.
 
-Your task is to identify *explicitly extractable, stable, and query-relevant* features from an unstructured source field using contrastive learning.
+Your task is to identify *explicitly extractable, stable, and query-relevant* features from an unstructured source field using only a semantic task description.
 
 Context:
 - Source field modality: {MODALITY}
@@ -14,8 +14,8 @@ Context:
 {PERFORMANCE_FEEDBACK_SECTION}
 
 Instructions:
-We provide you with contrastive examples: POSITIVE samples (labeled as satisfying the query) and NEGATIVE samples (labeled as not satisfying the query).
-Your task is to identify features that can effectively distinguish between positive and negative samples.
+No data examples, annotations, evaluation labels, or benchmark-specific feature hints are provided.
+Infer only generally applicable features that are directly implied by the semantic task description.
 
 {INSTRUCTIONS_SECTION}
 
@@ -65,17 +65,10 @@ Constraints:
     • useful for filtering, ranking, or query rewriting
 - Do NOT include free-text, categorical, or high-cardinality string features.
 {CONSTRAINTS_ADDITIONAL}
-- MUST include a feature that directly answer the task description. 
-  • The name of this feature MUST has the prefix: `llm_label_`. For example: `llm_label_is_positive`.
-  • The feature type of this feature MUST be boolean.
-```
-{DESC}
-```
-you should name it using a concise and self-explanatory name. It's prompt can be taken directly from the task description.
+- The exact task predicate is materialized separately. Propose complementary
+  evidence features rather than restating the complete task.
 - Output valid JSON only. Do not include explanations or comments.
 
-=== Contrastive Learning Data ===
-We show the POSITIVE samples (satisfying the query) and NEGATIVE samples (not satisfying the query) at below:
 """
 
 
