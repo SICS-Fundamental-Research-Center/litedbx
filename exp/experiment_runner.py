@@ -209,7 +209,6 @@ def parse_collect_spec(
             trace_spec=trace_spec,
             execution_trace=engine_result.get("execution_trace", {}),
         )
-
         collected_info.extend(
             [
                 {
