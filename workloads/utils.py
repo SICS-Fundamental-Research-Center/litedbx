@@ -7,6 +7,7 @@
 """Workload-level modeling, rule, and feature helpers."""
 
 import logging
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -21,7 +22,10 @@ def encode_features(df: pd.DataFrame) -> pd.DataFrame:
     """Encode categorical variables."""
     df_proc = df.copy()
     for col in df_proc.select_dtypes(include=["object"]).columns:
-        encoded = LabelEncoder().fit_transform(df_proc[col].astype(str))
+        encoded = np.asarray(
+            LabelEncoder().fit_transform(df_proc[col].astype(str)),
+            dtype=np.int64,
+        )
         df_proc[col] = pd.Series(encoded, index=df_proc.index, dtype=int)
     return df_proc
 
@@ -49,58 +53,33 @@ def weight_features(
 
 
 def train_classifier(
-    X: pd.DataFrame, Y: pd.Series, n_estimators=100, max_depth=10
+    X: pd.DataFrame,
+    Y: pd.Series,
+    n_estimators=100,
+    max_depth=10,
+    min_samples_leaf=1,
+    sample_weight: pd.Series | np.ndarray | None = None,
 ) -> RandomForestClassifier:
     # Sklearn classifiers require integer labels.
     Y = Y.astype(int)
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
+        min_samples_leaf=min_samples_leaf,
         random_state=42,
-        class_weight="balanced",
+        class_weight=None if sample_weight is not None else "balanced",
     )
-    clf.fit(X, Y)
+    clf.fit(X, Y, sample_weight=sample_weight)
 
     return clf
 
 
-def evaluate_classifier(Y_true: pd.Series, Y_pred: pd.Series) -> dict:
-    # Convert labels to integers for consistency
-    Y_true = Y_true.astype(int)
-    Y_pred = Y_pred.astype(int)
-
-    # Calculate TP, FP, TN, FN
-    TP = ((Y_true == 1) & (Y_pred == 1)).sum()
-    FP = ((Y_true == 0) & (Y_pred == 1)).sum()
-    TN = ((Y_true == 0) & (Y_pred == 0)).sum()
-    FN = ((Y_true == 1) & (Y_pred == 0)).sum()
-
-    assert TP + FP + TN + FN == len(Y_true), (
-        "Sum of TP, FP, TN, FN must equal total samples. "
-        f"Got {TP + FP + TN + FN} samples, expected {len(Y_true)}."
-    )
-
-    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
-    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
-    f1 = (
-        2 * (precision * recall) / (precision + recall)
-        if (precision + recall) > 0
-        else 0
-    )
-
-    return {
-        "f1": f1,
-        "precision": precision,
-        "recall": recall,
-        "TP": TP,
-        "FP": FP,
-        "TN": TN,
-        "FN": FN,
-    }
-
-
 def compute_feature_importance(
-    X: pd.DataFrame, Y: pd.Series, n_estimators=100, max_depth=10
+    X: pd.DataFrame,
+    Y: pd.Series,
+    n_estimators=100,
+    max_depth=10,
+    sample_weight: pd.Series | np.ndarray | None = None,
 ) -> pd.DataFrame:
 
     if X.shape[1] == 0:
@@ -117,9 +96,9 @@ def compute_feature_importance(
         n_estimators=n_estimators,
         max_depth=max_depth,
         random_state=42,
-        class_weight="balanced",
+        class_weight=None if sample_weight is not None else "balanced",
     )
-    clf.fit(X, Y)
+    clf.fit(X, Y, sample_weight=sample_weight)
 
     feat_importances = pd.DataFrame(
         {"feature": X.columns.tolist(), "importance": clf.feature_importances_}
@@ -134,6 +113,9 @@ def clf_to_rules(
     disjunction_budget: int,
     X_train: np.ndarray,
     y_train: np.ndarray,
+    X_reference: np.ndarray | None = None,
+    y_reference: np.ndarray | None = None,
+    sample_weight: np.ndarray | None = None,
     debug: bool = False,
 ) -> list[list[tuple[str, float, str]]]:
 
@@ -143,11 +125,29 @@ def clf_to_rules(
     y_train = y_train.astype(int)
 
     N = len(y_train)
-    pos_mask = y_train == 1
-    neg_mask = y_train == 0
+    weights = (
+        np.ones(N, dtype=float)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=float)
+    )
+    if len(weights) != N:
+        raise ValueError("sample_weight must align with y_train.")
+    if (X_reference is None) != (y_reference is None):
+        raise ValueError(
+            "X_reference and y_reference must either both be set or both be "
+            "None."
+        )
+    if X_reference is not None and X_reference.shape[1] != len(feature_names):
+        raise ValueError(
+            "Reference features must align with the classifier schema."
+        )
+    if y_reference is not None:
+        assert X_reference is not None
+        if len(X_reference) != len(y_reference):
+            raise ValueError("Reference features and labels must align.")
 
-    # Fallback: if all samples are of the same class, return empty rule set
-    if len(np.unique(y_train)) == 1:
+    # Without a population reference, preserve a usable single-class fallback.
+    if y_reference is None and len(np.unique(y_train)) == 1:
         fallback_rules = []
         for feature_name in feature_names:
             if not feature_name.startswith("llm_label_"):
@@ -166,8 +166,6 @@ def clf_to_rules(
                 y_train[0],
             )
         return fallback_rules
-
-    _lambda = sum(neg_mask) / max(1, sum(pos_mask))
 
     # ------------------------------------------------------------
     # Canonicalization
@@ -191,23 +189,52 @@ def clf_to_rules(
     # ------------------------------------------------------------
     # Evaluate rule coverage on training data
     # ------------------------------------------------------------
-    def evaluate_rule(rule):
-        mask = np.ones(N, dtype=bool)
+    feature_positions = {
+        feature_name: index for index, feature_name in enumerate(feature_names)
+    }
+
+    def evaluate_rule(rule, data):
+        mask = np.ones(len(data), dtype=bool)
 
         for feat, low, high in rule:
-            idx = feature_names.index(feat)
+            idx = feature_positions[feat]
 
             if low != -np.inf:
-                mask &= X_train[:, idx] > low
+                mask &= data[:, idx] > low
             if high != np.inf:
-                mask &= X_train[:, idx] <= high
+                mask &= data[:, idx] <= high
 
         return mask
+
+    def balanced_disagreement(target, prediction, row_weights=None):
+        target = np.asarray(target, dtype=bool)
+        prediction = np.asarray(prediction, dtype=bool)
+        local_weights = (
+            np.ones(len(target), dtype=float)
+            if row_weights is None
+            else np.asarray(row_weights, dtype=float)
+        )
+        positive_weight = local_weights[target].sum()
+        negative_weight = local_weights[~target].sum()
+        if positive_weight > 0 and negative_weight > 0:
+            class_weights = np.where(
+                target,
+                0.5 / positive_weight,
+                0.5 / negative_weight,
+            )
+            return float(
+                (local_weights * class_weights * (target != prediction)).sum()
+            )
+        return float(np.average(target != prediction, weights=local_weights))
 
     # ------------------------------------------------------------
     # Extract candidate rules from forest
     # ------------------------------------------------------------
     candidates = []
+    positive_class_positions = np.flatnonzero(clf.classes_ == 1)
+    if len(positive_class_positions) != 1:
+        return []
+    positive_class_position = int(positive_class_positions[0])
 
     for tree in clf.estimators_:
         tree_ = tree.tree_
@@ -221,12 +248,16 @@ def clf_to_rules(
         def traverse(node_id: int, path: list):
 
             if cl[node_id] == cr[node_id]:  # leaf
-                pos = val[node_id][0][1]
-                if pos == 0:
+                predicted_class_position = int(np.argmax(val[node_id][0]))
+                if predicted_class_position != positive_class_position:
                     return
 
-                canon = canonicalize_rule(path)
-                candidates.append(canon)
+                # Include supported generalizations of each positive leaf.
+                # A forest path may contain incidental predicates that make the
+                # translated UCQ less faithful than a supported sub-conjunction.
+                for size in range(1, len(path) + 1):
+                    for subset in combinations(path, size):
+                        candidates.append(canonicalize_rule(subset))
                 return
 
             fname = feature_names[feat[node_id]]
@@ -246,45 +277,60 @@ def clf_to_rules(
     candidates = sorted(set(candidates), key=lambda r: str(r))
 
     # ------------------------------------------------------------
-    # Greedy marginal coverage selection
+    # Distill the forest over the population. Annotation loss and rule size
+    # resolve population-level ties without consulting evaluation labels.
     # ------------------------------------------------------------
     selected = []
-    uncovered_pos = pos_mask.copy()
+    reference_X = X_train if X_reference is None else X_reference
+    reference_y = y_train if y_reference is None else y_reference.astype(int)
+    reference_prediction = np.zeros(len(reference_y), dtype=bool)
+    annotation_prediction = np.zeros(N, dtype=bool)
+    current_loss = balanced_disagreement(reference_y, reference_prediction)
+    loss_resolution = 1.0 / max(1, len(reference_y))
 
     for _ in range(disjunction_budget):
-        best_rule = None
-        best_gain = -1 * np.inf
-        best_mask = None
-
+        evaluations = []
         for rule in candidates:
-            mask = evaluate_rule(rule)
+            reference_mask = evaluate_rule(rule, reference_X)
+            candidate_prediction = reference_prediction | reference_mask
+            reference_loss = balanced_disagreement(
+                reference_y, candidate_prediction
+            )
+            if reference_loss >= current_loss - 1e-12:
+                continue
+            annotation_mask = evaluate_rule(rule, X_train)
+            annotation_loss = balanced_disagreement(
+                y_train,
+                annotation_prediction | annotation_mask,
+                weights,
+            )
+            evaluations.append(
+                (
+                    reference_loss,
+                    annotation_loss,
+                    len(rule),
+                    str(rule),
+                    rule,
+                    reference_mask,
+                    annotation_mask,
+                )
+            )
 
-            new_pos = np.sum(mask & uncovered_pos)
-            new_neg = np.sum(mask & neg_mask)
-
-            # Gain function (tunable)
-            gain = new_pos - _lambda * new_neg
-
-            if gain > best_gain:
-                best_gain = gain
-                best_rule = rule
-                best_mask = mask
-
-        if best_rule is None or best_gain <= 0:
+        if not evaluations:
             break
-
+        minimum_loss = min(item[0] for item in evaluations)
+        eligible = [
+            item
+            for item in evaluations
+            if item[0] <= minimum_loss + loss_resolution
+        ]
+        best = min(eligible, key=lambda item: (item[2], item[1], item[3]))
+        current_loss, _, _, _, best_rule, reference_mask, annotation_mask = best
         selected.append(best_rule)
-
-        # Remove covered positives
-        assert best_mask is not None, (
-            "best_mask should not be None when best_rule is selected."
-        )
-        uncovered_pos &= ~best_mask
-
-        # Remove rule from candidates
+        reference_prediction |= reference_mask
+        annotation_prediction |= annotation_mask
         candidates.remove(best_rule)
-
-        if np.sum(uncovered_pos) == 0:
+        if current_loss <= 1e-12:
             break
 
     # ------------------------------------------------------------
@@ -302,7 +348,11 @@ def clf_to_rules(
         rules.append(reconstructed)
 
     if debug:
-        print(f"[Marginal OR Rules] _lambda={_lambda}, selected={len(rules)}")
+        logger.info(
+            "Distilled %s rule(s) with population disagreement %.6f.",
+            len(rules),
+            current_loss,
+        )
 
     return rules
 
@@ -310,16 +360,14 @@ def clf_to_rules(
 def apply_rules(
     rules: list, df: pd.DataFrame, debug: bool = False
 ) -> pd.Series:
-    if not rules:
+    if not rules or any(not rule for rule in rules):
         return pd.Series(
             1, index=df.index
-        )  # Empty rule means accept all tuples.
+        )  # An empty conjunction accepts all tuples.
 
     result = pd.Series(False, index=df.index)
 
     for rule in rules:
-        assert rule, "Empty rule is not allowed."
-
         mask = pd.Series(True, index=df.index)
         for feat_name, thresh, op in rule:
             if op == "<=":

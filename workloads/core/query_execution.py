@@ -2,7 +2,7 @@
 # pylint: disable=invalid-name,import-outside-toplevel,unused-argument
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 # pylint: disable=too-many-instance-attributes,consider-using-enumerate
-# pylint: disable=consider-using-generator
+# pylint: disable=consider-using-generator,too-many-lines,too-many-statements
 """Query rewrite, execution, and incremental evaluation helpers."""
 
 import logging
@@ -10,12 +10,23 @@ import math
 from time import time
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 
 from data_structure import LdbDataManager, SemCQ
 from llm import LdbLLMClient
 from workloads.core.coreset_maintainer import CoresetMaintainer
+from workloads.core.rewrite_candidates import (
+    EXPANDED_FOREST,
+    ForestConfig,
+    RewriteCandidate,
+    build_forest_configs,
+    build_rewrite_candidates,
+    select_candidate_index,
+    select_forest_config,
+)
+from workloads.core.semantic_features import feature_key, predicate_key
 from workloads.utils import (
     apply_rules,
     clf_to_rules,
@@ -41,7 +52,6 @@ class QueryExecution:
         b_rew: int,
         b_lab: int,
         delta: float,
-        eta: float,
     ) -> None:
         self._coreset_maintainer = coreset_maintainer
         self.data_manager = data_manager
@@ -52,7 +62,6 @@ class QueryExecution:
         self.b_rew = b_rew
         self.b_lab = b_lab
         self.delta = delta
-        self.eta = eta
 
     async def execute_queries(
         self,
@@ -72,72 +81,137 @@ class QueryExecution:
     def _rewrite_and_execute_query(
         self, debug: bool = False
     ) -> tuple[dict, dict]:
-        best_static_error = float("inf")
-        best_statistics = {}
-        execution_trace = {}
-        rules_trace = {}
-
-        assert len(self.data_manager.trimmed_feature_names) > 0, (
+        assert self.data_manager.trimmed_feature_names, (
             "No available features to be selected."
         )
-
-        for i in range(len(self.data_manager.trimmed_feature_names) + 1):
-            accumulated_error = 0
+        candidates = build_rewrite_candidates(
+            feature_count=len(self.data_manager.trimmed_feature_names),
+            minimum_feature_count=self._minimum_required_feature_count(),
+        )
+        execution_trace = {}
+        rules_trace = {}
+        for index, candidate in enumerate(candidates):
             execution_results = self._init_execution_results()
-
             for q_name in self.queries:
                 query_results = self._execute_rewrite_candidate(
                     q_name=q_name,
-                    feature_count=i,
+                    candidate=candidate,
                     rules_trace=rules_trace,
                     debug=debug,
                 )
-                accumulated_error += query_results["L_static"]
                 self._record_execution_results(
                     execution_results, q_name, query_results
                 )
+            execution_results["L_avg"] = sum(
+                execution_results["L_static"].values()
+            ) / len(self.queries)
+            execution_trace[index] = execution_results
 
-            average_error = accumulated_error / len(self.queries)
-            execution_results["L_avg"] = average_error
-            execution_trace[i] = execution_results
+        best_results = self._compose_best_per_query(execution_trace, candidates)
+        execution_trace[len(execution_trace)] = best_results
+        for q_name in self.queries:
+            self.data_manager.rewrite_rules[q_name] = {
+                "active_external_features": list(
+                    best_results["features"][q_name]
+                ),
+                "ucq": list(best_results["rules"][q_name]),
+            }
+            logger.info(
+                "Selected rewrite for query %s with features %s; "
+                "L_static = %.4f",
+                q_name,
+                best_results["features"][q_name],
+                best_results["L_static"][q_name],
+            )
+        return best_results, execution_trace
 
-            if average_error < best_static_error:
-                best_static_error = average_error
-                best_statistics = execution_results
-                for q_name in self.queries:
-                    self.data_manager.rewrite_rules[q_name] = {
-                        "active_external_features": list(
-                            execution_results["features"][q_name]
-                        ),
-                        "ucq": list(execution_results["rules"][q_name]),
-                    }
-                    logger.info(
-                        "Best rewrite for iter %s; query %s with %s external features: "
-                        "%s; "
-                        "L_obj = %.4f, L_subj = %.4f, L_static = %.4f",
-                        i,
-                        q_name,
-                        len(execution_results["features"][q_name]),
-                        str(execution_results["features"][q_name]),
-                        execution_results["L_obj"][q_name],
-                        execution_results["L_subj"][q_name],
-                        execution_results["L_static"][q_name],
+    def _minimum_required_feature_count(self) -> int:
+        """Keep every query's direct semantic predicate in each rewrite."""
+        required_keys = {
+            predicate_key(predicate)
+            for query in self.queries.values()
+            for predicate in query.Ps
+        }
+        required_names = {
+            spec.target_col
+            for feature_space in self.data_manager.enriched_features.values()
+            for spec in feature_space
+            if feature_key(spec) in required_keys
+        }
+        required_positions = [
+            index
+            for index, name in enumerate(
+                self.data_manager.trimmed_feature_names
+            )
+            if name in required_names
+        ]
+        if len(required_positions) != len(required_names):
+            raise ValueError("Required semantic features were not selected.")
+        return max(required_positions, default=-1) + 1
+
+    def _compose_best_per_query(
+        self,
+        execution_trace: dict,
+        candidates: list[RewriteCandidate],
+    ) -> dict:
+        """Compose one annotation-selected candidate for each query."""
+        composite = self._init_execution_results()
+        for q_name in self.queries:
+            observed_size = self.data_manager.coresets[q_name]["observed_size"]
+            best_index = select_candidate_index(
+                candidates=candidates,
+                estimated_losses=[
+                    execution_trace[index]["L_static"][q_name]
+                    for index in range(len(candidates))
+                ],
+                loss_resolution=annotation_loss_resolution(
+                    labels=self.data_manager.coresets[q_name]["labels"].iloc[
+                        :observed_size
+                    ],
+                    query_size=len(self.queries),
+                    delta=self.delta,
+                ),
+                candidate_complexities=[
+                    self._candidate_preference(
+                        q_name, execution_trace[index][q_name]
                     )
-            else:
-                logger.info(
-                    "No improvement in average error with %s external features: "
-                    "%s; "
-                    "L_avg = %.4f (best L_avg = %.4f)",
-                    i,
-                    str(execution_results["features"][q_name]),
-                    average_error,
-                    best_static_error,
-                )
+                    for index in range(len(candidates))
+                ],
+            )
+            best = execution_trace[best_index]
+            self._record_execution_results(composite, q_name, best[q_name])
+        composite["L_avg"] = sum(composite["L_static"].values()) / len(
+            self.queries
+        )
+        return composite
 
-        return best_statistics, execution_trace
+    def _candidate_preference(
+        self, q_name: str, query_results: dict
+    ) -> tuple[int, float, int]:
+        """Order tied candidates using rule size and annotation-only loss."""
+        rules = query_results["rules"]
+        predicate_count = sum(len(conjunction) for conjunction in rules)
+        referenced_features = {
+            predicate[0] for conjunction in rules for predicate in conjunction
+        }
+        coreset = self.data_manager.coresets[q_name]
+        observed_size = coreset["observed_size"]
+        observed_labels = coreset["labels"].iloc[:observed_size].astype(int)
+        active_data = coreset["ldb_data"].select_active_features(
+            query_results["features"]
+        )
+        observed_data = encode_features(active_data).iloc[:observed_size]
+        rule_predictions = apply_rules(rules, observed_data).astype(int)
+        pi = max(1e-6, min(1 - 1e-6, float(observed_labels.mean())))
+        rule_loss = float(
+            loss_by_selectivity(observed_labels, rule_predictions, pi)
+        )
+        return predicate_count, rule_loss, len(referenced_features)
 
     def _init_execution_results(self) -> dict[str, Any]:
         stats = [
+            "candidate",
+            "candidate_feature_count",
             "rules",
             "features",
             "pred_eval",
@@ -159,52 +233,73 @@ class QueryExecution:
         execution_results["L_avg"] = float("inf")
         return execution_results
 
-    def _required_sigma_labels(self, q_name: str, stream_idx: int) -> pd.Series:
-        labels = self.data_manager.sigma_satisfied_data[stream_idx][q_name][
-            "labels"
-        ]
-        if labels is None:
-            raise ValueError(
-                f"Labels are missing for query '{q_name}' "
-                f"in stream-{stream_idx}."
-            )
-        return labels
-
     def _execute_rewrite_candidate(
         self,
         q_name: str,
-        feature_count: int,
+        candidate: RewriteCandidate,
         rules_trace: dict[str, list],
         debug: bool,
     ) -> dict[str, Any]:
-        active_external_features = [
-            spec.target_col
-            for spec in self.data_manager.enriched_features[q_name]
-            if spec.target_col
-            in self.data_manager.trimmed_feature_names[:feature_count]
-        ]
-        train_X = self.data_manager.coresets[q_name][
-            "ldb_data"
-        ].select_active_features(active_external_features)
-        train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
+        active_external_features = self._active_external_features(
+            q_name, candidate
+        )
+
+        coreset = self.data_manager.coresets[q_name]
+        observed_size = coreset["observed_size"]
+        all_train_X = coreset["ldb_data"].select_active_features(
+            active_external_features
+        )
+        all_train_Y = coreset["labels"].astype(int)
         test_X = self.data_manager.sigma_satisfied_data[0][q_name][
             "ldb_data"
         ].select_active_features(active_external_features)
-        test_Y = self._required_sigma_labels(q_name, 0).astype(int)
+
+        observed_X = all_train_X.iloc[:observed_size]
+        observed_Y = all_train_Y.iloc[:observed_size]
+        forest_configs = build_forest_configs()
+        forest_errors = [
+            compute_subjective_error(
+                X=observed_X,
+                Y=observed_Y,
+                sample_weight=None,
+                forest_config=config,
+                query_size=len(self.queries),
+                data_size=observed_size,
+                delta=self.delta,
+                loo_step=self.config["loo_step"],
+            )
+            for config in forest_configs
+        ]
+        evaluated_labels = max(
+            1, math.ceil(observed_size / self.config["loo_step"])
+        )
+        forest_config = select_forest_config(
+            configs=forest_configs,
+            estimated_losses=[
+                error + penalty for error, penalty in forest_errors
+            ],
+            loss_resolution=1.0 / evaluated_labels,
+        )
+        forest_index = forest_configs.index(forest_config)
+        L_LOO, penalty_LOO = forest_errors[forest_index]
+
+        train_X = all_train_X
+        train_Y = all_train_Y
+        sample_weight = None
 
         memory_cost = (
             self.memory_cost(train_X)
             + self.memory_cost(test_X)
             + self.memory_cost(train_Y)
-            + self.memory_cost(test_Y)
         )
-
         rules_trace.setdefault(q_name, [])
         pred_Y_li, rules = self._propagate_and_extract_rules(
             train_X=train_X,
             train_Y=train_Y,
+            sample_weight=sample_weight,
             test_X=test_X,
-            test_Y=test_Y,
+            forest_config=forest_config,
+            rule_evidence_size=observed_size,
             debug=debug,
         )
         rules_trace[q_name].append(rules)
@@ -212,13 +307,7 @@ class QueryExecution:
             "propagated_labels"
         ] = pred_Y_li[0]
 
-        start_execute = time()
         trans_Y = apply_rules(rules, encode_features(test_X))
-        end_execute = time()
-        print("=" * 20)
-        print(f"Online execution time: {end_execute - start_execute}")
-        print("=" * 20)
-
         pred_eval_results = self.data_manager.eval_query_quality(
             q_name=q_name,
             selected_cols=self.queries[q_name].selected,
@@ -232,52 +321,47 @@ class QueryExecution:
             pred_labels=[trans_Y],
         )
 
-        observed_size = self.data_manager.coresets[q_name]["observed_size"]
+        rule_feature_count = len(
+            {
+                predicate[0]
+                for conjunction in rules
+                for predicate in conjunction
+            }
+        )
+        estimated_selectivity = coreset["estimated_selectivity"]
+        if estimated_selectivity is None:
+            estimated_selectivity = float(observed_Y.mean())
         L_rew, penalty_rew = compute_objective_error(
             pred_Y=pred_Y_li[0],
             trans_Y=trans_Y,
-            observed_Y=train_Y[:observed_size],
             b_rew=self.b_rew,
-            schema_arity=len(train_X.columns.tolist()),
+            schema_arity=max(1, rule_feature_count),
             query_size=len(self.queries),
             selected_data_size=len(pred_Y_li[0]) + observed_size,
             delta=self.delta,
+            selectivity=estimated_selectivity,
         )
         penalty_rew *= 0.01
         L_obj = L_rew + penalty_rew
 
-        L_LOO, penalty_LOO = compute_subjective_error(
-            X=train_X.iloc[:observed_size],
-            Y=train_Y.iloc[:observed_size],
-            query_size=len(self.queries),
-            data_size=observed_size,
-            delta=self.delta,
-            loo_step=self.config["loo_step"],
-        )
         penalty_LOO *= 0.01
         L_subj = L_LOO + penalty_LOO
-
         L_static = L_obj + L_subj
 
         if debug:
             logger.info(
-                "Estimated for %s with %s external features: "
-                "L_obj = %.4f (L_rew=%.4f, penalty=%.4f), "
-                "L_subj = %.4f (L_LOO=%.4f, penalty=%.4f)",
+                "Estimated %s for %s: L_obj=%.4f, L_subj=%.4f",
+                candidate.kind,
                 q_name,
-                feature_count + 1,
                 L_obj,
-                L_rew,
-                penalty_rew,
                 L_subj,
-                L_LOO,
-                penalty_LOO,
             )
-
         stream_stat = (
             self.data_manager.sigma_satisfied_data.compute_stream_stat(q_name)
         )
         return {
+            "candidate": candidate.kind,
+            "candidate_feature_count": candidate.feature_count,
             "rules": rules,
             "features": active_external_features,
             "pred_eval": pred_eval_results,
@@ -296,26 +380,61 @@ class QueryExecution:
             "total_size": stream_stat["total_size"],
         }
 
+    def _active_external_features(
+        self, q_name: str, candidate: RewriteCandidate
+    ) -> list[str]:
+        """Resolve materialized features used by one candidate."""
+        enriched = self.data_manager.enriched_features[q_name]
+        feature_count = candidate.feature_count or 0
+        return [
+            spec.target_col
+            for spec in enriched
+            if spec.target_col
+            in self.data_manager.trimmed_feature_names[:feature_count]
+        ]
+
     def _propagate_and_extract_rules(
         self,
         train_X: pd.DataFrame,
         train_Y: pd.Series,
+        sample_weight: np.ndarray | None,
         test_X: pd.DataFrame,
-        test_Y: pd.Series,
-        debug: bool,
+        forest_config: ForestConfig = EXPANDED_FOREST,
+        rule_evidence_size: int | None = None,
+        debug: bool = False,
     ) -> tuple[list[pd.Series], list]:
         if train_X.shape[1] == 0:
-            return [pd.Series(1, index=test_Y.index, dtype=int)], []
+            return [pd.Series(1, index=test_X.index, dtype=int)], []
 
         clf, pred_Y_li = perform_label_propagation(
-            train_X, train_Y, [test_X], [test_Y]
+            train_X,
+            train_Y,
+            [test_X],
+            sample_weight=sample_weight,
+            forest_config=forest_config,
+        )
+        encoded_train_X = encode_features(train_X)
+        evidence_size = (
+            len(train_X) if rule_evidence_size is None else rule_evidence_size
+        )
+        if not 0 < evidence_size <= len(train_X):
+            raise ValueError(
+                "Rule evidence size must be within the training data."
+            )
+        rule_weight = (
+            None
+            if sample_weight is None
+            else np.asarray(sample_weight)[:evidence_size]
         )
         rules = clf_to_rules(
             clf,
             feature_names=train_X.columns.tolist(),
             disjunction_budget=self.b_rew,
-            X_train=encode_features(train_X).to_numpy(),
-            y_train=train_Y.to_numpy(),
+            X_train=encoded_train_X.iloc[:evidence_size].to_numpy(),
+            y_train=train_Y.iloc[:evidence_size].to_numpy(),
+            X_reference=encode_features(test_X).to_numpy(),
+            y_reference=pred_Y_li[0].to_numpy(),
+            sample_weight=rule_weight,
             debug=debug,
         )
         return pred_Y_li, rules
@@ -337,22 +456,20 @@ class QueryExecution:
                 "ldb_data"
             ].select_active_features(active_external_features)
             train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
+            sample_weight = None
             test_X = self.data_manager.sigma_satisfied_data[0][q_name][
                 "ldb_data"
             ].select_active_features(active_external_features)
-            test_Y = self._required_sigma_labels(q_name, 0).astype(int)
-
             memory_cost = (
                 self.memory_cost(train_X)
                 + self.memory_cost(test_X)
                 + self.memory_cost(train_Y)
-                + self.memory_cost(test_Y)
             )
             pred_Y_li, rules = self._propagate_and_extract_rules(
                 train_X=train_X,
                 train_Y=train_Y,
+                sample_weight=sample_weight,
                 test_X=test_X,
-                test_Y=test_Y,
                 debug=debug,
             )
             self.data_manager.sigma_satisfied_data[0][q_name][
@@ -490,13 +607,14 @@ class QueryExecution:
         )
 
         self._coreset_maintainer.expand_query_coreset(
-            q_name=q_name, inc_round=inc_round, debug=debug
+            q_name=q_name, inc_round=inc_round
         )
 
         train_X = self.data_manager.coresets[q_name][
             "ldb_data"
         ].select_active_features(active_external_features)
         train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
+        sample_weight = None
         test_X_li = [
             self.data_manager.sigma_satisfied_data[i][q_name][
                 "ldb_data"
@@ -507,20 +625,8 @@ class QueryExecution:
             else pd.DataFrame(columns=train_X.columns)
             for i in range(inc_round + 1)
         ]
-        test_Y_li: list[pd.Series] = []
-        for i in range(inc_round + 1):
-            stream_record = self.data_manager.sigma_satisfied_data[i][q_name]
-            if stream_record["ldb_data"].df.empty:
-                test_Y_li.append(pd.Series(dtype=int))
-                continue
-            labels = stream_record["labels"]
-            if labels is None:
-                raise ValueError(
-                    f"Labels are missing for query '{q_name}' in stream-{i}."
-                )
-            test_Y_li.append(labels.astype(int))
         _, pred_Y_li = perform_label_propagation(
-            train_X, train_Y, test_X_li, test_Y_li
+            train_X, train_Y, test_X_li, sample_weight=sample_weight
         )
 
         self.data_manager.sigma_satisfied_data[inc_round][q_name][
@@ -551,14 +657,20 @@ class QueryExecution:
             else 0.0
         )
         err_certificate += prev_err_certificate * 0.5
+        reoptimization_threshold = compute_inc_reoptimization_threshold(
+            prev_prop_Y_li=prev_prop_Y_li,
+            delta=self.delta,
+        )
         logger.info(
-            "Inc-Round %s, Query %s: Est. error certificate: %.4f",
+            "Inc-Round %s, Query %s: Est. error certificate: %.4f "
+            "(adaptive threshold: %.4f)",
             inc_round,
             q_name,
             err_certificate,
+            reoptimization_threshold,
         )
 
-        if err_certificate >= self.eta:
+        if err_certificate >= reoptimization_threshold:
             return None
 
         trans_Y_li = [
@@ -571,6 +683,7 @@ class QueryExecution:
 
         return {
             "error_certificate": err_certificate,
+            "reoptimization_threshold": reoptimization_threshold,
             "data_err": data_err,
             "pred_err": pred_err,
             "pred_eval": self.data_manager.eval_query_quality(
@@ -597,35 +710,31 @@ class QueryExecution:
 def compute_objective_error(
     pred_Y: pd.Series,
     trans_Y: pd.Series,
-    observed_Y: pd.Series,
     b_rew: int,
     schema_arity: int,
     query_size: int,
     selected_data_size: int,
     delta: float,
+    selectivity: float,
 ) -> tuple[float, float]:
     """Compute rewriting loss and penalty.
 
     Args:
         pred_Y: Predicted labels
         trans_Y: Translated labels
-        observed_Y: Observed labels
-        schema_arity: Number of features in schema
+        schema_arity: Number of distinct features referenced by the rules
         query_size: Number of queries
         selected_data_size: Size of selected data
         delta: Delta parameter for penalty calculation
+        selectivity: Query selectivity estimated from the annotation design
 
     Returns:
         Tuple of (L_rew, penalty)
     """
-    pi = (sum(pred_Y) + sum(observed_Y)) / (len(pred_Y) + len(observed_Y))
-    pi = max(
-        1e-6, min(1 - 1e-6, pi)
-    )  # Ensure pi is in (0, 1) to avoid extreme penalties
+    pi = max(1e-6, min(1 - 1e-6, selectivity))
 
     # Compute rewriting loss
     L_rew = loss_by_selectivity(pred_Y, trans_Y, pi)
-    L_rew = L_rew * len(pred_Y) / (len(pred_Y) + len(observed_Y))
 
     # Compute the penalty
     Gamma_rew = max(pi, 1 - pi) / min(pi, 1 - pi)
@@ -656,6 +765,19 @@ def compute_objective_error(
     return L_rew, penalty
 
 
+def annotation_loss_resolution(
+    labels: pd.Series, query_size: int, delta: float
+) -> float:
+    """Return the confidence radius for annotation-estimated loss."""
+    if len(labels) == 0:
+        return 0.0
+    pi = max(1e-6, min(1 - 1e-6, float(labels.mean())))
+    gamma = max(pi, 1 - pi) / min(pi, 1 - pi)
+    return gamma * math.sqrt(
+        math.log(2 * query_size / delta) / (2 * len(labels))
+    )
+
+
 def compute_subjective_error(
     X: pd.DataFrame,
     Y: pd.Series,
@@ -663,6 +785,8 @@ def compute_subjective_error(
     data_size: int,
     delta: float,
     loo_step: int = 10,
+    sample_weight: np.ndarray | None = None,
+    forest_config: ForestConfig = EXPANDED_FOREST,
 ) -> tuple[float, float]:
     """Compute LOO error and penalty for subjective error estimation.
 
@@ -674,6 +798,7 @@ def compute_subjective_error(
         data_size: Size of data
         delta: Delta parameter
         loo_step: Step size for LOO
+        sample_weight: Optional training weights aligned with X and Y
 
     Returns:
         Tuple of (L_LOO, penalty)
@@ -699,14 +824,29 @@ def compute_subjective_error(
 
     Y_loo = []
     Y_true = []
+    weights = (
+        None
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=float)
+    )
+    if weights is not None and len(weights) != len(X):
+        raise ValueError("sample_weight must align with X and Y.")
 
     X_encoded = encode_features(X)
     for i in range(0, len(X_encoded), loo_step):
         X_train = X_encoded.drop(index=i)
         Y_train = Y.drop(index=i)
         X_test = X_encoded.iloc[[i]]
+        train_weight = None if weights is None else np.delete(weights, i)
 
-        clf = train_classifier(X_train, Y_train)
+        clf = train_classifier(
+            X_train,
+            Y_train,
+            n_estimators=forest_config.n_estimators,
+            max_depth=forest_config.max_depth,
+            min_samples_leaf=forest_config.min_samples_leaf,
+            sample_weight=train_weight,
+        )
 
         pred = clf.predict(X_test)[0]
         Y_loo.append(pred)
@@ -741,16 +881,20 @@ def perform_label_propagation(
     train_X: pd.DataFrame,
     train_Y: pd.Series,
     test_X_li: list[pd.DataFrame],
-    test_Y_li: list[pd.Series],
+    sample_weight: np.ndarray | None = None,
+    forest_config: ForestConfig = EXPANDED_FOREST,
     debug: bool = False,
 ) -> tuple[RandomForestClassifier, list[pd.Series]]:
 
     # Train the classifier on the training data.
     train_X_proc = encode_features(train_X)
-    clf = train_classifier(train_X_proc, train_Y, n_estimators=3)
-
-    assert len(test_X_li) == len(test_Y_li), (
-        "test_X_li and test_Y_li must have the same length."
+    clf = train_classifier(
+        train_X_proc,
+        train_Y,
+        n_estimators=forest_config.n_estimators,
+        max_depth=forest_config.max_depth,
+        min_samples_leaf=forest_config.min_samples_leaf,
+        sample_weight=sample_weight,
     )
 
     pred_Y_li = []
@@ -760,10 +904,29 @@ def perform_label_propagation(
             continue
         test_X_proc = encode_features(test_X_li[i])
         pred_Y_li.append(
-            pd.Series(clf.predict(test_X_proc), index=test_Y_li[i].index)
+            pd.Series(clf.predict(test_X_proc), index=test_X_li[i].index)
         )
 
     return clf, pred_Y_li
+
+
+def compute_inc_reoptimization_threshold(
+    prev_prop_Y_li: list[pd.Series], delta: float
+) -> float:
+    """Derive a drift threshold from stream growth and shared sample size."""
+    if not 0 < delta < 1:
+        raise ValueError("Delta must be between 0 and 1.")
+    if len(prev_prop_Y_li) < 2:
+        return float("inf")
+
+    current_size = sum(len(labels) for labels in prev_prop_Y_li)
+    previous_size = current_size - len(prev_prop_Y_li[-1])
+    if current_size == 0 or previous_size == 0:
+        return float("inf")
+
+    data_fraction = len(prev_prop_Y_li[-1]) / current_size
+    confidence_margin = math.sqrt(math.log(2 / delta) / (2 * previous_size))
+    return data_fraction + confidence_margin
 
 
 def compute_inc_error_certificate(
@@ -778,19 +941,19 @@ def compute_inc_error_certificate(
     if len(prop_Y_li) == 1:
         return 0.0, 0.0  # The first iteration introduces no error.
 
-    """
-    Data error = |D_{added}| / |D_{total}|
-    """
+    # Data error = |D_{added}| / |D_{total}|.
     curr_data_size = sum(
         [len(prev_prop_Y_li[i]) for i in range(len(prev_prop_Y_li))]
     )
     prev_data_size = curr_data_size - len(prev_prop_Y_li[-1])
     new_data_size = len(prev_prop_Y_li[-1])
+    if curr_data_size == 0:
+        return 0.0, 0.0
     data_err = new_data_size / curr_data_size
+    if prev_data_size == 0:
+        return data_err, 0.0
 
-    """
-    Prediction error = |Err_{shared}| / |D_{shared}|
-    """
+    # Prediction error = |Err_{shared}| / |D_{shared}|.
     pred_err = 0.0
     for i in range(len(prev_prop_Y_li) - 1):
         pred_err += sum(prev_prop_Y_li[i] != prop_Y_li[i])
