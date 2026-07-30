@@ -13,7 +13,6 @@ from sklearn.neighbors import NearestNeighbors
 from data_structure import LdbDataManager
 from workloads.utils import (
     encode_features,
-    evaluate_classifier,
     norm_features,
     train_classifier,
     weight_features,
@@ -37,15 +36,11 @@ class CoresetMaintainer:
         self.enable_conf_pred = enable_conf_pred
         self.enable_conf_struct = enable_conf_struct
 
-    def expand_coresets(self, inc_round: int = 0, debug: bool = False) -> None:
+    def expand_coresets(self, inc_round: int = 0) -> None:
         for q_name in self.data_manager.coresets:
-            self.expand_query_coreset(
-                q_name=q_name, inc_round=inc_round, debug=debug
-            )
+            self.expand_query_coreset(q_name=q_name, inc_round=inc_round)
 
-    def expand_query_coreset(
-        self, q_name: str, inc_round: int = 0, debug: bool = False
-    ) -> None:
+    def expand_query_coreset(self, q_name: str, inc_round: int = 0) -> None:
         coreset = self.data_manager.coresets[q_name]
         sigma_record = self.data_manager.sigma_satisfied_data[inc_round][q_name]
         labeled_x = coreset["ldb_data"].exclude_fk_and_id()
@@ -53,20 +48,45 @@ class CoresetMaintainer:
         unlabeled_x = sigma_record["ldb_data"].exclude_fk_and_id()
 
         if not labeled_x.columns.equals(unlabeled_x.columns):
-            labeled_x = labeled_x.loc[:, labeled_x.columns.isin(unlabeled_x.columns)]
-            if not labeled_x.columns.equals(unlabeled_x.columns):
+            labeled_x = labeled_x.loc[
+                :, labeled_x.columns.isin(unlabeled_x.columns)
+            ]
+            if set(labeled_x.columns) != set(unlabeled_x.columns):
                 raise ValueError(
                     f"Schema mismatch after alignment for query '{q_name}' "
-                    f"in stream-{inc_round}. Labeled columns: {labeled_x.columns.tolist()}, "
+                    f"in stream-{inc_round}. "
+                    f"Labeled columns: {labeled_x.columns.tolist()}, "
                     f"Unlabeled columns: {unlabeled_x.columns.tolist()}"
                 )
+            unlabeled_x = unlabeled_x.loc[:, labeled_x.columns]
 
         mode = "empirical" if inc_round == 0 else "inc"
+        annotated_selectivity = float(labeled_y.mean())
+        estimated_selectivity = coreset["estimated_selectivity"]
+        selectivity = (
+            estimated_selectivity
+            if estimated_selectivity is not None
+            else annotated_selectivity
+        )
+        selectivity_source = (
+            "estimated" if estimated_selectivity is not None else "annotated"
+        )
+        logger.info(
+            "Using %s coreset selectivity %.4f for query %s "
+            "(annotated=%.4f, estimated=%s).",
+            selectivity_source,
+            selectivity,
+            q_name,
+            annotated_selectivity,
+            estimated_selectivity,
+        )
         selected_x_idx, selected_y, new_lb, new_ub = select_coreset(
             labeled_X=labeled_x,
             labeled_Y=labeled_y,
             unlabeled_X=unlabeled_x,
-            k_neighbors=self.config.get("k_neighbors", 5),
+            selectivity=selectivity,
+            sample_weight=None,
+            k_neighbors=self.config["k_neighbors"],
             mode=mode,
             lb=coreset["lb"],
             ub=coreset["ub"],
@@ -99,46 +119,6 @@ class CoresetMaintainer:
             len(coreset["ldb_data"].df),
         )
 
-        if debug:
-            self._log_expansion_quality(
-                q_name=q_name,
-                inc_round=inc_round,
-                selected_x_idx=selected_x_idx,
-                selected_y=selected_y,
-            )
-
-    def _log_expansion_quality(
-        self,
-        q_name: str,
-        inc_round: int,
-        selected_x_idx: np.ndarray,
-        selected_y: pd.Series,
-    ) -> None:
-        labels = self.data_manager.sigma_satisfied_data[inc_round][q_name][
-            "labels"
-        ]
-        if labels is None:
-            raise ValueError(
-                f"Labels are missing for query '{q_name}' "
-                f"in stream-{inc_round}."
-            )
-        ground_truth_y = labels.iloc[selected_x_idx].reset_index(drop=True)
-        eval_results = evaluate_classifier(
-            Y_pred=selected_y, Y_true=ground_truth_y
-        )
-        logger.info(
-            "Debug evaluation of expanded coreset for query %s: "
-            "TP=%s, FP=%s, FN=%s, Precision=%.4f, Recall=%.4f, "
-            "F1=%.4f.",
-            q_name,
-            eval_results["TP"],
-            eval_results["FP"],
-            eval_results["FN"],
-            eval_results["precision"],
-            eval_results["recall"],
-            eval_results["f1"],
-        )
-
 
 def select_coreset(
     labeled_X: pd.DataFrame,
@@ -150,16 +130,22 @@ def select_coreset(
     ub: float = float("-inf"),
     enable_conf_pred: bool = True,
     enable_conf_struct: bool = True,
+    selectivity: float | None = None,
+    sample_weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, pd.Series, float, float]:
 
     # Compute the confidence scores for all unlabeled samples.
-    selectivity = sum(labeled_Y) / len(labeled_Y)
+    if selectivity is None:
+        selectivity = float(labeled_Y.mean())
+    if not 0.0 <= selectivity <= 1.0:
+        raise ValueError("Selectivity must be between 0 and 1.")
     confs = est_conf(
         labeled_X,
         labeled_Y,
         unlabeled_X,
         selectivity,
         k_neighbors,
+        sample_weight=sample_weight,
         enable_conf_pred=enable_conf_pred,
         enable_conf_struct=enable_conf_struct,
     )
@@ -219,6 +205,7 @@ def est_conf(
     unlabeled_X: pd.DataFrame,
     selectivity: float,
     k_neighbors: int,
+    sample_weight: np.ndarray | None = None,
     enable_conf_pred: bool = True,
     enable_conf_struct: bool = True,
 ) -> np.ndarray:
@@ -244,6 +231,7 @@ def est_conf(
         labeled_X_proc=labeled_X_proc,
         labeled_Y=labeled_Y,
         unlabeled_X_proc=unlabeled_X_proc,
+        sample_weight=sample_weight,
     )
 
     # Structural confidence.
@@ -272,6 +260,7 @@ def est_prediction_conf(
     labeled_X_proc: pd.DataFrame,
     labeled_Y: pd.Series,
     unlabeled_X_proc: pd.DataFrame,
+    sample_weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, pd.DataFrame]:
 
     # TODO: Try feature selection.
@@ -281,7 +270,9 @@ def est_prediction_conf(
     #   - n_estimators
     #   - max_depth
     #   - random_seed
-    clf = train_classifier(X=labeled_X_proc, Y=labeled_Y)
+    clf = train_classifier(
+        X=labeled_X_proc, Y=labeled_Y, sample_weight=sample_weight
+    )
 
     # Handle case when all labels are the same (single class)
     unique_classes = np.unique(labeled_Y)
