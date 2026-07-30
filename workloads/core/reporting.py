@@ -18,11 +18,6 @@ class Reporting:
     def __init__(self, usage_statistics: list[dict[str, Any]]) -> None:
         self.usage_statistics = usage_statistics
 
-    def update_statistics(self, key: str, value: dict[str, Any]) -> None:
-        assert key in self.usage_statistics[0], f"Invalid statistics key: {key}"
-        for k, v in value.items():
-            self.usage_statistics[0][key][k] += v
-
     def report_usage_statistics(self) -> None:
         report_usage_statistics(self.usage_statistics[0])
 
@@ -58,10 +53,12 @@ class Reporting:
                     for res in eval_q_single_step
                 ]
                 data_errs = [
-                    res["data_err"] if res else None for res in eval_q_single_step
+                    res["data_err"] if res else None
+                    for res in eval_q_single_step
                 ]
                 pred_errs = [
-                    res["pred_err"] if res else None for res in eval_q_single_step
+                    res["pred_err"] if res else None
+                    for res in eval_q_single_step
                 ]
 
                 results = pd.DataFrame(
@@ -166,30 +163,13 @@ def report_evaluation_trace(execution_trace: dict):
         "Execution trace is required for reporting."
     )
 
-    # Get all query names
-    all_query_names = set()
-    for results in execution_trace.values():
-        for key in results.keys():
-            if key not in [
-                "rules",
-                "features",
-                "pred_eval",
-                "trans_eval",
-                "L_rew",
-                "penalty_rew",
-                "L_LOO",
-                "penalty_LOO",
-                "L_obj",
-                "L_subj",
-                "L_static",
-                "L_avg",
-                "memory_cost",
-                "stream_selectivities",
-                "overall_selectivity",
-                "stream_sizes",
-                "total_size",
-            ]:
-                all_query_names.add(key)
+    # Metric maps are authoritative; top-level keys also include metadata.
+    all_query_names = {
+        q_name
+        for results in execution_trace.values()
+        for q_name in results.get("L_static", {})
+    }
+    selected_iter = max(execution_trace)
 
     # Find best per-query trans_f1 and global lowest L_avg.
     best_trans_f1_iters = {}  # query_name -> (iter_idx, trans_f1)
@@ -216,9 +196,13 @@ def report_evaluation_trace(execution_trace: dict):
     overview_data = []
     for iter_idx, results in execution_trace.items():
         for q_name in all_query_names:
+            candidate = results.get("candidate", {}).get(q_name, "")
+            if iter_idx == selected_iter:
+                candidate = f"selected:{candidate}"
             row = {
                 "Iter": iter_idx,
-                "NFeat": iter_idx,
+                "Candidate": candidate,
+                "NFeat": len(results.get("features", {}).get(q_name, [])),
                 "Query": q_name,
             }
 
@@ -260,6 +244,7 @@ def report_evaluation_trace(execution_trace: dict):
     df_overview = pd.DataFrame(overview_data)
     col_order = [
         "Iter",
+        "Candidate",
         "NFeat",
         "Query",
         "pred_f1",
@@ -283,18 +268,27 @@ def report_evaluation_trace(execution_trace: dict):
     df_overview = df_overview[col_order]
 
     print("\n" + "=" * 150)
-    print("OVERVIEW - Evaluation Metrics per Iteration")
+    print("OVERVIEW - Rewrite Candidate Evaluations")
     print("=" * 150)
     print(df_overview.to_string(index=False))
     print("=" * 150)
 
     # ========== SECTION 2: AVERAGE ERROR ==========
-    avg_errors = [
-        {"Iter": i, "NFeat": i, "L_avg": f"{results.get('L_avg', 0):.2f}"}
-        for i, results in execution_trace.items()
-    ]
+    avg_errors = []
+    for iter_idx, results in execution_trace.items():
+        candidates = sorted(set(results.get("candidate", {}).values()))
+        candidate = ",".join(candidates)
+        if iter_idx == selected_iter:
+            candidate = f"selected:{candidate}"
+        avg_errors.append(
+            {
+                "Iter": iter_idx,
+                "Candidate": candidate,
+                "L_avg": f"{results.get('L_avg', 0):.2f}",
+            }
+        )
 
-    print("\nAverage Error per Iteration:")
+    print("\nAverage Error per Candidate Evaluation:")
     print("-" * 40)
     print(pd.DataFrame(avg_errors).to_string(index=False))
     print("-" * 40)
@@ -313,10 +307,12 @@ def report_evaluation_trace(execution_trace: dict):
         if q_name in best_trans_f1_iters:
             iter_idx, trans_f1 = best_trans_f1_iters[q_name]
             results = execution_trace[iter_idx]
+            n_features = len(results.get("features", {}).get(q_name, []))
+            candidate = results.get("candidate", {}).get(q_name, "")
 
             print(
                 f"\n[Highest trans_f1={trans_f1:.2f}] @ Iter "
-                f"{iter_idx} (NFeat={iter_idx})"
+                f"{iter_idx} ({candidate}, NFeat={n_features})"
             )
 
             if "features" in results and q_name in results["features"]:
@@ -337,10 +333,12 @@ def report_evaluation_trace(execution_trace: dict):
         # Show rules from iteration with lowest L_avg (global best)
         results = execution_trace[global_best_iter]
         l_avg = results.get("L_avg", 0)
+        n_features = len(results.get("features", {}).get(q_name, []))
+        candidate = results.get("candidate", {}).get(q_name, "")
 
         print(
             f"\n[Lowest L_avg={l_avg:.2f}] @ Iter "
-            f"{global_best_iter} (NFeat={global_best_iter})"
+            f"{global_best_iter} ({candidate}, NFeat={n_features})"
         )
 
         if "features" in results and q_name in results["features"]:
