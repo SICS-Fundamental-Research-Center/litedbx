@@ -75,6 +75,22 @@ wait_for_http_ready() {
     done
 }
 
+model_api_matches() {
+    local model_key=$1
+    local port=$2
+    local response
+
+    command -v curl >/dev/null 2>&1 || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    response=$(curl -sf --max-time 2 \
+        "http://127.0.0.1:${port}/v1/models" 2>/dev/null) || return 1
+
+    EXPECTED_MODEL_PATH="${MODEL_PATHS[$model_key]}" \
+        RESPONSE="$response" python3 -c "import json, os; expected = os.environ[\"EXPECTED_MODEL_PATH\"]; models = json.loads(os.environ[\"RESPONSE\"]).get(\"data\", []); raise SystemExit(not any(model.get(\"id\") == expected or model.get(\"root\") == expected for model in models))" \
+        >/dev/null 2>&1
+}
+
+
 trim() {
     local s=$1
     s=${s#"${s%%[![:space:]]*}"}
@@ -415,26 +431,45 @@ status_model() {
         echo "==============="
         for model_key in "${!MODEL_PATHS[@]}"; do
             status_model "$model_key"
-        done | sed '/^$/d'
+        done | sed "/^$/d"
         return 0
     fi
 
-    local session
-    session=$(session_name "$model_key")
     local state
     state=$(state_file "$model_key")
-
-    if tmux has-session -t "$session" 2>/dev/null; then
-        print_success "$model_key is running in tmux session $session"
-    else
-        print_warning "$model_key is not running"
-    fi
+    local session
+    session=$(session_name "$model_key")
+    local port=${MODEL_PORTS[$model_key]}
+    local gpus=""
 
     if [[ -f "$state" ]]; then
         # shellcheck disable=SC1090
         source "$state"
-        echo "  Port: ${MODEL_PORT:-unknown}"
-        echo "  GPUs: ${CUDA_VISIBLE_DEVICES:-unknown}"
+        session=${TMUX_SESSION:-$session}
+        port=${MODEL_PORT:-$port}
+        gpus=${CUDA_VISIBLE_DEVICES:-}
+    fi
+
+    local has_session=false
+    if tmux has-session -t "$session" 2>/dev/null; then
+        has_session=true
+    fi
+
+    if model_api_matches "$model_key" "$port"; then
+        if [[ "$has_session" == true ]]; then
+            print_success "$model_key is running in tmux session $session"
+        else
+            print_success "$model_key is running (tmux session not found)"
+        fi
+    elif [[ "$has_session" == true ]]; then
+        print_warning "$model_key is starting in tmux session $session"
+    else
+        print_warning "$model_key is not running"
+    fi
+
+    echo "  Port: $port"
+    if [[ -n "$gpus" ]]; then
+        echo "  GPUs: $gpus"
     fi
 }
 
