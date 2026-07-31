@@ -1,12 +1,12 @@
 tasks:
   - name: animals_image
-    exp_group: annotation_20
+    exp_group: re_annotation_20
     models: [qwen3-vl-30b]
     release_model_after_task: false
     objects:
       - workload: animals
         queries:
-          - [Q7]
+          - [Q7]  # Target F1: 1.00
     collect:
       execution_trace:
         iterations: ALL
@@ -18,13 +18,13 @@ tasks:
           features,
         ]
   - name: ecomm_image
-    exp_group: annotation_20
+    exp_group: re_annotation_20
     models: [qwen3-vl-30b]
     release_model_after_task: false
     objects:
       - workload: ecomm
         queries:
-          - [Q2]
+          - [Q2]  # Target F1: 1.00
     collect:
       execution_trace:
         iterations: ALL
@@ -36,15 +36,15 @@ tasks:
           features,
         ]
   - name: medical_image
-    exp_group: annotation_20
+    exp_group: re_annotation_20
     models: [qwen3-vl-30b]
     release_model_after_task: false
     objects:
       - workload: medical
         queries:
-          - [Q3]
-          - [Q8]
-          - [Q9]
+          - [Q3]  # Target F1: 0.84
+          - [Q8]  # Target F1: 0.63
+          - [Q9]  # Target F1: 0.51
     collect:
       execution_trace:
         iterations: ALL
