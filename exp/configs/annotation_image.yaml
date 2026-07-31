@@ -1,0 +1,57 @@
+tasks:
+  - name: animals_image
+    exp_group: annotation_20
+    models: [qwen3-vl-30b]
+    release_model_after_task: false
+    objects:
+      - workload: animals
+        queries:
+          - [Q7]
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj, 
+          overall_selectivity, total_size,
+          features,
+        ]
+  - name: ecomm_image
+    exp_group: annotation_20
+    models: [qwen3-vl-30b]
+    release_model_after_task: false
+    objects:
+      - workload: ecomm
+        queries:
+          - [Q2]
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj, 
+          overall_selectivity, total_size,
+          features,
+        ]
+  - name: medical_image
+    exp_group: annotation_20
+    models: [qwen3-vl-30b]
+    release_model_after_task: false
+    objects:
+      - workload: medical
+        queries:
+          - [Q3]
+          - [Q8]
+          - [Q9]
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj, 
+          overall_selectivity, total_size,
+          features,
+        ]

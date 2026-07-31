@@ -1,20 +1,12 @@
 tasks:
-  - name: annotation_test
-    exp_group: re_vary_b_lab
-    models: [
-      qwen3-30b-fp8
-    ]
-    release_model_after_task: false
-    config_override:
-      b_lab: [
-        20
-      ]
+  - name: ecomm_text_image
+    exp_group: annotation_20
+    models: [qwen3-30b-fp8, qwen3-vl-30b]
+    release_model_after_task: true
     objects:
-      - workload: medical
+      - workload: ecomm
         queries:
-          - [
-            Q1,
-          ]
+          - [Q13]
     collect:
       execution_trace:
         iterations: ALL
