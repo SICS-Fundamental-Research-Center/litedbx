@@ -65,7 +65,7 @@ tasks:
     objects:
       - workload: medical
         queries:
-          - [Q1]  # Target F1: 0.52
+           h- [Q1]  # Target F1: 0.52
     collect:
       execution_trace:
         iterations: ALL
