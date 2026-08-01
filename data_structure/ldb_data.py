@@ -1,5 +1,7 @@
 """DataFrame-backed LiteDBX data operations."""
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,8 @@ from .llm_resp_templates import (
 from .sem_query import Predicate
 
 logger = logging.getLogger(__name__)
+
+FEATURE_MATERIALIZATION_SCHEMA = 1
 
 
 class LdbData:
@@ -118,6 +122,31 @@ class LdbData:
             + self.foreign_keys
             + [spec.target_col for spec in enriched_features]
         )
+
+    @staticmethod
+    def feature_materialization_context_key(
+        enriched_features: list[PopulationSpec],
+        llm_client: LdbLLMClient,
+        is_remote: bool,
+    ) -> str:
+        """Fingerprint feature semantics and the inference implementation."""
+        model_key = "REMOTE_MODELS" if is_remote else "LOCAL_MODELS"
+        payload = {
+            "schema": FEATURE_MATERIALIZATION_SCHEMA,
+            "features": [spec.model_dump() for spec in enriched_features],
+            "models": llm_client.config.get(model_key, {}),
+            "inference": {
+                key: llm_client.config.get(key)
+                for key in (
+                    "max_tokens",
+                    "top_p",
+                    "temperature",
+                    "random_seed",
+                )
+            },
+        }
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
 
     def reuse_cached_features(self, cached_df: pd.DataFrame) -> bool:
         """Reuse cached feature columns when base rows match exactly."""

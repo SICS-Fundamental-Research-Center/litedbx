@@ -47,6 +47,15 @@ class CoresetMaintainer:
         labeled_y = coreset["labels"]
         unlabeled_x = sigma_record["ldb_data"].exclude_fk_and_id()
 
+        if unlabeled_x.empty:
+            logger.info(
+                "No unlabeled samples remain for query %s in stream-%s; "
+                "skipping coreset expansion.",
+                q_name,
+                inc_round,
+            )
+            return
+
         if not labeled_x.columns.equals(unlabeled_x.columns):
             labeled_x = labeled_x.loc[
                 :, labeled_x.columns.isin(unlabeled_x.columns)

@@ -116,6 +116,7 @@ def clf_to_rules(
     X_reference: np.ndarray | None = None,
     y_reference: np.ndarray | None = None,
     sample_weight: np.ndarray | None = None,
+    allowed_rule_features: set[str] | None = None,
     debug: bool = False,
 ) -> list[list[tuple[str, float, str]]]:
 
@@ -151,6 +152,11 @@ def clf_to_rules(
         fallback_rules = []
         for feature_name in feature_names:
             if not feature_name.startswith("llm_label_"):
+                continue
+            if (
+                allowed_rule_features is not None
+                and feature_name not in allowed_rule_features
+            ):
                 continue
             fallback_rules.append(
                 [(feature_name, 0.5, ">")]
@@ -208,6 +214,8 @@ def clf_to_rules(
 
     def balanced_disagreement(target, prediction, row_weights=None):
         target = np.asarray(target, dtype=bool)
+        if len(target) == 0:
+            return 0.0
         prediction = np.asarray(prediction, dtype=bool)
         local_weights = (
             np.ones(len(target), dtype=float)
@@ -251,13 +259,21 @@ def clf_to_rules(
                 predicted_class_position = int(np.argmax(val[node_id][0]))
                 if predicted_class_position != positive_class_position:
                     return
+                if not path:
+                    candidates.append(canonicalize_rule(path))
+                    return
 
                 # Include supported generalizations of each positive leaf.
                 # A forest path may contain incidental predicates that make the
                 # translated UCQ less faithful than a supported sub-conjunction.
                 for size in range(1, len(path) + 1):
                     for subset in combinations(path, size):
-                        candidates.append(canonicalize_rule(subset))
+                        candidate = canonicalize_rule(subset)
+                        if allowed_rule_features is None or all(
+                            feature in allowed_rule_features
+                            for feature, _, _ in candidate
+                        ):
+                            candidates.append(candidate)
                 return
 
             fname = feature_names[feat[node_id]]
@@ -277,16 +293,22 @@ def clf_to_rules(
     candidates = sorted(set(candidates), key=lambda r: str(r))
 
     # ------------------------------------------------------------
-    # Distill the forest over the population. Annotation loss and rule size
-    # resolve population-level ties without consulting evaluation labels.
+    # Select among forest-supported rules using released annotations. Forest
+    # agreement resolves annotation-level ties without evaluation labels.
     # ------------------------------------------------------------
     selected = []
     reference_X = X_train if X_reference is None else X_reference
     reference_y = y_train if y_reference is None else y_reference.astype(int)
     reference_prediction = np.zeros(len(reference_y), dtype=bool)
     annotation_prediction = np.zeros(N, dtype=bool)
-    current_loss = balanced_disagreement(reference_y, reference_prediction)
-    loss_resolution = 1.0 / max(1, len(reference_y))
+    current_reference_loss = balanced_disagreement(
+        reference_y, reference_prediction
+    )
+    current_annotation_loss = balanced_disagreement(
+        y_train, annotation_prediction, weights
+    )
+    loss_resolution = 1.0 / max(1, N)
+    reference_resolution = 1.0 / max(1, len(reference_y))
 
     for _ in range(disjunction_budget):
         evaluations = []
@@ -296,18 +318,35 @@ def clf_to_rules(
             reference_loss = balanced_disagreement(
                 reference_y, candidate_prediction
             )
-            if reference_loss >= current_loss - 1e-12:
-                continue
             annotation_mask = evaluate_rule(rule, X_train)
             annotation_loss = balanced_disagreement(
                 y_train,
                 annotation_prediction | annotation_mask,
                 weights,
             )
+            annotation_improves = (
+                annotation_loss < current_annotation_loss - 1e-12
+            )
+            reference_improves = (
+                reference_loss < current_reference_loss - 1e-12
+            )
+            annotation_acceptable = (
+                annotation_loss
+                <= current_annotation_loss + loss_resolution
+            )
+            reference_acceptable = (
+                reference_loss
+                <= current_reference_loss + reference_resolution
+            )
+            if not (
+                (annotation_improves and reference_acceptable)
+                or (reference_improves and annotation_acceptable)
+            ):
+                continue
             evaluations.append(
                 (
-                    reference_loss,
                     annotation_loss,
+                    reference_loss,
                     len(rule),
                     str(rule),
                     rule,
@@ -325,13 +364,24 @@ def clf_to_rules(
             if item[0] <= minimum_loss + loss_resolution
         ]
         best = min(eligible, key=lambda item: (item[2], item[1], item[3]))
-        current_loss, _, _, _, best_rule, reference_mask, annotation_mask = best
+        (
+            current_annotation_loss,
+            current_reference_loss,
+            _,
+            _,
+            best_rule,
+            reference_mask,
+            annotation_mask,
+        ) = best
         selected.append(best_rule)
         reference_prediction |= reference_mask
         annotation_prediction |= annotation_mask
         candidates.remove(best_rule)
-        if current_loss <= 1e-12:
+        if current_annotation_loss <= 1e-12:
             break
+
+    if not selected and len(reference_y) > 0 and reference_y.mean() >= 0.5:
+        selected = [canonicalize_rule([])]
 
     # ------------------------------------------------------------
     # Reconstruct readable rules
@@ -349,9 +399,11 @@ def clf_to_rules(
 
     if debug:
         logger.info(
-            "Distilled %s rule(s) with population disagreement %.6f.",
+            "Distilled %s rule(s) with annotation disagreement %.6f "
+            "and population disagreement %.6f.",
             len(rules),
-            current_loss,
+            current_annotation_loss,
+            current_reference_loss,
         )
 
     return rules
@@ -360,9 +412,11 @@ def clf_to_rules(
 def apply_rules(
     rules: list, df: pd.DataFrame, debug: bool = False
 ) -> pd.Series:
-    if not rules or any(not rule for rule in rules):
+    if not rules:
+        return pd.Series(0, index=df.index, dtype=int)
+    if any(not rule for rule in rules):
         return pd.Series(
-            1, index=df.index
+            1, index=df.index, dtype=int
         )  # An empty conjunction accepts all tuples.
 
     result = pd.Series(False, index=df.index)
@@ -387,6 +441,8 @@ def loss_by_selectivity(Y_A: pd.Series, Y_B: pd.Series, pi: float) -> float:
 
     assert 0 < pi < 1, f"pi must be in (0, 1), got {pi}"
     assert len(Y_A) == len(Y_B), "Y_A and Y_B must have the same length"
+    if len(Y_A) == 0:
+        return 0.0
 
     y_a = np.asarray(Y_A)
     y_b = np.asarray(Y_B)

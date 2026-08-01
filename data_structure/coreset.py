@@ -15,7 +15,11 @@ from llm import LdbLLMClient
 from .annotation_sampling import (
     AnnotationSelection,
     automatic_annotation_strategy,
+)
+from .annotation_sampling import (
     coerce_bool_labels as _coerce_bool_labels,
+)
+from .annotation_sampling import (
     select_annotation_sample as _select_annotation_sample,
 )
 from .ldb_data import LdbData
@@ -216,7 +220,19 @@ class CoresetStore(dict[str, CoresetRecord]):
         expected_columns = ldb_data.expected_enriched_columns(
             enriched_features[q_name]
         )
-        if enable_cache and ckpt_path.exists():
+        context_path = ckpt_path.with_suffix(".context.json")
+        context_key = ldb_data.feature_materialization_context_key(
+            enriched_features[q_name], llm_client, is_remote
+        )
+        cached_context_key = None
+        if context_path.exists():
+            with context_path.open(encoding="utf-8") as context_file:
+                cached_context_key = json.load(context_file).get("key")
+        if (
+            enable_cache
+            and ckpt_path.exists()
+            and cached_context_key == context_key
+        ):
             logger.debug(
                 "Loading enriched coreset for query '%s' from cache.", q_name
             )
@@ -243,14 +259,16 @@ class CoresetStore(dict[str, CoresetRecord]):
                     label_count,
                 )
 
-        await self[q_name]["ldb_data"].sync_with_enriched_features(
+        await ldb_data.sync_with_enriched_features(
             enriched_features=enriched_features[q_name],
             llm_client=llm_client,
             is_remote=is_remote,
         )
 
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        self[q_name]["ldb_data"].df.to_csv(ckpt_path, index=False)
+        ldb_data.df.to_csv(ckpt_path, index=False)
+        with context_path.open("w", encoding="utf-8") as context_file:
+            json.dump({"key": context_key}, context_file, indent=2)
 
         llm_usage_statistics = llm_client.get_usage_statistics()
         llm_client.reset_usage_statistics()
