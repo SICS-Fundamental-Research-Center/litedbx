@@ -7,7 +7,6 @@
 
 import logging
 import math
-import re
 from time import time
 from typing import Any
 
@@ -188,8 +187,8 @@ class QueryExecution:
 
     def _candidate_preference(
         self, q_name: str, query_results: dict
-    ) -> tuple[float, int, int, int]:
-        """Order tied candidates by annotation F1, then complexity."""
+    ) -> tuple[int, float, int]:
+        """Order tied candidates using rule size and annotation-only loss."""
         rules = query_results["rules"]
         predicate_count = sum(len(conjunction) for conjunction in rules)
         referenced_features = {
@@ -203,25 +202,11 @@ class QueryExecution:
         )
         observed_data = encode_features(active_data).iloc[:observed_size]
         rule_predictions = apply_rules(rules, observed_data).astype(int)
-        true_positives = int(
-            ((rule_predictions == 1) & (observed_labels == 1)).sum()
+        pi = max(1e-6, min(1 - 1e-6, float(observed_labels.mean())))
+        rule_loss = float(
+            loss_by_selectivity(observed_labels, rule_predictions, pi)
         )
-        false_positives = int(
-            ((rule_predictions == 1) & (observed_labels == 0)).sum()
-        )
-        false_negatives = int(
-            ((rule_predictions == 0) & (observed_labels == 1)).sum()
-        )
-        denominator = 2 * true_positives + false_positives + false_negatives
-        annotation_f1 = (
-            0.0 if denominator == 0 else 2 * true_positives / denominator
-        )
-        return (
-            1.0 - annotation_f1,
-            predicate_count,
-            len(referenced_features),
-            len(query_results["features"]),
-        )
+        return predicate_count, rule_loss, len(referenced_features)
 
     def _init_execution_results(self) -> dict[str, Any]:
         stats = [
@@ -315,15 +300,8 @@ class QueryExecution:
             test_X=test_X,
             forest_config=forest_config,
             rule_evidence_size=observed_size,
-            allowed_rule_features=set(active_external_features)
-            | self._annotation_supported_schema_features(
-                data=all_train_X,
-                labels=all_train_Y,
-                observed_size=observed_size,
-                base_features=coreset["ldb_data"].base_features,
-                semantic_conditions=[
-                    predicate.succ_cond for predicate in self.queries[q_name].Ps
-                ],
+            allowed_rule_features=set(
+                coreset["ldb_data"].base_features + active_external_features
             ),
             debug=debug,
         )
@@ -413,48 +391,6 @@ class QueryExecution:
             if spec.target_col
             in self.data_manager.trimmed_feature_names[:feature_count]
         ]
-
-    @staticmethod
-    def _annotation_supported_schema_features(
-        data: pd.DataFrame,
-        labels: pd.Series,
-        observed_size: int,
-        base_features: list[str],
-        semantic_conditions: list[str],
-    ) -> set[str]:
-        """Find semantically aligned binary fields supported by annotations."""
-        condition_terms = set(
-            re.findall(
-                r"[a-z0-9]+",
-                " ".join(semantic_conditions).casefold(),
-            )
-        )
-        observed_labels = (
-            labels.iloc[:observed_size].astype(int).reset_index(drop=True)
-        )
-        if observed_labels.nunique() != 2:
-            return set()
-
-        supported = set()
-        for feature in base_features:
-            values = data[feature].iloc[:observed_size].reset_index(drop=True)
-            unique_values = pd.unique(values)
-            if len(unique_values) != 2:
-                continue
-            value_terms = set(
-                re.findall(
-                    r"[a-z0-9]+",
-                    " ".join(map(str, unique_values)).casefold(),
-                )
-            )
-            if not condition_terms.intersection(value_terms):
-                continue
-            encoded = values.eq(unique_values[1]).astype(int)
-            if encoded.equals(observed_labels) or (1 - encoded).equals(
-                observed_labels
-            ):
-                supported.add(feature)
-        return supported
 
     def _propagate_and_extract_rules(
         self,

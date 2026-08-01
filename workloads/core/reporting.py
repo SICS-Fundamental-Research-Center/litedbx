@@ -171,27 +171,6 @@ def report_evaluation_trace(execution_trace: dict):
     }
     selected_iter = max(execution_trace)
 
-    # Find best per-query trans_f1 and global lowest L_avg.
-    best_trans_f1_iters = {}  # query_name -> (iter_idx, trans_f1)
-    global_best_iter = min(
-        execution_trace.keys(),
-        key=lambda i: execution_trace[i].get("L_avg", float("inf")),
-    )
-
-    for q_name in all_query_names:
-        best_trans_f1 = -1
-        best_iter_for_trans = None
-
-        for iter_idx, results in execution_trace.items():
-            if "trans_eval" in results and q_name in results["trans_eval"]:
-                trans_f1 = results["trans_eval"][q_name].get("f1", -1)
-                if trans_f1 > best_trans_f1:
-                    best_trans_f1 = trans_f1
-                    best_iter_for_trans = iter_idx
-
-        if best_iter_for_trans is not None:
-            best_trans_f1_iters[q_name] = (best_iter_for_trans, best_trans_f1)
-
     # ========== SECTION 1: OVERVIEW TABLE ==========
     overview_data = []
     for iter_idx, results in execution_trace.items():
@@ -293,67 +272,37 @@ def report_evaluation_trace(execution_trace: dict):
     print(pd.DataFrame(avg_errors).to_string(index=False))
     print("-" * 40)
 
-    # ========== SECTION 3: BEST RULES PER QUERY ==========
+    # ========== SECTION 3: SELECTED RULES PER QUERY ==========
     print("\n" + "=" * 100)
-    print("BEST RULES PER QUERY")
+    print("SELECTED RULES PER QUERY")
     print("=" * 100)
 
+    selected_results = execution_trace[selected_iter]
     for q_name in sorted(all_query_names):
         print(f"\n{'=' * 80}")
         print(f"Query: {q_name}")
         print("=" * 80)
 
-        # Show rules from iteration with highest trans_f1
-        if q_name in best_trans_f1_iters:
-            iter_idx, trans_f1 = best_trans_f1_iters[q_name]
-            results = execution_trace[iter_idx]
-            n_features = len(results.get("features", {}).get(q_name, []))
-            candidate = results.get("candidate", {}).get(q_name, "")
-
-            print(
-                f"\n[Highest trans_f1={trans_f1:.2f}] @ Iter "
-                f"{iter_idx} ({candidate}, NFeat={n_features})"
-            )
-
-            if "features" in results and q_name in results["features"]:
-                print(f"Features: {results['features'][q_name]}")
-
-            if "rules" in results and q_name in results["rules"]:
-                rules = results["rules"][q_name]
-                print("Rules:")
-                print(_format_rules(rules))
-
-            if "trans_eval" in results and q_name in results["trans_eval"]:
-                te = results["trans_eval"][q_name]
-                print(
-                    f"Metrics: trans_f1={te.get('f1', 0):.2f}, "
-                    f"L_static={results.get('L_static', {}).get(q_name, 0):.2f}"
-                )
-
-        # Show rules from iteration with lowest L_avg (global best)
-        results = execution_trace[global_best_iter]
-        l_avg = results.get("L_avg", 0)
-        n_features = len(results.get("features", {}).get(q_name, []))
-        candidate = results.get("candidate", {}).get(q_name, "")
-
+        n_features = len(selected_results.get("features", {}).get(q_name, []))
+        candidate = selected_results.get("candidate", {}).get(q_name, "")
         print(
-            f"\n[Lowest L_avg={l_avg:.2f}] @ Iter "
-            f"{global_best_iter} ({candidate}, NFeat={n_features})"
+            f"\n[Selected] @ Iter {selected_iter} "
+            f"({candidate}, NFeat={n_features})"
         )
 
-        if "features" in results and q_name in results["features"]:
-            print(f"Features: {results['features'][q_name]}")
+        if q_name in selected_results.get("features", {}):
+            print(f"Features: {selected_results['features'][q_name]}")
 
-        if "rules" in results and q_name in results["rules"]:
-            rules = results["rules"][q_name]
+        if q_name in selected_results.get("rules", {}):
             print("Rules:")
-            print(_format_rules(rules))
+            print(_format_rules(selected_results["rules"][q_name]))
 
-        if "trans_eval" in results and q_name in results["trans_eval"]:
-            te = results["trans_eval"][q_name]
+        if q_name in selected_results.get("trans_eval", {}):
+            trans_eval = selected_results["trans_eval"][q_name]
             print(
-                f"Metrics: trans_f1={te.get('f1', 0):.2f}, "
-                f"L_static={results.get('L_static', {}).get(q_name, 0):.2f}"
+                f"Metrics: trans_f1={trans_eval.get('f1', 0):.2f}, "
+                f"L_static="
+                f"{selected_results.get('L_static', {}).get(q_name, 0):.2f}"
             )
 
     print("\n" + "=" * 100 + "\n")

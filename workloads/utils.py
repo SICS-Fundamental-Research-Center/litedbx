@@ -293,22 +293,16 @@ def clf_to_rules(
     candidates = sorted(set(candidates), key=lambda r: str(r))
 
     # ------------------------------------------------------------
-    # Select among forest-supported rules using released annotations. Forest
-    # agreement resolves annotation-level ties without evaluation labels.
+    # Distill the forest over the population. Annotation loss and rule size
+    # resolve population-level ties without consulting evaluation labels.
     # ------------------------------------------------------------
     selected = []
     reference_X = X_train if X_reference is None else X_reference
     reference_y = y_train if y_reference is None else y_reference.astype(int)
     reference_prediction = np.zeros(len(reference_y), dtype=bool)
     annotation_prediction = np.zeros(N, dtype=bool)
-    current_reference_loss = balanced_disagreement(
-        reference_y, reference_prediction
-    )
-    current_annotation_loss = balanced_disagreement(
-        y_train, annotation_prediction, weights
-    )
-    loss_resolution = 1.0 / max(1, N)
-    reference_resolution = 1.0 / max(1, len(reference_y))
+    current_loss = balanced_disagreement(reference_y, reference_prediction)
+    loss_resolution = 1.0 / max(1, len(reference_y))
 
     for _ in range(disjunction_budget):
         evaluations = []
@@ -318,35 +312,18 @@ def clf_to_rules(
             reference_loss = balanced_disagreement(
                 reference_y, candidate_prediction
             )
+            if reference_loss >= current_loss - 1e-12:
+                continue
             annotation_mask = evaluate_rule(rule, X_train)
             annotation_loss = balanced_disagreement(
                 y_train,
                 annotation_prediction | annotation_mask,
                 weights,
             )
-            annotation_improves = (
-                annotation_loss < current_annotation_loss - 1e-12
-            )
-            reference_improves = (
-                reference_loss < current_reference_loss - 1e-12
-            )
-            annotation_acceptable = (
-                annotation_loss
-                <= current_annotation_loss + loss_resolution
-            )
-            reference_acceptable = (
-                reference_loss
-                <= current_reference_loss + reference_resolution
-            )
-            if not (
-                (annotation_improves and reference_acceptable)
-                or (reference_improves and annotation_acceptable)
-            ):
-                continue
             evaluations.append(
                 (
-                    annotation_loss,
                     reference_loss,
+                    annotation_loss,
                     len(rule),
                     str(rule),
                     rule,
@@ -364,20 +341,12 @@ def clf_to_rules(
             if item[0] <= minimum_loss + loss_resolution
         ]
         best = min(eligible, key=lambda item: (item[2], item[1], item[3]))
-        (
-            current_annotation_loss,
-            current_reference_loss,
-            _,
-            _,
-            best_rule,
-            reference_mask,
-            annotation_mask,
-        ) = best
+        current_loss, _, _, _, best_rule, reference_mask, annotation_mask = best
         selected.append(best_rule)
         reference_prediction |= reference_mask
         annotation_prediction |= annotation_mask
         candidates.remove(best_rule)
-        if current_annotation_loss <= 1e-12:
+        if current_loss <= 1e-12:
             break
 
     if not selected and len(reference_y) > 0 and reference_y.mean() >= 0.5:
@@ -399,11 +368,9 @@ def clf_to_rules(
 
     if debug:
         logger.info(
-            "Distilled %s rule(s) with annotation disagreement %.6f "
-            "and population disagreement %.6f.",
+            "Distilled %s rule(s) with population disagreement %.6f.",
             len(rules),
-            current_annotation_loss,
-            current_reference_loss,
+            current_loss,
         )
 
     return rules

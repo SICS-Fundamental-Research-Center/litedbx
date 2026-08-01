@@ -105,20 +105,17 @@ def select_candidate_index(
     if len(candidate_complexities) != len(candidates):
         raise ValueError("Candidates and complexities must align.")
     eligible = list(range(len(candidates)))
-    minimum_preference = min(
-        candidate_complexities[index][0] for index in eligible
-    )
+    minimum_loss = min(estimated_losses[index] for index in eligible)
     indistinguishable = [
         index
         for index in eligible
-        if candidate_complexities[index][0]
-        <= minimum_preference + loss_resolution
+        if estimated_losses[index] <= minimum_loss + loss_resolution
     ]
     return min(
         indistinguishable,
         key=lambda index: (
-            candidate_complexities[index],
             estimated_losses[index],
+            candidate_complexities[index],
             index,
         ),
     )
