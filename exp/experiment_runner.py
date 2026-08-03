@@ -40,6 +40,7 @@ class TaskRunContext:
     task: dict[str, Any]
     models: list[str]
     debug: bool
+    cold: bool = False
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -255,6 +256,7 @@ async def run_query_group(
         query_group,
         override_map,
         exp_group=exp_group,
+        enable_cache=not context.cold,
     )
     engine = LdbEngine(workload)
     engine_result = await engine.execute(
@@ -315,7 +317,7 @@ async def run_task(context: TaskRunContext) -> TaskResult:
 
 
 async def run_config(
-    config_path: Path, debug: bool = False
+    config_path: Path, debug: bool = False, cold: bool = False
 ) -> list[TaskResult]:
     """Run all tasks declared in one experiment config."""
     config = load_yaml(config_path)
@@ -327,6 +329,7 @@ async def run_config(
             task=task,
             models=task.get("models", []),
             debug=debug,
+            cold=cold,
         )
         results.append(await run_task(task_context))
     return results

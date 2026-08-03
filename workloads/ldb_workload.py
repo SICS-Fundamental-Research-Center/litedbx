@@ -52,6 +52,7 @@ class LdbWorkload:
         self.queries = queries
         validate_workload_config(config)
         self.config = dict(config)
+        self.enable_cache = True
         self._load_config_values()
 
         self.CKPT_path = (
@@ -75,6 +76,7 @@ class LdbWorkload:
             queries=self.queries,
             ckpt_path=self.CKPT_path,
             usage_statistics=self.usage_statistics,
+            enable_cache=self.enable_cache,
         )
         self._feature_pipeline = FeaturePipeline(
             data_manager=self.data_manager,
@@ -87,6 +89,7 @@ class LdbWorkload:
             b_se=self.b_se,
             b_fs=self.b_fs,
             enable_hitl=self.enable_hitl,
+            enable_cache=self.enable_cache,
         )
         self._coreset_maintainer = CoresetMaintainer(
             data_manager=self.data_manager,
@@ -104,6 +107,7 @@ class LdbWorkload:
             b_rew=self.b_rew,
             b_lab=self.b_lab,
             delta=self.delta,
+            enable_cache=self.enable_cache,
         )
         self._reporting = Reporting(self.usage_statistics)
 
@@ -240,6 +244,17 @@ class LdbWorkload:
         )
         self._ensure_query_ckpts()
         self.data_manager.set_ckpt_path(self.CKPT_path)
+        self._init_components()
+
+    def set_cache_enabled(self, enable_cache: bool) -> None:
+        """Set the process cache policy before workload execution."""
+        if self.enable_cache == enable_cache:
+            return
+        self.enable_cache = enable_cache
+        logger.info(
+            "Cache reads and writes are %s for this workload.",
+            "enabled" if enable_cache else "disabled",
+        )
         self._init_components()
 
     def _load_config_values(self) -> None:

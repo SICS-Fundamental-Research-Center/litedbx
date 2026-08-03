@@ -47,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Experiment config path or file under exp/.",
     )
     parser.add_argument(
+        "--cold",
+        action="store_true",
+        help="Disable cache reads and writes for this run.",
+    )
+    parser.add_argument(
         "--ls-configs",
         action="store_true",
         help="List experiment configs under exp/.",
@@ -60,7 +65,10 @@ def has_collectable_rows(results: Sequence[object]) -> bool:
 
 
 async def run_configs(
-    config_names: list[str], debug: bool, logger: logging.Logger
+    config_names: list[str],
+    debug: bool,
+    logger: logging.Logger,
+    cold: bool = False,
 ) -> None:
     """Run experiment configs and export results when rows are collected."""
     for config_name in config_names:
@@ -70,7 +78,7 @@ async def run_configs(
         if not config_path.exists():
             raise FileNotFoundError(f"Config not found: {config_name}")
 
-        results = await run_config(config_path, debug=debug)
+        results = await run_config(config_path, debug=debug, cold=cold)
 
         if has_collectable_rows(results):
             out_path = export_results(config_path, results)
@@ -94,7 +102,7 @@ def main() -> None:
     config_names = args.config or [DEFAULT_CONFIG]
 
     start = time()
-    asyncio.run(run_configs(config_names, args.debug, logger))
+    asyncio.run(run_configs(config_names, args.debug, logger, cold=args.cold))
     end = time()
 
     logger.info("Total execution time: %s seconds", end - start)

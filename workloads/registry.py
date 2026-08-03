@@ -24,6 +24,7 @@ def build_workload(
     queries: list[str],
     config_override: dict[str, Any] | None = None,
     exp_group: str = "default",
+    enable_cache: bool = True,
 ) -> LdbWorkload:
     """Build a workload and apply experiment overrides."""
     workload_func = WORKLOAD_FACTORIES.get(workload_name)
@@ -39,4 +40,5 @@ def build_workload(
         workload.inject_exp_setting(
             exp_group=exp_group, exp_patch=effective_override
         )
+    workload.set_cache_enabled(enable_cache)
     return workload
