@@ -13,7 +13,7 @@ import pandas as pd
 from llm import LdbLLMClient
 
 from .annotation_sampling import (
-    AnnotationSelection,
+    annotation_sample_weights,
     automatic_annotation_strategy,
 )
 from .annotation_sampling import (
@@ -29,6 +29,9 @@ from .sigma_satisfied_data import SigmaSatisfiedData
 
 logger = logging.getLogger(__name__)
 
+JEFFREYS_PRIOR_ALPHA = 0.5
+JEFFREYS_PRIOR_BETA = 0.5
+
 
 class CoresetRecord(TypedDict):
     """
@@ -43,6 +46,7 @@ class CoresetRecord(TypedDict):
     lb: float
     ub: float
     estimated_selectivity: float | None
+    annotation_weights: pd.Series
 
 
 class CoresetStore(dict[str, CoresetRecord]):
@@ -64,17 +68,16 @@ class CoresetStore(dict[str, CoresetRecord]):
         llm_client: LdbLLMClient,
         ckpt_root: Path,
         b_lab: int,
-        feature_spaces: dict[str, list[PopulationSpec]],
         pseudo_ckpt_root: Path | None = None,
         seed: int = 42,
         use_hitl: bool = True,
+        enable_cache: bool = True,
     ) -> None:
         """Acquire query annotations and initialize each query coreset."""
         for q_name in queries:
             await self.acquire_query_annotation_and_init(
                 q_name=q_name,
                 b_lab=b_lab,
-                feature_space=feature_spaces[q_name],
                 sigma_satisfied_data=sigma_satisfied_data,
                 complete_config=complete_config,
                 queries=queries,
@@ -84,13 +87,13 @@ class CoresetStore(dict[str, CoresetRecord]):
                 stream_idx=0,
                 seed=seed,
                 use_hitl=use_hitl,
+                enable_cache=enable_cache,
             )
 
-    async def acquire_query_annotation_and_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    async def acquire_query_annotation_and_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,unused-argument
         self,
         q_name: str,
         b_lab: int,
-        feature_space: list[PopulationSpec],
         sigma_satisfied_data: SigmaSatisfiedData,
         complete_config: dict,
         queries: dict[str, SemCQ],
@@ -100,6 +103,7 @@ class CoresetStore(dict[str, CoresetRecord]):
         stream_idx: int = 0,
         seed: int = 42,
         use_hitl: bool = True,
+        enable_cache: bool = True,
     ) -> None:
         """Acquire labels for one query and move samples into its coreset."""
         record = sigma_satisfied_data[stream_idx][q_name]
@@ -121,10 +125,18 @@ class CoresetStore(dict[str, CoresetRecord]):
                 ckpt_root=pseudo_ckpt_root or ckpt_root,
                 q_name=q_name,
                 stream_idx=stream_idx,
+                enable_cache=enable_cache,
             )
 
         labeling_budget = _clamp_labeling_budget(
             b_lab, len(data), q_name, stream_idx
+        )
+        diversity_columns = list(
+            dict.fromkeys(
+                predicate.field
+                for predicate in queries[q_name].Ps
+                if predicate.modality in {"Text", "VectorText"}
+            )
         )
         semantic_modalities = {"Text", "Image", "VectorText", "VectorImage"}
         has_semantic_proxy = bool(queries[q_name].Ps) and all(
@@ -132,6 +144,7 @@ class CoresetStore(dict[str, CoresetRecord]):
             for predicate in queries[q_name].Ps
         )
         annotation_strategy = automatic_annotation_strategy(
+            diversity_columns=diversity_columns,
             has_semantic_proxy=has_semantic_proxy,
         )
         pseudo_labels = None
@@ -146,14 +159,8 @@ class CoresetStore(dict[str, CoresetRecord]):
                     ckpt_root=pseudo_ckpt_root or ckpt_root,
                     q_name=q_name,
                     stream_idx=stream_idx,
+                    enable_cache=enable_cache,
                 )
-            )
-        if pseudo_labels is not None:
-            _attach_single_predicate_proxy_feature(
-                data=data,
-                query=queries[q_name],
-                feature_space=feature_space,
-                proxy_labels=pseudo_labels,
             )
         annotation_selection = _select_annotation_sample(
             data=data,
@@ -161,15 +168,18 @@ class CoresetStore(dict[str, CoresetRecord]):
             labeling_budget=labeling_budget,
             strategy=annotation_strategy,
             seed=seed,
+            diversity_columns=diversity_columns,
         )
         labeled_indices = annotation_selection.indices
+        annotation_weights = annotation_sample_weights(
+            population_size=len(data), selection=annotation_selection
+        )
 
         remaining_indices = data.index.difference(labeled_indices)
         estimated_selectivity = _estimate_selectivity(
             acquired_labels=acquired_labels,
             labeled_indices=labeled_indices,
-            pseudo_labels=pseudo_labels,
-            sampling_design=annotation_selection,
+            annotation_weights=annotation_weights,
         )
         self.upsert(
             q_name=q_name,
@@ -178,6 +188,7 @@ class CoresetStore(dict[str, CoresetRecord]):
             labeled_indices=labeled_indices,
             complete_config=complete_config,
             estimated_selectivity=estimated_selectivity,
+            annotation_weights=annotation_weights,
         )
         update_sigma_after_labeling(
             sigma_satisfied_data=sigma_satisfied_data,
@@ -225,7 +236,7 @@ class CoresetStore(dict[str, CoresetRecord]):
             enriched_features[q_name], llm_client, is_remote
         )
         cached_context_key = None
-        if context_path.exists():
+        if enable_cache and context_path.exists():
             with context_path.open(encoding="utf-8") as context_file:
                 cached_context_key = json.load(context_file).get("key")
         if (
@@ -265,10 +276,11 @@ class CoresetStore(dict[str, CoresetRecord]):
             is_remote=is_remote,
         )
 
-        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        ldb_data.df.to_csv(ckpt_path, index=False)
-        with context_path.open("w", encoding="utf-8") as context_file:
-            json.dump({"key": context_key}, context_file, indent=2)
+        if enable_cache:
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            ldb_data.df.to_csv(ckpt_path, index=False)
+            with context_path.open("w", encoding="utf-8") as context_file:
+                json.dump({"key": context_key}, context_file, indent=2)
 
         llm_usage_statistics = llm_client.get_usage_statistics()
         llm_client.reset_usage_statistics()
@@ -282,8 +294,16 @@ class CoresetStore(dict[str, CoresetRecord]):
         labeled_indices: pd.Index,
         complete_config: dict,
         estimated_selectivity: float | None = None,
+        annotation_weights: pd.Series | None = None,
     ) -> None:
         """Create or extend a query coreset."""
+        if annotation_weights is None:
+            annotation_weights = pd.Series(1.0, index=labeled_indices)
+        local_weights = annotation_weights.reindex(labeled_indices)
+        if local_weights.isna().any():
+            raise ValueError(
+                "Annotation weights must cover every released row."
+            )
         if q_name not in self:
             self[q_name] = {
                 "ldb_data": LdbData(
@@ -297,6 +317,9 @@ class CoresetStore(dict[str, CoresetRecord]):
                 "lb": float("inf"),
                 "ub": float("-inf"),
                 "estimated_selectivity": estimated_selectivity,
+                "annotation_weights": local_weights.reset_index(
+                    drop=True
+                ).copy(),
             }
             return
 
@@ -314,6 +337,13 @@ class CoresetStore(dict[str, CoresetRecord]):
                 acquired_labels.loc[labeled_indices]
                 .reset_index(drop=True)
                 .copy(),
+            ],
+            ignore_index=True,
+        )
+        self[q_name]["annotation_weights"] = pd.concat(
+            [
+                self[q_name]["annotation_weights"],
+                local_weights.reset_index(drop=True).copy(),
             ],
             ignore_index=True,
         )
@@ -347,7 +377,7 @@ async def acquire_pseudo_labels_by_llm(  # pylint: disable=too-many-arguments,to
             source_col=sem_pred.field,
             source_modality=sem_pred.modality,  # type: ignore
             target_col=f"llm_label_{idx}",
-            prompt=sem_pred.prompt,
+            prompt=_annotation_proxy_prompt(sem_pred.prompt),
             feature_type="bool",
         )
         spec_label = await data.sem_map(
@@ -446,88 +476,39 @@ def _clamp_labeling_budget(
     return adjusted_budget
 
 
-def _post_stratified_selectivity(
-    labels: pd.Series,
-    local_labels: pd.Series,
-    labeled_indices: pd.Index,
-) -> float | None:
-    """Estimate prevalence after sampling within local-model strata."""
-    estimate = 0.0
-    for local_value in (False, True):
-        stratum_indices = local_labels[local_labels == local_value].index
-        if len(stratum_indices) == 0:
-            continue
-        sampled_indices = labeled_indices.intersection(stratum_indices)
-        if len(sampled_indices) == 0:
-            return None
-        stratum_weight = len(stratum_indices) / len(local_labels)
-        estimate += stratum_weight * float(labels.loc[sampled_indices].mean())
-    return estimate
-
-
-def _design_based_selectivity(
-    labels: pd.Series,
-    selection: AnnotationSelection,
-) -> float | None:
-    """Estimate prevalence for a uniform annotation sample."""
-    if selection.mode == "uniform":
-        return float(labels.loc[selection.indices].mean())
-    return None
-
-
 def _estimate_selectivity(
     acquired_labels: pd.Series,
     labeled_indices: pd.Index,
-    pseudo_labels: pd.Series | None,
-    sampling_design: AnnotationSelection | None = None,
+    annotation_weights: pd.Series,
 ) -> float | None:
-    """Estimate prevalence from released annotations and sampling design."""
+    """Estimate prevalence from released annotations and sampling weights."""
     annotated_labels = _coerce_bool_labels(
         acquired_labels.loc[labeled_indices], "acquired labels"
     )
-    if pseudo_labels is None:
-        return float(annotated_labels.mean())
-
-    local_labels = _coerce_bool_labels(
-        pseudo_labels.reindex(acquired_labels.index),
-        "local pseudo labels",
-    )
-    design_estimate = (
-        _design_based_selectivity(acquired_labels, sampling_design)
-        if sampling_design is not None
-        else None
-    )
-    if design_estimate is not None:
-        return design_estimate
-    return _post_stratified_selectivity(
-        labels=annotated_labels,
-        local_labels=local_labels,
-        labeled_indices=labeled_indices,
-    )
-
-
-def _attach_single_predicate_proxy_feature(
-    data: pd.DataFrame,
-    query: SemCQ,
-    feature_space: list[PopulationSpec],
-    proxy_labels: pd.Series,
-) -> None:
-    """Reuse a text acquisition proxy as its exact semantic feature."""
-    if len(query.Ps) != 1:
-        return
-    predicate = query.Ps[0]
-    normalized_prompt = " ".join(predicate.prompt.split()).casefold()
-    matches = [
-        spec
-        for spec in feature_space
-        if spec.source_col == predicate.field
-        and spec.feature_type == "bool"
-        and " ".join(spec.prompt.split()).casefold() == normalized_prompt
-    ]
-    if len(matches) == 1:
-        data[matches[0].target_col] = proxy_labels.reindex(data.index).astype(
-            bool
+    weights = annotation_weights.reindex(labeled_indices)
+    if weights.isna().any() or float(weights.sum()) <= 0:
+        return None
+    weight_values = weights.to_numpy(dtype=float)
+    weighted_positive = float(
+        np.dot(
+            annotated_labels.astype(float).to_numpy(),
+            weight_values,
         )
+    )
+    return (weighted_positive + JEFFREYS_PRIOR_ALPHA) / (
+        float(weight_values.sum()) + JEFFREYS_PRIOR_ALPHA + JEFFREYS_PRIOR_BETA
+    )
+
+
+def _annotation_proxy_prompt(task_prompt: str) -> str:
+    """Apply a universal conservative standard to annotation proxies."""
+    return (
+        "Evaluate one input using the semantic task below. Return true only "
+        "when the input directly provides sufficient evidence for the "
+        "requested condition. A merely related or nonspecific observation "
+        "is not sufficient. Do not introduce criteria not stated by the "
+        "task.\n\nSemantic task:\n" + task_prompt
+    )
 
 
 def _pseudo_label_cache_key(
@@ -540,8 +521,9 @@ def _pseudo_label_cache_key(
         dtype=np.uint64,
     ).tobytes()
     payload = {
-        "cache_schema": 6,
-        "local_models": llm_client.config.get("LOCAL_MODELS", {}),
+        "cache_schema": 7,
+        "proxy_prompt_schema": 1,
+        "remote_models": llm_client.config.get("REMOTE_MODELS", {}),
         "inference": {
             key: llm_client.config.get(key)
             for key in (
