@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
-CandidateKind = Literal["expanded_forest"]
+CandidateKind = Literal["expanded_forest", "external_forest"]
 
 
 @dataclass(frozen=True)
@@ -75,47 +75,30 @@ def select_forest_config(
 def build_rewrite_candidates(
     feature_count: int,
     minimum_feature_count: int = 0,
+    include_external_only: bool = False,
 ) -> list[RewriteCandidate]:
-    """Build expanded-forest candidates over all feature-prefix sizes."""
+    """Build feature-prefix candidates and an optional schema-free candidate."""
     if not 0 <= minimum_feature_count <= feature_count:
         raise ValueError("Minimum feature count must fit the feature space.")
-    return [
+    candidates = [
         RewriteCandidate("expanded_forest", count)
         for count in range(minimum_feature_count, feature_count + 1)
     ]
+    if include_external_only and feature_count > 0:
+        candidates.append(RewriteCandidate("external_forest", feature_count))
+    return candidates
 
 
 def select_candidate_index(
     candidates: list[RewriteCandidate],
     estimated_losses: list[float],
-    loss_resolution: float = 0.0,
-    candidate_complexities: list[tuple[float, ...]] | None = None,
 ) -> int:
-    """Select a candidate using only query structure and annotation evidence."""
+    """Select the candidate with the lowest estimated static loss."""
     if len(candidates) != len(estimated_losses):
         raise ValueError("Candidates and estimated losses must align.")
     if not candidates:
         raise ValueError("At least one rewrite candidate is required.")
-    if loss_resolution < 0:
-        raise ValueError("Loss resolution cannot be negative.")
-    if candidate_complexities is None:
-        candidate_complexities = [
-            (0, index) for index in range(len(candidates))
-        ]
-    if len(candidate_complexities) != len(candidates):
-        raise ValueError("Candidates and complexities must align.")
-    eligible = list(range(len(candidates)))
-    minimum_loss = min(estimated_losses[index] for index in eligible)
-    indistinguishable = [
-        index
-        for index in eligible
-        if estimated_losses[index] <= minimum_loss + loss_resolution
-    ]
     return min(
-        indistinguishable,
-        key=lambda index: (
-            estimated_losses[index],
-            candidate_complexities[index],
-            index,
-        ),
+        range(len(candidates)),
+        key=lambda index: (estimated_losses[index], index),
     )
