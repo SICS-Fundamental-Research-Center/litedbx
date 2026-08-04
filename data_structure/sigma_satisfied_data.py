@@ -156,7 +156,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             enriched_features[q_name], llm_client, is_remote
         )
         cached_context_key = None
-        if context_path.exists():
+        if enable_cache and context_path.exists():
             with context_path.open(encoding="utf-8") as context_file:
                 cached_context_key = json.load(context_file).get("key")
         if (
@@ -204,10 +204,11 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             is_remote=is_remote,
         )
 
-        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-        ldb_data.df.to_csv(ckpt_path, index=False)
-        with context_path.open("w", encoding="utf-8") as context_file:
-            json.dump({"key": context_key}, context_file, indent=2)
+        if enable_cache:
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            ldb_data.df.to_csv(ckpt_path, index=False)
+            with context_path.open("w", encoding="utf-8") as context_file:
+                json.dump({"key": context_key}, context_file, indent=2)
 
         llm_usage_statistics = llm_client.get_usage_statistics()
         llm_client.reset_usage_statistics()
