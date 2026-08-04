@@ -325,9 +325,9 @@ ensure_model_exists() {
 ensure_port() {
     local port=$1
     if check_port "$port"; then
-        print_warning "Port $port is already in use. Finding available port..."
+        print_warning "Port $port is already in use. Finding available port..." >&2
         port=$(find_available_port "$port")
-        print_info "Using port $port instead"
+        print_info "Using port $port instead" >&2
     fi
     echo "$port"
 }
