@@ -12,6 +12,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from data_structure import LdbDataManager
 from workloads.utils import (
+    class_balanced_sample_weights,
     encode_features,
     norm_features,
     train_classifier,
@@ -89,12 +90,18 @@ class CoresetMaintainer:
             annotated_selectivity,
             estimated_selectivity,
         )
+        confidence_training_weights = class_balanced_sample_weights(
+            labels=labeled_y.iloc[: coreset["observed_size"]],
+            base_weight=coreset["annotation_weights"].iloc[
+                : coreset["observed_size"]
+            ],
+        )
         selected_x_idx, selected_y, new_lb, new_ub = select_coreset(
             labeled_X=labeled_x,
             labeled_Y=labeled_y,
             unlabeled_X=unlabeled_x,
             selectivity=selectivity,
-            sample_weight=None,
+            sample_weight=confidence_training_weights,
             k_neighbors=self.config["k_neighbors"],
             mode=mode,
             lb=coreset["lb"],
