@@ -60,13 +60,21 @@ class LdbData:
 
     def exclude_fk_and_id(self) -> pd.DataFrame:
         """Return data without ID and foreign-key columns."""
-        return self.df.drop(columns=self.id_features + self.foreign_keys)
+        original_schema = set(
+            self.base_features + self.id_features + self.foreign_keys
+        )
+        external_features = sorted(
+            feature for feature in self.df.columns if feature not in original_schema
+        )
+        return self.df[self.base_features + external_features]
 
     def select_active_features(
         self, active_external_features: list[str]
     ) -> pd.DataFrame:
         """Return base features plus selected active external features."""
-        selected_features = self.base_features + active_external_features
+        selected_features = self.base_features + sorted(
+            active_external_features
+        )
         missing_features = [
             feature for feature in selected_features if feature not in self.df
         ]
