@@ -33,12 +33,14 @@ class Preprocessing:
         queries: dict[str, SemCQ],
         ckpt_path: Path,
         usage_statistics: list[dict[str, Any]],
+        enable_cache: bool = True,
     ) -> None:
         self.llm_client = llm_client
         self.data_manager = data_manager
         self.queries = queries
         self.CKPT_path = ckpt_path
         self.usage_statistics = usage_statistics
+        self.enable_cache = enable_cache
 
     def update_statistics(self, key: str, value: dict[str, Any]) -> None:
         assert key in self.usage_statistics[0], f"Invalid statistics key: {key}"
@@ -113,8 +115,10 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
             query_desc = self._build_query_description(sem_cq)
 
             cache_path = self.CKPT_path / q_name / "prefilter_ucq.json"
-            cached_results = self._load_prefilter_cache(
-                cache_path, schema_cols, q_name
+            cached_results = (
+                self._load_prefilter_cache(cache_path, schema_cols, q_name)
+                if self.enable_cache
+                else None
             )
 
             if cached_results is None:
@@ -125,6 +129,17 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
                     schema_info=schema_info,
                     cache_path=cache_path,
                 )
+
+            relevant_fields = {
+                field
+                for fields in cached_results.get("field_resp", {}).values()
+                for field in fields
+            }
+            self.data_manager.relevant_base_features[q_name] = [
+                field
+                for field in self.data_manager.complete_dataset.base_features
+                if field in relevant_fields
+            ]
 
             new_ucq = self._expand_ucq(
                 [
@@ -254,8 +269,9 @@ Return True if Query 1 can reuse Query 2's results, False otherwise.
             "field_resp": relevant_fields_by_category,
             "ucq_resp": ucq_response.model_dump(),
         }
-        with open(cache_path, "w") as f:
-            json.dump(cached_results, f, indent=2)
+        if self.enable_cache:
+            with open(cache_path, "w") as f:
+                json.dump(cached_results, f, indent=2)
         return cached_results
 
     def _collect_table_schema(self, df: pd.DataFrame) -> str:
