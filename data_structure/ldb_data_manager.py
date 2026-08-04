@@ -40,6 +40,7 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
         self.coresets = CoresetStore()
 
         self.enriched_features: dict[str, list[PopulationSpec]] = {}
+        self.relevant_base_features: dict[str, list[str]] = {}
         self.trimmed_feature_names: list[str] = []
         self.rewrite_rules: dict[str, dict] = {}
 
@@ -86,6 +87,7 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
         b_lab: int,
         seed: int = 42,
         use_hitl: bool = True,
+        enable_cache: bool = True,
     ) -> None:
         """Acquire labels and initialize query coresets."""
         await self.coresets.acquire_annotation_and_init(
@@ -96,9 +98,9 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
             ckpt_root=self.ckpt_path,
             pseudo_ckpt_root=self.annotation_ckpt_path,
             b_lab=b_lab,
-            feature_spaces=self.enriched_features,
             seed=seed,
             use_hitl=use_hitl,
+            enable_cache=enable_cache,
         )
 
     async def sync_coreset_features(
