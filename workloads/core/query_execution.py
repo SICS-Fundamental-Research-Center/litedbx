@@ -29,7 +29,6 @@ from workloads.core.rewrite_candidates import (
 from workloads.core.semantic_features import feature_key, predicate_key
 from workloads.utils import (
     apply_rules,
-    class_balanced_sample_weights,
     clf_to_rules,
     encode_features,
     loss_by_selectivity,

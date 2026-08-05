@@ -177,18 +177,12 @@ def annotation_sample_weights(
         weights.loc[:] = population_size / len(selection.indices)
     else:
         for stratum in selection.strata:
-            weights.loc[stratum.anchor_indices] = 1.0
-            remaining_size = stratum.population_size - len(
-                stratum.anchor_indices
-            )
-            if len(stratum.random_indices):
-                weights.loc[stratum.random_indices] = remaining_size / len(
-                    stratum.random_indices
-                )
-            elif remaining_size:
-                raise ValueError(
-                    "A partially sampled stratum needs probability samples."
-                )
+
+            stratum_weight = stratum.population_size / \
+                (len(stratum.anchor_indices) + len(stratum.random_indices))         
+
+            weights.loc[stratum.anchor_indices] = stratum_weight
+            weights.loc[stratum.random_indices] = stratum_weight
 
     if weights.isna().any() or (weights <= 0).any():
         raise ValueError("Annotation sampling design produced invalid weights.")

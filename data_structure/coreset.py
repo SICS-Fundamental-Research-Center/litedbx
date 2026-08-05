@@ -13,6 +13,7 @@ import pandas as pd
 from llm import LdbLLMClient
 
 from .annotation_sampling import (
+    AnnotationSelection,
     annotation_sample_weights,
     automatic_annotation_strategy,
 )
@@ -28,9 +29,6 @@ from .sem_query import SemCQ
 from .sigma_satisfied_data import SigmaSatisfiedData
 
 logger = logging.getLogger(__name__)
-
-JEFFREYS_PRIOR_ALPHA = 0.5
-JEFFREYS_PRIOR_BETA = 0.5
 
 
 class CoresetRecord(TypedDict):
@@ -178,8 +176,7 @@ class CoresetStore(dict[str, CoresetRecord]):
         remaining_indices = data.index.difference(labeled_indices)
         estimated_selectivity = _estimate_selectivity(
             acquired_labels=acquired_labels,
-            labeled_indices=labeled_indices,
-            annotation_weights=annotation_weights,
+            selection=annotation_selection,
         )
         self.upsert(
             q_name=q_name,
@@ -478,26 +475,42 @@ def _clamp_labeling_budget(
 
 def _estimate_selectivity(
     acquired_labels: pd.Series,
-    labeled_indices: pd.Index,
-    annotation_weights: pd.Series,
+    selection: AnnotationSelection,
 ) -> float | None:
     """Estimate prevalence from released annotations and sampling weights."""
-    annotated_labels = _coerce_bool_labels(
-        acquired_labels.loc[labeled_indices], "acquired labels"
+
+    BETA_alpha, BETA_beta = 1, 1
+    
+    if len(selection.strata) != 2:
+        raise ValueError(
+            "Selectivity estimation requires exactly two strata: "
+            f"positive and negative. Found {len(selection.strata)}."
+        )    
+
+    pos_stratum, neg_stratum = selection.strata[0], selection.strata[1]
+    est_selectivity = pos_stratum.population_size / (
+        pos_stratum.population_size + neg_stratum.population_size
     )
-    weights = annotation_weights.reindex(labeled_indices)
-    if weights.isna().any() or float(weights.sum()) <= 0:
-        return None
-    weight_values = weights.to_numpy(dtype=float)
-    weighted_positive = float(
-        np.dot(
-            annotated_labels.astype(float).to_numpy(),
-            weight_values,
-        )
+
+    pseudo_pos_indices = pos_stratum.anchor_indices.append(pos_stratum.random_indices)
+    pseudo_neg_indices = neg_stratum.anchor_indices.append(neg_stratum.random_indices)
+
+    acquired_pos_labels = _coerce_bool_labels(
+        acquired_labels.loc[pseudo_pos_indices], "acquired pos labels"
     )
-    return (weighted_positive + JEFFREYS_PRIOR_ALPHA) / (
-        float(weight_values.sum()) + JEFFREYS_PRIOR_ALPHA + JEFFREYS_PRIOR_BETA
+    acquired_neg_labels = _coerce_bool_labels(
+        acquired_labels.loc[pseudo_neg_indices], "acquired neg labels"
     )
+
+    pos_true_posterier = (BETA_alpha + acquired_pos_labels.sum()) / \
+        (BETA_alpha + BETA_beta + len(acquired_pos_labels))
+    neg_true_posterier = (BETA_alpha + acquired_neg_labels.sum()) / \
+        (BETA_alpha + BETA_beta + len(acquired_neg_labels))
+
+    rectified_selectivity = est_selectivity * pos_true_posterier + \
+        (1 - est_selectivity) * neg_true_posterier
+
+    return rectified_selectivity
 
 
 def _annotation_proxy_prompt(task_prompt: str) -> str:

@@ -100,5 +100,5 @@ def select_candidate_index(
         raise ValueError("At least one rewrite candidate is required.")
     return min(
         range(len(candidates)),
-        key=lambda index: (estimated_losses[index], index),
+        key=lambda index: (estimated_losses[index], -1 * index),
     )

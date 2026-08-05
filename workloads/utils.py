@@ -97,15 +97,23 @@ def train_classifier(
     max_depth=10,
     min_samples_leaf=1,
     sample_weight: pd.Series | np.ndarray | None = None,
+    estimated_selectivity: float | None = None,
 ) -> RandomForestClassifier:
     # Sklearn classifiers require integer labels.
     Y = Y.astype(int)
+
+    estimated_class_weight = None if \
+        estimated_selectivity is None else {
+        0: 1,
+        1: (1 - estimated_selectivity) / estimated_selectivity
+    }
+
     clf = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
         min_samples_leaf=min_samples_leaf,
         random_state=42,
-        class_weight=None if sample_weight is not None else "balanced",
+        class_weight=estimated_class_weight
     )
     clf.fit(X, Y, sample_weight=sample_weight)
 
