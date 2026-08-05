@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 
-from data_structure import LdbDataManager, SemCQ
+from data_structure import LdbData, LdbDataManager, SemCQ
 from llm import LdbLLMClient
 from workloads.core.coreset_maintainer import CoresetMaintainer
 from workloads.core.rewrite_candidates import (
@@ -29,6 +29,7 @@ from workloads.core.rewrite_candidates import (
 from workloads.core.semantic_features import feature_key, predicate_key
 from workloads.utils import (
     apply_rules,
+    class_balanced_sample_weights,
     clf_to_rules,
     encode_features,
     loss_by_selectivity,
@@ -52,6 +53,7 @@ class QueryExecution:
         b_rew: int,
         b_lab: int,
         delta: float,
+        enable_cache: bool = True,
     ) -> None:
         self._coreset_maintainer = coreset_maintainer
         self.data_manager = data_manager
@@ -62,6 +64,7 @@ class QueryExecution:
         self.b_rew = b_rew
         self.b_lab = b_lab
         self.delta = delta
+        self.enable_cache = enable_cache
 
     async def execute_queries(
         self,
@@ -87,6 +90,9 @@ class QueryExecution:
         candidates = build_rewrite_candidates(
             feature_count=len(self.data_manager.trimmed_feature_names),
             minimum_feature_count=self._minimum_required_feature_count(),
+            include_external_only=bool(
+                self.data_manager.complete_dataset.base_features
+            ),
         )
         execution_trace = {}
         rules_trace = {}
@@ -114,6 +120,7 @@ class QueryExecution:
                 "active_external_features": list(
                     best_results["features"][q_name]
                 ),
+                "candidate": best_results["candidate"][q_name],
                 "ucq": list(best_results["rules"][q_name]),
             }
             logger.info(
@@ -154,27 +161,13 @@ class QueryExecution:
         execution_trace: dict,
         candidates: list[RewriteCandidate],
     ) -> dict:
-        """Compose one annotation-selected candidate for each query."""
+        """Compose the minimum-static-loss candidate for each query."""
         composite = self._init_execution_results()
         for q_name in self.queries:
-            observed_size = self.data_manager.coresets[q_name]["observed_size"]
             best_index = select_candidate_index(
                 candidates=candidates,
                 estimated_losses=[
                     execution_trace[index]["L_static"][q_name]
-                    for index in range(len(candidates))
-                ],
-                loss_resolution=annotation_loss_resolution(
-                    labels=self.data_manager.coresets[q_name]["labels"].iloc[
-                        :observed_size
-                    ],
-                    query_size=len(self.queries),
-                    delta=self.delta,
-                ),
-                candidate_complexities=[
-                    self._candidate_preference(
-                        q_name, execution_trace[index][q_name]
-                    )
                     for index in range(len(candidates))
                 ],
             )
@@ -184,29 +177,6 @@ class QueryExecution:
             self.queries
         )
         return composite
-
-    def _candidate_preference(
-        self, q_name: str, query_results: dict
-    ) -> tuple[int, float, int]:
-        """Order tied candidates using rule size and annotation-only loss."""
-        rules = query_results["rules"]
-        predicate_count = sum(len(conjunction) for conjunction in rules)
-        referenced_features = {
-            predicate[0] for conjunction in rules for predicate in conjunction
-        }
-        coreset = self.data_manager.coresets[q_name]
-        observed_size = coreset["observed_size"]
-        observed_labels = coreset["labels"].iloc[:observed_size].astype(int)
-        active_data = coreset["ldb_data"].select_active_features(
-            query_results["features"]
-        )
-        observed_data = encode_features(active_data).iloc[:observed_size]
-        rule_predictions = apply_rules(rules, observed_data).astype(int)
-        pi = max(1e-6, min(1 - 1e-6, float(observed_labels.mean())))
-        rule_loss = float(
-            loss_by_selectivity(observed_labels, rule_predictions, pi)
-        )
-        return predicate_count, rule_loss, len(referenced_features)
 
     def _init_execution_results(self) -> dict[str, Any]:
         stats = [
@@ -246,22 +216,36 @@ class QueryExecution:
 
         coreset = self.data_manager.coresets[q_name]
         observed_size = coreset["observed_size"]
-        all_train_X = coreset["ldb_data"].select_active_features(
-            active_external_features
+        all_train_X = self._select_candidate_features(
+            ldb_data=coreset["ldb_data"],
+            active_external_features=active_external_features,
+            candidate_kind=candidate.kind,
+            eligible_base_features=self.data_manager.relevant_base_features.get(
+                q_name
+            ),
         )
         all_train_Y = coreset["labels"].astype(int)
-        test_X = self.data_manager.sigma_satisfied_data[0][q_name][
-            "ldb_data"
-        ].select_active_features(active_external_features)
+        test_X = self._select_candidate_features(
+            ldb_data=self.data_manager.sigma_satisfied_data[0][q_name][
+                "ldb_data"
+            ],
+            active_external_features=active_external_features,
+            candidate_kind=candidate.kind,
+            eligible_base_features=self.data_manager.relevant_base_features.get(
+                q_name
+            ),
+        )
 
         observed_X = all_train_X.iloc[:observed_size]
         observed_Y = all_train_Y.iloc[:observed_size]
+        estimated_selectivity = coreset["estimated_selectivity"]
+        if estimated_selectivity is None:
+            estimated_selectivity = float(observed_Y.mean())
         forest_configs = build_forest_configs()
         forest_errors = [
             compute_subjective_error(
                 X=observed_X,
                 Y=observed_Y,
-                sample_weight=None,
                 forest_config=config,
                 query_size=len(self.queries),
                 data_size=observed_size,
@@ -285,7 +269,6 @@ class QueryExecution:
 
         train_X = all_train_X
         train_Y = all_train_Y
-        sample_weight = None
 
         memory_cost = (
             self.memory_cost(train_X)
@@ -296,13 +279,11 @@ class QueryExecution:
         pred_Y_li, rules = self._propagate_and_extract_rules(
             train_X=train_X,
             train_Y=train_Y,
-            sample_weight=sample_weight,
+            sample_weight=None,
             test_X=test_X,
             forest_config=forest_config,
             rule_evidence_size=observed_size,
-            allowed_rule_features=set(
-                coreset["ldb_data"].base_features + active_external_features
-            ),
+            allowed_rule_features=set(all_train_X.columns),
             debug=debug,
         )
         rules_trace[q_name].append(rules)
@@ -327,9 +308,6 @@ class QueryExecution:
         rule_feature_count = len(
             {predicate[0] for conjunction in rules for predicate in conjunction}
         )
-        estimated_selectivity = coreset["estimated_selectivity"]
-        if estimated_selectivity is None:
-            estimated_selectivity = float(observed_Y.mean())
         L_rew, penalty_rew = compute_objective_error(
             pred_Y=pred_Y_li[0],
             trans_Y=trans_Y,
@@ -392,6 +370,24 @@ class QueryExecution:
             in self.data_manager.trimmed_feature_names[:feature_count]
         ]
 
+    @staticmethod
+    def _select_candidate_features(
+        ldb_data: LdbData,
+        active_external_features: list[str],
+        candidate_kind: str,
+        eligible_base_features: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """Select the exact columns fitted by one rewrite candidate."""
+        selected = ldb_data.select_active_features(active_external_features)
+        if candidate_kind == "external_forest":
+            return selected.loc[:, sorted(active_external_features)]
+        if eligible_base_features is None:
+            return selected
+        eligible = set(eligible_base_features) | set(active_external_features)
+        return selected.loc[
+            :, [column for column in selected.columns if column in eligible]
+        ]
+
     def _propagate_and_extract_rules(
         self,
         train_X: pd.DataFrame,
@@ -421,11 +417,6 @@ class QueryExecution:
             raise ValueError(
                 "Rule evidence size must be within the training data."
             )
-        rule_weight = (
-            None
-            if sample_weight is None
-            else np.asarray(sample_weight)[:evidence_size]
-        )
         rules = clf_to_rules(
             clf,
             feature_names=train_X.columns.tolist(),
@@ -434,7 +425,7 @@ class QueryExecution:
             y_train=train_Y.iloc[:evidence_size].to_numpy(),
             X_reference=encode_features(test_X).to_numpy(),
             y_reference=pred_Y_li[0].to_numpy(),
-            sample_weight=rule_weight,
+            sample_weight=None,
             allowed_rule_features=allowed_rule_features,
             debug=debug,
         )
@@ -599,27 +590,40 @@ class QueryExecution:
         active_external_features = self.data_manager.rewrite_rules[q_name][
             "active_external_features"
         ]
+        candidate_kind = self.data_manager.rewrite_rules[q_name]["candidate"]
 
         await self.data_manager.sync_sigma_satisfied_data_features(
             q_name=q_name,
             tag="init",
             stream_idx=inc_round,
-            enable_cache=True,
+            enable_cache=self.enable_cache,
         )
 
         self._coreset_maintainer.expand_query_coreset(
             q_name=q_name, inc_round=inc_round
         )
 
-        train_X = self.data_manager.coresets[q_name][
-            "ldb_data"
-        ].select_active_features(active_external_features)
+        train_X = self._select_candidate_features(
+            ldb_data=self.data_manager.coresets[q_name]["ldb_data"],
+            active_external_features=active_external_features,
+            candidate_kind=candidate_kind,
+            eligible_base_features=self.data_manager.relevant_base_features.get(
+                q_name
+            ),
+        )
         train_Y = self.data_manager.coresets[q_name]["labels"].astype(int)
         sample_weight = None
         test_X_li = [
-            self.data_manager.sigma_satisfied_data[i][q_name][
-                "ldb_data"
-            ].select_active_features(active_external_features)
+            self._select_candidate_features(
+                ldb_data=self.data_manager.sigma_satisfied_data[i][q_name][
+                    "ldb_data"
+                ],
+                active_external_features=active_external_features,
+                candidate_kind=candidate_kind,
+                eligible_base_features=(
+                    self.data_manager.relevant_base_features.get(q_name)
+                ),
+            )
             if not self.data_manager.sigma_satisfied_data[i][q_name][
                 "ldb_data"
             ].df.empty
@@ -627,7 +631,10 @@ class QueryExecution:
             for i in range(inc_round + 1)
         ]
         _, pred_Y_li = perform_label_propagation(
-            train_X, train_Y, test_X_li, sample_weight=sample_weight
+            train_X,
+            train_Y,
+            test_X_li,
+            sample_weight=sample_weight,
         )
 
         self.data_manager.sigma_satisfied_data[inc_round][q_name][
@@ -766,19 +773,6 @@ def compute_objective_error(
     return L_rew, penalty
 
 
-def annotation_loss_resolution(
-    labels: pd.Series, query_size: int, delta: float
-) -> float:
-    """Return the confidence radius for annotation-estimated loss."""
-    if len(labels) == 0:
-        return 0.0
-    pi = max(1e-6, min(1 - 1e-6, float(labels.mean())))
-    gamma = max(pi, 1 - pi) / min(pi, 1 - pi)
-    return gamma * math.sqrt(
-        math.log(2 * query_size / delta) / (2 * len(labels))
-    )
-
-
 def compute_subjective_error(
     X: pd.DataFrame,
     Y: pd.Series,
@@ -786,7 +780,6 @@ def compute_subjective_error(
     data_size: int,
     delta: float,
     loo_step: int = 10,
-    sample_weight: np.ndarray | None = None,
     forest_config: ForestConfig = EXPANDED_FOREST,
 ) -> tuple[float, float]:
     """Compute LOO error and penalty for subjective error estimation.
@@ -825,20 +818,12 @@ def compute_subjective_error(
 
     Y_loo = []
     Y_true = []
-    weights = (
-        None
-        if sample_weight is None
-        else np.asarray(sample_weight, dtype=float)
-    )
-    if weights is not None and len(weights) != len(X):
-        raise ValueError("sample_weight must align with X and Y.")
 
     X_encoded = encode_features(X)
     for i in range(0, len(X_encoded), loo_step):
         X_train = X_encoded.drop(index=i)
         Y_train = Y.drop(index=i)
         X_test = X_encoded.iloc[[i]]
-        train_weight = None if weights is None else np.delete(weights, i)
 
         clf = train_classifier(
             X_train,
@@ -846,7 +831,7 @@ def compute_subjective_error(
             n_estimators=forest_config.n_estimators,
             max_depth=forest_config.max_depth,
             min_samples_leaf=forest_config.min_samples_leaf,
-            sample_weight=train_weight,
+            sample_weight=None,
         )
 
         pred = clf.predict(X_test)[0]
