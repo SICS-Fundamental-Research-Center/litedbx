@@ -7,15 +7,53 @@
 """Workload-level modeling, rule, and feature helpers."""
 
 import logging
-from itertools import combinations
+from typing import Protocol, cast
 
 import numpy as np
 import pandas as pd
 from sklearn.calibration import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 
 logger = logging.getLogger(__name__)
+
+
+class _SklearnTree(Protocol):
+    """Structural subset of sklearn's Cython ``Tree`` used for traversal."""
+
+    children_left: np.ndarray
+    children_right: np.ndarray
+    feature: np.ndarray
+    threshold: np.ndarray
+    value: np.ndarray
+
+
+def class_balanced_sample_weights(
+    labels: pd.Series | np.ndarray,
+    base_weight: pd.Series | np.ndarray | None = None,
+) -> np.ndarray:
+    """Balance classes while preserving relative design weights."""
+    label_values = np.asarray(labels)
+    if len(label_values) == 0:
+        return np.array([], dtype=float)
+
+    weights = (
+        np.ones(len(label_values), dtype=float)
+        if base_weight is None
+        else np.asarray(base_weight, dtype=float).copy()
+    )
+    if len(weights) != len(label_values):
+        raise ValueError("base_weight must align with labels.")
+    if not np.isfinite(weights).all() or (weights <= 0).any():
+        raise ValueError("base_weight must be finite and positive.")
+
+    classes = np.unique(label_values)
+    for class_value in classes:
+        class_mask = label_values == class_value
+        class_mass = float(weights[class_mask].sum())
+        weights[class_mask] /= len(classes) * class_mass
+    return weights
 
 
 def encode_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -119,260 +157,152 @@ def clf_to_rules(
     allowed_rule_features: set[str] | None = None,
     debug: bool = False,
 ) -> list[list[tuple[str, float, str]]]:
-
+    """Distill forest predictions into a bounded, coherent decision-tree UCQ."""
     assert len(feature_names) == clf.n_features_in_
-
-    # Convert labels to integers for consistency
-    y_train = y_train.astype(int)
-
-    N = len(y_train)
-    weights = (
-        np.ones(N, dtype=float)
-        if sample_weight is None
-        else np.asarray(sample_weight, dtype=float)
-    )
-    if len(weights) != N:
-        raise ValueError("sample_weight must align with y_train.")
+    if disjunction_budget <= 0:
+        return []
     if (X_reference is None) != (y_reference is None):
         raise ValueError(
             "X_reference and y_reference must either both be set or both be "
             "None."
         )
-    if X_reference is not None and X_reference.shape[1] != len(feature_names):
+
+    train_y = np.asarray(y_train, dtype=int)
+    weights = (
+        np.ones(len(train_y), dtype=float)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=float)
+    )
+    if len(weights) != len(train_y):
+        raise ValueError("sample_weight must align with y_train.")
+
+    reference_X = X_train if X_reference is None else X_reference
+    reference_y = train_y if y_reference is None else np.asarray(y_reference)
+    reference_y = reference_y.astype(int)
+    if len(reference_X) != len(reference_y):
+        raise ValueError("Reference features and labels must align.")
+    if reference_X.shape[1] != len(feature_names):
         raise ValueError(
             "Reference features must align with the classifier schema."
         )
-    if y_reference is not None:
-        assert X_reference is not None
-        if len(X_reference) != len(y_reference):
-            raise ValueError("Reference features and labels must align.")
+    if len(reference_y) == 0:
+        return []
 
-    # Without a population reference, preserve a usable single-class fallback.
-    if y_reference is None and len(np.unique(y_train)) == 1:
-        fallback_rules = []
-        for feature_name in feature_names:
-            if not feature_name.startswith("llm_label_"):
-                continue
-            if (
-                allowed_rule_features is not None
-                and feature_name not in allowed_rule_features
-            ):
-                continue
-            fallback_rules.append(
-                [(feature_name, 0.5, ">")]
-            )  # Return the LLM predicated label.
-        if len(fallback_rules) > 0:
-            logger.warning(
-                "Generated fallback rules based on LLM-predicated labels."
-            )
-        else:
-            logger.warning(
-                "All training samples belong to the same class (%s). "
-                "Returning empty rule set.",
-                y_train[0],
-            )
-        return fallback_rules
+    eligible_positions = [
+        index
+        for index, feature_name in enumerate(feature_names)
+        if allowed_rule_features is None
+        or feature_name in allowed_rule_features
+    ]
+    if not eligible_positions:
+        return [[]] if reference_y.mean() >= 0.5 else []
 
-    # ------------------------------------------------------------
-    # Canonicalization
-    # ------------------------------------------------------------
+    surrogate_names = [feature_names[index] for index in eligible_positions]
+    reference_features = np.asarray(reference_X)[:, eligible_positions]
+    train_features = np.asarray(X_train)[:, eligible_positions]
+    unique_reference_labels = np.unique(reference_y)
+    if len(unique_reference_labels) == 1:
+        return [[]] if unique_reference_labels[0] == 1 else []
+
+    surrogate = DecisionTreeClassifier(
+        max_leaf_nodes=disjunction_budget + 1,
+        random_state=42,
+    )
+    surrogate.fit(reference_features, reference_y)
+
     def canonicalize_rule(path):
         intervals = {}
-
-        for feat, thresh, op in path:
-            if feat not in intervals:
-                intervals[feat] = [-np.inf, np.inf]
-
-            if op == "<=":
-                intervals[feat][1] = min(intervals[feat][1], thresh)
+        for feature, threshold, operator in path:
+            intervals.setdefault(feature, [-np.inf, np.inf])
+            if operator == "<=":
+                intervals[feature][1] = min(intervals[feature][1], threshold)
             else:
-                intervals[feat][0] = max(intervals[feat][0], thresh)
-
+                intervals[feature][0] = max(intervals[feature][0], threshold)
         return tuple(
-            (feat, low, high) for feat, (low, high) in sorted(intervals.items())
+            (feature, low, high)
+            for feature, (low, high) in sorted(intervals.items())
         )
 
-    # ------------------------------------------------------------
-    # Evaluate rule coverage on training data
-    # ------------------------------------------------------------
+    tree = cast(_SklearnTree, surrogate.tree_)
+    positive_class_positions = np.flatnonzero(surrogate.classes_ == 1)
+    if len(positive_class_positions) != 1:
+        return []
+    positive_class_position = int(positive_class_positions[0])
+    candidate_rules = []
+
+    def traverse(node_id: int, path: list) -> None:
+        if tree.children_left[node_id] == tree.children_right[node_id]:
+            predicted_class = int(np.argmax(tree.value[node_id][0]))
+            if predicted_class == positive_class_position:
+                candidate_rules.append(canonicalize_rule(path))
+            return
+
+        feature_name = surrogate_names[tree.feature[node_id]]
+        threshold = tree.threshold[node_id]
+        traverse(
+            tree.children_left[node_id],
+            path + [(feature_name, threshold, "<=")],
+        )
+        traverse(
+            tree.children_right[node_id],
+            path + [(feature_name, threshold, ">")],
+        )
+
+    traverse(0, [])
+    candidate_rules = sorted(set(candidate_rules), key=str)
+
     feature_positions = {
-        feature_name: index for index, feature_name in enumerate(feature_names)
+        feature_name: index
+        for index, feature_name in enumerate(surrogate_names)
     }
 
     def evaluate_rule(rule, data):
         mask = np.ones(len(data), dtype=bool)
-
-        for feat, low, high in rule:
-            idx = feature_positions[feat]
-
+        for feature, low, high in rule:
+            position = feature_positions[feature]
             if low != -np.inf:
-                mask &= data[:, idx] > low
+                mask &= data[:, position] > low
             if high != np.inf:
-                mask &= data[:, idx] <= high
-
+                mask &= data[:, position] <= high
         return mask
 
-    def balanced_disagreement(target, prediction, row_weights=None):
-        target = np.asarray(target, dtype=bool)
-        if len(target) == 0:
-            return 0.0
-        prediction = np.asarray(prediction, dtype=bool)
-        local_weights = (
-            np.ones(len(target), dtype=float)
-            if row_weights is None
-            else np.asarray(row_weights, dtype=float)
-        )
-        positive_weight = local_weights[target].sum()
-        negative_weight = local_weights[~target].sum()
-        if positive_weight > 0 and negative_weight > 0:
-            class_weights = np.where(
-                target,
-                0.5 / positive_weight,
-                0.5 / negative_weight,
+    if len(candidate_rules) > disjunction_budget:
+        train_y_bool = train_y.astype(bool)
+
+        def rule_priority(rule):
+            reference_mask = evaluate_rule(rule, reference_features)
+            benefit = int(
+                np.count_nonzero(reference_mask & reference_y.astype(bool))
+                - np.count_nonzero(reference_mask & ~reference_y.astype(bool))
             )
-            return float(
-                (local_weights * class_weights * (target != prediction)).sum()
+            train_mask = evaluate_rule(rule, train_features)
+            annotation_error = float(
+                np.average(train_mask != train_y_bool, weights=weights)
             )
-        return float(np.average(target != prediction, weights=local_weights))
+            return (-benefit, annotation_error, len(rule), str(rule))
 
-    # ------------------------------------------------------------
-    # Extract candidate rules from forest
-    # ------------------------------------------------------------
-    candidates = []
-    positive_class_positions = np.flatnonzero(clf.classes_ == 1)
-    if len(positive_class_positions) != 1:
-        return []
-    positive_class_position = int(positive_class_positions[0])
-
-    for tree in clf.estimators_:
-        tree_ = tree.tree_
-
-        cl = tree_.children_left  # type: ignore
-        cr = tree_.children_right  # type: ignore
-        feat = tree_.feature  # type: ignore
-        thr = tree_.threshold  # type: ignore
-        val = tree_.value
-
-        def traverse(node_id: int, path: list):
-
-            if cl[node_id] == cr[node_id]:  # leaf
-                predicted_class_position = int(np.argmax(val[node_id][0]))
-                if predicted_class_position != positive_class_position:
-                    return
-                if not path:
-                    candidates.append(canonicalize_rule(path))
-                    return
-
-                # Include supported generalizations of each positive leaf.
-                # A forest path may contain incidental predicates that make the
-                # translated UCQ less faithful than a supported sub-conjunction.
-                for size in range(1, len(path) + 1):
-                    for subset in combinations(path, size):
-                        candidate = canonicalize_rule(subset)
-                        if allowed_rule_features is None or all(
-                            feature in allowed_rule_features
-                            for feature, _, _ in candidate
-                        ):
-                            candidates.append(candidate)
-                return
-
-            fname = feature_names[feat[node_id]]
-            threshold = thr[node_id]
-
-            path.append((fname, threshold, "<="))
-            traverse(cl[node_id], path)
-            path.pop()
-
-            path.append((fname, threshold, ">"))
-            traverse(cr[node_id], path)
-            path.pop()
-
-        traverse(0, [])
-
-    # Remove duplicates
-    candidates = sorted(set(candidates), key=lambda r: str(r))
-
-    # ------------------------------------------------------------
-    # Distill the forest over the population. Annotation loss and rule size
-    # resolve population-level ties without consulting evaluation labels.
-    # ------------------------------------------------------------
-    selected = []
-    reference_X = X_train if X_reference is None else X_reference
-    reference_y = y_train if y_reference is None else y_reference.astype(int)
-    reference_prediction = np.zeros(len(reference_y), dtype=bool)
-    annotation_prediction = np.zeros(N, dtype=bool)
-    current_loss = balanced_disagreement(reference_y, reference_prediction)
-    loss_resolution = 1.0 / max(1, len(reference_y))
-
-    for _ in range(disjunction_budget):
-        evaluations = []
-        for rule in candidates:
-            reference_mask = evaluate_rule(rule, reference_X)
-            candidate_prediction = reference_prediction | reference_mask
-            reference_loss = balanced_disagreement(
-                reference_y, candidate_prediction
-            )
-            if reference_loss >= current_loss - 1e-12:
-                continue
-            annotation_mask = evaluate_rule(rule, X_train)
-            annotation_loss = balanced_disagreement(
-                y_train,
-                annotation_prediction | annotation_mask,
-                weights,
-            )
-            evaluations.append(
-                (
-                    reference_loss,
-                    annotation_loss,
-                    len(rule),
-                    str(rule),
-                    rule,
-                    reference_mask,
-                    annotation_mask,
-                )
-            )
-
-        if not evaluations:
-            break
-        minimum_loss = min(item[0] for item in evaluations)
-        eligible = [
-            item
-            for item in evaluations
-            if item[0] <= minimum_loss + loss_resolution
+        candidate_rules = sorted(candidate_rules, key=rule_priority)[
+            :disjunction_budget
         ]
-        best = min(eligible, key=lambda item: (item[2], item[1], item[3]))
-        current_loss, _, _, _, best_rule, reference_mask, annotation_mask = best
-        selected.append(best_rule)
-        reference_prediction |= reference_mask
-        annotation_prediction |= annotation_mask
-        candidates.remove(best_rule)
-        if current_loss <= 1e-12:
-            break
 
-    if not selected and len(reference_y) > 0 and reference_y.mean() >= 0.5:
-        selected = [canonicalize_rule([])]
-
-    # ------------------------------------------------------------
-    # Reconstruct readable rules
-    # ------------------------------------------------------------
     rules = []
-
-    for rule in selected:
+    reference_prediction = np.zeros(len(reference_y), dtype=bool)
+    for rule in candidate_rules:
+        reference_prediction |= evaluate_rule(rule, reference_features)
         reconstructed = []
-        for feat, low, high in rule:
+        for feature, low, high in rule:
             if low != -np.inf:
-                reconstructed.append((feat, low, ">"))
+                reconstructed.append((feature, low, ">"))
             if high != np.inf:
-                reconstructed.append((feat, high, "<="))
+                reconstructed.append((feature, high, "<="))
         rules.append(reconstructed)
 
     if debug:
         logger.info(
             "Distilled %s rule(s) with population disagreement %.6f.",
             len(rules),
-            current_loss,
+            float(np.mean(reference_prediction != reference_y.astype(bool))),
         )
-
     return rules
 
 
