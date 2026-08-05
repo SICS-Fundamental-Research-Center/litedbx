@@ -148,7 +148,7 @@ def _select_stratum(
 
     # Keep one deterministic coverage point while reserving the rest of the
     # stratum budget for probability samples used by design-based estimates.
-    anchor_count = min(1, count - 1)
+    anchor_count = min(2, count - 1)
     anchors = _select_diverse_rows(
         data=data,
         count=anchor_count,
