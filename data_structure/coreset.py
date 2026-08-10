@@ -58,11 +58,10 @@ class CoresetStore(dict[str, CoresetRecord]):
     }
     """
 
-    async def acquire_annotation_and_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    async def acquire_annotation(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         queries: dict[str, SemCQ],
         sigma_satisfied_data: SigmaSatisfiedData,
-        complete_config: dict,
         llm_client: LdbLLMClient,
         ckpt_root: Path,
         b_lab: int,
@@ -70,14 +69,14 @@ class CoresetStore(dict[str, CoresetRecord]):
         seed: int = 42,
         use_hitl: bool = True,
         enable_cache: bool = True,
-    ) -> None:
+    ) -> dict[str, AnnotationSelection]:
         """Acquire query annotations and initialize each query coreset."""
+        selection_dict = {}
         for q_name in queries:
-            await self.acquire_query_annotation_and_init(
+            selection_dict[q_name] = await self.acquire_query_annotation(
                 q_name=q_name,
                 b_lab=b_lab,
                 sigma_satisfied_data=sigma_satisfied_data,
-                complete_config=complete_config,
                 queries=queries,
                 llm_client=llm_client,
                 ckpt_root=ckpt_root,
@@ -87,13 +86,40 @@ class CoresetStore(dict[str, CoresetRecord]):
                 use_hitl=use_hitl,
                 enable_cache=enable_cache,
             )
+        return selection_dict
 
-    async def acquire_query_annotation_and_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,unused-argument
+    async def init_coreset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        queries: dict[str, SemCQ],
+        sigma_satisfied_data: SigmaSatisfiedData,
+        annotation_selections: dict[str, AnnotationSelection],
+        complete_config: dict,
+        llm_client: LdbLLMClient,
+        ckpt_root: Path,
+        pseudo_ckpt_root: Path | None = None,
+        use_hitl: bool = True,
+        enable_cache: bool = True,
+    ) -> None:
+        for q_name in queries:
+            await self.init_query_coreset(
+                q_name=q_name,
+                sigma_satisfied_data=sigma_satisfied_data,
+                complete_config=complete_config,
+                annotation_selection=annotation_selections[q_name],
+                queries=queries,
+                llm_client=llm_client,
+                ckpt_root=ckpt_root,
+                pseudo_ckpt_root=pseudo_ckpt_root,
+                stream_idx=0,
+                use_hitl=use_hitl,
+                enable_cache=enable_cache,
+            )
+
+    async def acquire_query_annotation(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,unused-argument
         self,
         q_name: str,
         b_lab: int,
         sigma_satisfied_data: SigmaSatisfiedData,
-        complete_config: dict,
         queries: dict[str, SemCQ],
         llm_client: LdbLLMClient,
         ckpt_root: Path,
@@ -102,8 +128,8 @@ class CoresetStore(dict[str, CoresetRecord]):
         seed: int = 42,
         use_hitl: bool = True,
         enable_cache: bool = True,
-    ) -> None:
-        """Acquire labels for one query and move samples into its coreset."""
+    ) -> AnnotationSelection:
+        """Acquire labels for one query."""
         record = sigma_satisfied_data[stream_idx][q_name]
         data = record["ldb_data"].df.copy()
         labels = record["labels"]
@@ -168,6 +194,45 @@ class CoresetStore(dict[str, CoresetRecord]):
             seed=seed,
             diversity_columns=diversity_columns,
         )
+        return annotation_selection
+
+    async def init_query_coreset(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,unused-argument
+        self,
+        q_name: str,
+        sigma_satisfied_data: SigmaSatisfiedData,
+        complete_config: dict,
+        annotation_selection: AnnotationSelection,
+        queries: dict[str, SemCQ],
+        llm_client: LdbLLMClient,
+        ckpt_root: Path,
+        pseudo_ckpt_root: Path | None = None,
+        stream_idx: int = 0,
+        use_hitl: bool = True,
+        enable_cache: bool = True,
+    ) -> None:
+        """Move samples into its coreset based on the annotation selection."""
+        record = sigma_satisfied_data[stream_idx][q_name]
+        data = record["ldb_data"].df.copy()
+        labels = record["labels"]
+        if labels is None:
+            raise ValueError(
+                f"Labels for query '{q_name}' in stream-{stream_idx} "
+                "have not been initialized."
+            )
+
+        if use_hitl:
+            acquired_labels = labels
+        else:
+            acquired_labels = await acquire_pseudo_labels_by_llm(
+                sigma_satisfied_data=sigma_satisfied_data,
+                queries=queries,
+                llm_client=llm_client,
+                ckpt_root=pseudo_ckpt_root or ckpt_root,
+                q_name=q_name,
+                stream_idx=stream_idx,
+                enable_cache=enable_cache,
+            )
+
         labeled_indices = annotation_selection.indices
         annotation_weights = annotation_sample_weights(
             population_size=len(data), selection=annotation_selection
@@ -480,20 +545,25 @@ def _estimate_selectivity(
     """Estimate prevalence from released annotations and sampling weights."""
 
     BETA_alpha, BETA_beta = 1, 1
-    
+
     if len(selection.strata) != 2:
-        raise ValueError(
+        logger.warning(
             "Selectivity estimation requires exactly two strata: "
             f"positive and negative. Found {len(selection.strata)}."
-        )    
+        )
+        return None
 
     pos_stratum, neg_stratum = selection.strata[0], selection.strata[1]
     est_selectivity = pos_stratum.population_size / (
         pos_stratum.population_size + neg_stratum.population_size
     )
 
-    pseudo_pos_indices = pos_stratum.anchor_indices.append(pos_stratum.random_indices)
-    pseudo_neg_indices = neg_stratum.anchor_indices.append(neg_stratum.random_indices)
+    pseudo_pos_indices = pos_stratum.anchor_indices.append(
+        pos_stratum.random_indices
+    )
+    pseudo_neg_indices = neg_stratum.anchor_indices.append(
+        neg_stratum.random_indices
+    )
 
     acquired_pos_labels = _coerce_bool_labels(
         acquired_labels.loc[pseudo_pos_indices], "acquired pos labels"
@@ -502,13 +572,17 @@ def _estimate_selectivity(
         acquired_labels.loc[pseudo_neg_indices], "acquired neg labels"
     )
 
-    pos_true_posterier = (BETA_alpha + acquired_pos_labels.sum()) / \
-        (BETA_alpha + BETA_beta + len(acquired_pos_labels))
-    neg_true_posterier = (BETA_alpha + acquired_neg_labels.sum()) / \
-        (BETA_alpha + BETA_beta + len(acquired_neg_labels))
+    pos_true_posterier = (BETA_alpha + acquired_pos_labels.sum()) / (
+        BETA_alpha + BETA_beta + len(acquired_pos_labels)
+    )
+    neg_true_posterier = (BETA_alpha + acquired_neg_labels.sum()) / (
+        BETA_alpha + BETA_beta + len(acquired_neg_labels)
+    )
 
-    rectified_selectivity = est_selectivity * pos_true_posterier + \
-        (1 - est_selectivity) * neg_true_posterier
+    rectified_selectivity = (
+        est_selectivity * pos_true_posterier
+        + (1 - est_selectivity) * neg_true_posterier
+    )
 
     return rectified_selectivity
 

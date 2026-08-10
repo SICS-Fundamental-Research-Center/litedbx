@@ -26,6 +26,7 @@ class SigmaRecord(TypedDict):
     selected_labels: pd.Series
     discarded_data: pd.DataFrame
     discarded_labels: pd.Series
+    accumulated_true_selectivity: float | None
 
 
 class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
@@ -232,6 +233,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         fp = len(retrieved_data - ground_truth)
         fn = len(ground_truth - retrieved_data)
         metrics = _quality_metrics(q_name, stream_idx, tp, fp, fn)
+        metrics["retrieved_data"] = retrieved_data
 
         logger.info(
             "Query '%s' quality metrics in stream-%s: "
@@ -303,6 +305,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             "discarded_data": pd.DataFrame(),
             "selected_labels": pd.Series(dtype=bool),
             "discarded_labels": pd.Series(dtype=bool),
+            "accumulated_true_selectivity": None,
         }
 
     def record(self, stream_idx: int, q_name: str) -> SigmaRecord:
@@ -477,6 +480,28 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
                 introduced_fn,
             )
 
+    def _accumulated_true_selectivity(
+        self, stream_idx: int, q_name: str
+    ) -> float:
+        """Compute true selectivity aggregated over streams 0..stream_idx.
+
+        Sums positives and counts across the three disjoint label
+        partitions (remaining Sigma-satisfied ``labels``, plus
+        ``selected_labels`` and ``discarded_labels``) for every stream up
+        to and including ``stream_idx``, then returns the positive rate.
+        """
+        total_positive = 0
+        total_count = 0
+        for sid in range(stream_idx + 1):
+            record = self[sid][q_name]
+            for key in ("labels", "selected_labels", "discarded_labels"):
+                part = record[key]
+                if part is None or len(part) == 0:
+                    continue
+                total_count += len(part)
+                total_positive += int(part.sum())
+        return float(total_positive) / total_count if total_count > 0 else 0.0
+
     def _build_ground_truth_if_needed(
         self,
         stream_idx: int,
@@ -507,6 +532,9 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             .reset_index(drop=True)
         )
         record["labels"] = labels
+        record["accumulated_true_selectivity"] = (
+            self._accumulated_true_selectivity(stream_idx, q_name)
+        )
 
         logger.debug(
             "Ground truth of %s-stream-%s has %s pos samples out of "

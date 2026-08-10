@@ -202,13 +202,6 @@ class FeaturePipeline:
                     q_name,
                 )
 
-        await self.data_manager.acquire_annotation_and_init_coreset(
-            b_lab=self.b_lab,
-            seed=self.random_seed,
-            use_hitl=self.enable_hitl,
-            enable_cache=self.enable_cache,
-        )
-
     async def sync_coreset_features(self, tag: str = "") -> None:
         """Materialize candidate features only on released annotations."""
         for q_name in self.queries:
@@ -276,7 +269,7 @@ class FeaturePipeline:
                 q_name,
                 stream_idx=0,
                 tag="trimmed",
-                enable_cache=self.enable_cache
+                enable_cache=self.enable_cache,
             )
 
         materialized_external_features = set()

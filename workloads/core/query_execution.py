@@ -70,15 +70,22 @@ class QueryExecution:
         enable_rewrite: bool,
         enable_enrich: bool,
         debug: bool = False,
-    ) -> dict:
+    ) -> tuple[dict[str, set[tuple]], dict]:
         if not enable_rewrite:
             await self._execute_without_rewrite(debug=debug)
-            return {}
+            return {}, {}
         if not enable_enrich:
             self._execute_without_enrichment(debug=debug)
-            return {}
-        _, execution_trace = self._rewrite_and_execute_query(debug=debug)
-        return execution_trace
+            return {}, {}
+        best_result, execution_trace = self._rewrite_and_execute_query(
+            debug=debug
+        )
+        retrieved_data = {
+            q_name: best_result["trans_eval"][q_name]["retrieved_data"] \
+                for q_name in self.queries
+        }
+
+        return retrieved_data, execution_trace
 
     def _rewrite_and_execute_query(
         self, debug: bool = False
@@ -529,7 +536,7 @@ class QueryExecution:
             print("=" * 30)
 
     async def incremental_processing(
-        self, debug: bool = False
+        self, error_certificates: dict[str, float], debug: bool = False
     ) -> tuple[bool, list]:
         eval_results = []
         rerun = False
@@ -559,7 +566,7 @@ class QueryExecution:
                     q_name=q_name,
                     inc_round=inc_round,
                     eval_results=eval_results,
-                    debug=debug,
+                    error_certificate=error_certificates.get(q_name, 0.0)
                 )
                 if step_result is None:
                     rerun = True
@@ -583,7 +590,7 @@ class QueryExecution:
         q_name: str,
         inc_round: int,
         eval_results: list,
-        debug: bool,
+        error_certificate: float,
     ) -> dict[str, Any] | None:
 
         active_external_features = self.data_manager.rewrite_rules[q_name][
@@ -653,11 +660,29 @@ class QueryExecution:
                 )
             prev_prop_Y_li.append(propagated_labels)
 
-        data_err, pred_err = compute_inc_error_certificate(
+        true_selectivity = \
+            self.data_manager.sigma_satisfied_data[inc_round][q_name]["accumulated_true_selectivity"]
+        if true_selectivity is None:
+            raise ValueError(
+                f"True selectivity is missing for query '{q_name}' "
+                f"in stream-{inc_round}."
+            )
+        data_err, pred_err, error_bound = compute_inc_error_certificate(
             prev_prop_Y_li=prev_prop_Y_li,
             prop_Y_li=pred_Y_li,
+            error_certificate=error_certificate,
+            true_selectivity=true_selectivity,
         )
         err_certificate = data_err + pred_err
+        logger.info(
+            "Inc-Round %s, Query %s: Data error: %.4f, Prediction error: %.4f, "
+            "Error bound: %.4f",
+            inc_round,
+            q_name,
+            data_err,
+            pred_err,
+            error_bound,
+        )
         prev_err_certificate = (
             eval_results[-1]["eval_results"][q_name]["error_certificate"]
             if eval_results
@@ -917,14 +942,16 @@ def compute_inc_reoptimization_threshold(
 def compute_inc_error_certificate(
     prev_prop_Y_li: list[pd.Series],
     prop_Y_li: list[pd.Series],
-) -> tuple[float, float]:
+    error_certificate: float,
+    true_selectivity: float,
+) -> tuple[float, float, float]:
     assert len(prev_prop_Y_li) == len(prop_Y_li), (
         f"Length of prev_prop_Y_li and prop_Y_li must be the same. "
         f"Got {len(prev_prop_Y_li)} and {len(prop_Y_li)}."
     )
 
     if len(prop_Y_li) == 1:
-        return 0.0, 0.0  # The first iteration introduces no error.
+        return 0.0, 0.0, 0.0  # The first iteration introduces no error.
 
     # Data error = |D_{added}| / |D_{total}|.
     curr_data_size = sum(
@@ -933,15 +960,30 @@ def compute_inc_error_certificate(
     prev_data_size = curr_data_size - len(prev_prop_Y_li[-1])
     new_data_size = len(prev_prop_Y_li[-1])
     if curr_data_size == 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     data_err = new_data_size / curr_data_size
     if prev_data_size == 0:
-        return data_err, 0.0
+        return data_err, 0.0, 0.0
 
-    # Prediction error = |Err_{shared}| / |D_{shared}|.
+    # Prediction error = |Err_{shared}| / |D_{total}|.
     pred_err = 0.0
     for i in range(len(prev_prop_Y_li) - 1):
         pred_err += sum(prev_prop_Y_li[i] != prop_Y_li[i])
-    pred_err /= prev_data_size
+    pred_err /= curr_data_size
 
-    return data_err, pred_err
+    B_new = min(1, 
+                prev_data_size / curr_data_size * error_certificate + \
+                    data_err + pred_err)
+    error_bound = compute_error_bound(B_new, true_selectivity)
+
+    return data_err, pred_err, error_bound
+
+
+def compute_error_bound(B: float, pi: float) -> float:
+    if B is None or pi is None:
+        raise ValueError("Both B and pi must be non-negative numbers")
+    if B < 0 or B > 1 or pi < 0 or pi > 1:
+        raise ValueError("Both B and pi must be in the range [0, 1]")
+    if 0 <= B < pi:
+        return 2 * (pi - B) / (2 * pi - B)
+    return 0.0

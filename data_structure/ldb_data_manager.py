@@ -1,12 +1,14 @@
 # pylint: disable=duplicate-code
 """LiteDBX data lifecycle manager."""
 
+import copy
 from pathlib import Path
 
 import pandas as pd
 
 from llm import LdbLLMClient
 
+from .annotation_sampling import AnnotationSelection
 from .coreset import CoresetStore
 from .data_stream import DataStream
 from .ldb_data import LdbData
@@ -49,6 +51,24 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
         self._ensure_ckpt_path()
         self.annotation_ckpt_path.mkdir(parents=True, exist_ok=True)
 
+    def __deepcopy__(self, memo):
+        """Deep-copy the manager while sharing the LLM client.
+
+        ``llm_client`` is a shared service holding non-copyable members
+        (the ``litellm`` module, an ``asyncio.Semaphore``, and
+        instructor-wrapped callables), so the copy reuses the same
+        instance; every other attribute is deep-copied independently.
+        """
+        cls = self.__class__
+        new = cls.__new__(cls)
+        memo[id(self)] = new
+        for key, value in self.__dict__.items():
+            if key == "llm_client":
+                setattr(new, key, value)
+            else:
+                setattr(new, key, copy.deepcopy(value, memo))
+        return new
+
     # ------------------------------------------------------------------
     # Public workflow API
     # ------------------------------------------------------------------
@@ -82,23 +102,41 @@ class LdbDataManager:  # pylint: disable=too-many-instance-attributes
             data_dir=self.data_dir,
         )
 
-    async def acquire_annotation_and_init_coreset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    async def acquire_annotation(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         b_lab: int,
         seed: int = 42,
         use_hitl: bool = True,
         enable_cache: bool = True,
-    ) -> None:
-        """Acquire labels and initialize query coresets."""
-        await self.coresets.acquire_annotation_and_init(
+    ) -> dict[str, AnnotationSelection]:
+        """Acquire labels."""
+        return await self.coresets.acquire_annotation(
             queries=self.queries,
             sigma_satisfied_data=self.sigma_satisfied_data,
-            complete_config=self.complete_dataset.config,
             llm_client=self.llm_client,
             ckpt_root=self.ckpt_path,
             pseudo_ckpt_root=self.annotation_ckpt_path,
             b_lab=b_lab,
             seed=seed,
+            use_hitl=use_hitl,
+            enable_cache=enable_cache,
+        )
+
+    async def init_coreset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        annotation_selections: dict[str, AnnotationSelection],
+        use_hitl: bool = True,
+        enable_cache: bool = True,
+    ) -> None:
+        """Initialize query coresets."""
+        await self.coresets.init_coreset(
+            queries=self.queries,
+            sigma_satisfied_data=self.sigma_satisfied_data,
+            annotation_selections=annotation_selections,
+            complete_config=self.complete_dataset.config,
+            llm_client=self.llm_client,
+            ckpt_root=self.ckpt_path,
+            pseudo_ckpt_root=self.annotation_ckpt_path,
             use_hitl=use_hitl,
             enable_cache=enable_cache,
         )
