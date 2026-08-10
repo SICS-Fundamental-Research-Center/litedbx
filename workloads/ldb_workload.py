@@ -289,6 +289,14 @@ class LdbWorkload:
                 f"True selectivity for query '{q_name}' in stream "
                 f"{stream_idx} is not available."
             )
+        logger.info(
+            "Computing error bound for query '%s' in stream %d: "
+            "B=%.4f, pi=%.4f",
+            q_name,
+            stream_idx,
+            B,
+            pi,
+        )
         return self.error_bound(B, pi)
 
     async def estimate_error_certificates(
