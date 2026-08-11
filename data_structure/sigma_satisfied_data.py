@@ -27,6 +27,7 @@ class SigmaRecord(TypedDict):
     discarded_data: pd.DataFrame
     discarded_labels: pd.Series
     accumulated_true_selectivity: float | None
+    candidate_size: int
 
 
 class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
@@ -306,6 +307,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             "selected_labels": pd.Series(dtype=bool),
             "discarded_labels": pd.Series(dtype=bool),
             "accumulated_true_selectivity": None,
+            "candidate_size": 0,
         }
 
     def record(self, stream_idx: int, q_name: str) -> SigmaRecord:
@@ -405,6 +407,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             LdbData(df=selected_data, config=complete_config)
         )
         post_data_scale = len(self[stream_idx][q_name]["ldb_data"].df)
+        self[stream_idx][q_name]["candidate_size"] = post_data_scale
         logger.info(
             "Applied Sigma retrieval for query '%s' in stream-%s: "
             "%s -> %s rows.",
@@ -463,6 +466,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
 
         introduced_fn = sum(record["discarded_labels"])
         post_data_scale = len(record["ldb_data"].df)
+        record["candidate_size"] = post_data_scale
         logger.info(
             "Refined Sigma-satisfied data for query '%s' in stream-%s: "
             "%s -> %s rows.",
@@ -480,26 +484,44 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
                 introduced_fn,
             )
 
+        # Recompute candidate-set selectivity so the cached pi matches the
+        # candidate universe the capture-recapture and B are scoped to.
+        record["accumulated_true_selectivity"] = (
+            self._accumulated_true_selectivity(stream_idx, q_name)
+        )
+
     def _accumulated_true_selectivity(
         self, stream_idx: int, q_name: str
     ) -> float:
-        """Compute true selectivity aggregated over streams 0..stream_idx.
+        """Compute candidate-set selectivity, aggregated over streams.
 
-        Sums positives and counts across the three disjoint label
-        partitions (remaining Sigma-satisfied ``labels``, plus
-        ``selected_labels`` and ``discarded_labels``) for every stream up
-        to and including ``stream_idx``, then returns the positive rate.
+        Denominator = ``candidate_size`` (the post-refinement candidate set
+        the rule operates on and the verification split V samples; invariant
+        to the annotation row-shuffling that later empties
+        ldb_data/selected_data). Numerator = candidate positives, recovered
+        robustly: sum positives across every partition (``labels`` +
+        ``selected_labels`` + ``discarded_labels``) -- the conserved total
+        over the full Sigma(D) base -- then subtract the discarded positives
+        (``introduced_fn``). This yields candidate positives without trusting
+        how annotation shuffled rows between ldb_data and selected_data.
+        Discarded rows stay out of the denominator, so pi does not collapse
+        for low-selectivity queries.
         """
         total_positive = 0
+        introduced_fn = 0
         total_count = 0
         for sid in range(stream_idx + 1):
             record = self[sid][q_name]
+            total_count += record["candidate_size"]
             for key in ("labels", "selected_labels", "discarded_labels"):
                 part = record[key]
                 if part is None or len(part) == 0:
                     continue
-                total_count += len(part)
-                total_positive += int(part.sum())
+                pos = int(part.sum())
+                total_positive += pos
+                if key == "discarded_labels":
+                    introduced_fn += pos
+        total_positive -= introduced_fn
         return float(total_positive) / total_count if total_count > 0 else 0.0
 
     def _build_ground_truth_if_needed(

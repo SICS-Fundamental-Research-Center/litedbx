@@ -380,6 +380,13 @@ class LdbWorkload:
             Bi := min{ 1, di + Ui }
 
         Where:
+            Sigma(D) := post-refinement candidate set (candidate_size); the
+                        set the learned rule operates on and the only set the
+                        verification split V samples, so the capture-
+                        recapture is scoped to it. Discarded rows fall outside
+                        this universe; refinement is expected to be sound
+                        (introduced_fn = 0) so the candidate F1 the bound
+                        addresses equals the global F1 the evaluation reports.
             di := INDICATOR( Sigma(D), hat(qT) != qT ) / |Sigma(D)|
             Ui := (e^init + K^+) / |Sigma(D)|
             e_init := SUM(T, INDICATOR( hat(qT) != Y ) )
@@ -406,11 +413,15 @@ class LdbWorkload:
             )
 
         sigma_D = ldb_snapshot.data_manager.sigma_satisfied_data[0][q_name]
-        sigma_D_size = (
-            len(sigma_D["ldb_data"].df)
-            + len(sigma_D["selected_data"])
-            + len(sigma_D["discarded_data"])
-        )
+        # Certifiable universe = post-refinement candidate set (candidate_size):
+        # the set the learned rule operates on and the verification split V
+        # samples. Invariant to the annotation row-shuffling that empties
+        # ldb_data/selected_data by snapshot time. Discarded rows fall outside
+        # this universe; refinement is expected to be sound (introduced_fn = 0)
+        # so the candidate F1 the bound addresses equals the global F1 the
+        # evaluation reports. introduced_fn is logged per query so any unsound
+        # refinement is visible in the run output.
+        sigma_D_size = sigma_D["candidate_size"]
 
         d = len(probe_retrieved_data ^ final_retrieved_data) / sigma_D_size
         e_init = (annotation_labels_T != pred_labels_T).sum()
