@@ -78,7 +78,16 @@ class LdbEngine:
                 path=error_certificates_path
             )
             scenario = self.workload.scenario
-            query_key = "[" + ", ".join(self.workload.queries) + "]"
+            # The error certificate B is estimated from the partial evaluation
+            # (PEval) on the FIRST data fraction only, so it depends on
+            # (workload, queries, dynamic_setting[0]) -- not on the later steps
+            # of the plan. Fold that first fraction into the cache key so that
+            # certificates from different data fractions can never collide (a
+            # two-step B_initial@0.6 vs a one-step B@0.7 vs a static B@1.0),
+            # while still letting the [0.6, *] two-step family reuse one shared
+            # B_initial@0.6.
+            first_fraction = self.dynamic_setting[0]
+            query_key = f"[{', '.join(self.workload.queries)}]@{first_fraction}"
             error_certificates = error_certificates_log.get(scenario, {}).get(
                 query_key, {}
             )
