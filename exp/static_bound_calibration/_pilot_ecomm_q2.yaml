@@ -1,0 +1,16 @@
+# PILOT config (temporary): one image query to validate the static-bound
+# pipeline end-to-end (model serving, cert estimation, log parsing, timing)
+# before launching the full Phase-1 sweep. Not part of the 15-query table.
+tasks:
+  - name: ecomm_image_pilot
+    exp_group: static_bound_calibration
+    models: [qwen3-vl-30b]
+    release_model_after_task: false
+    objects:
+      - workload: ecomm
+        queries:
+          - [Q2]  # non-trivial (stale B~0.35); exercises full cert path
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [pred_eval.f1, pred_eval.TP, pred_eval.FP, pred_eval.FN, overall_selectivity, total_size]

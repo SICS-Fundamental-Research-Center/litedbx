@@ -1,0 +1,87 @@
+# Static-bound calibration — TEXT-modality queries (qwen3-30b-fp8).
+# See static_bound_experiment.md (§3) for the SemBench<->LiteDBX mapping.
+# Run protocol: isolate ONE query per --cold run; clear its cert-cache entry
+# in .data_ckpt/error_certificates.yaml first; vary random_seed in
+# workloads/config.yaml across trials. exp_group namespaces the data cache.
+tasks:
+  - name: movie_text
+    exp_group: static_bound_calibration
+    models: [qwen3-30b-fp8]
+    release_model_after_task: false
+    objects:
+      - workload: movie
+        queries:
+          - [Q1]  # SemBench Movie.Q1 | Target F1: 0.97
+          - [Q2]  # SemBench Movie.Q2 | Target F1: 1.00
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, pred_eval.TP, pred_eval.FP, pred_eval.FN,
+          trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj,
+          overall_selectivity, total_size,
+          features,
+        ]
+  - name: ecomm_text
+    exp_group: static_bound_calibration
+    models: [qwen3-30b-fp8]
+    release_model_after_task: false
+    objects:
+      - workload: ecomm
+        queries:
+          - [Q1]  # SemBench E-Comm.Q1 | Target F1: 1.00
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, pred_eval.TP, pred_eval.FP, pred_eval.FN,
+          trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj,
+          overall_selectivity, total_size,
+          features,
+        ]
+  - name: mmqa_text
+    exp_group: static_bound_calibration
+    models: [qwen3-30b-fp8]
+    release_model_after_task: false
+    objects:
+      - workload: mmqa
+        queries:
+          - [Q3a]  # SemBench MMQA.Q1 | Target F1: 0.83
+          - [Q3f]  # SemBench MMQA.Q2 | Target F1: 1.00
+          - [Q6a]  # SemBench MMQA.Q3 | Target F1: 1.00
+          - [Q6b]  # SemBench MMQA.Q4 | Target F1: 1.00
+          - [Q6c]  # SemBench MMQA.Q5 | Target F1: 1.00
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, pred_eval.TP, pred_eval.FP, pred_eval.FN,
+          trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj,
+          overall_selectivity, total_size,
+          features,
+        ]
+  - name: medical_text
+    exp_group: static_bound_calibration
+    models: [qwen3-30b-fp8]
+    release_model_after_task: false
+    objects:
+      - workload: medical
+        queries:
+          - [Q1]  # SemBench Medical.Q1 | Target F1: 0.52
+    collect:
+      execution_trace:
+        iterations: ALL
+        features: [
+          pred_eval.f1, pred_eval.TP, pred_eval.FP, pred_eval.FN,
+          trans_eval.f1, L_static,
+          L_rew, penalty_rew, L_obj,
+          L_LOO, penalty_LOO, L_subj,
+          overall_selectivity, total_size,
+          features,
+        ]
