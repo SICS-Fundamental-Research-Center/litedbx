@@ -724,7 +724,7 @@ class QueryExecution:
         logger.info(
             "Dynamic certificate for query '%s' in stream-%s: "
             "B_new=%.4f, Err_new=%.4f, slack=%.4f, Phi_new=%.4f, "
-            "pi_new=%.4f, |Omega|=%s.",
+            "pi_new=%.4f, |Omega|=%s, F1_reuse=%.4f.",
             q_name,
             inc_round,
             b_new,
@@ -733,6 +733,7 @@ class QueryExecution:
             error_bound,
             true_selectivity,
             trans_eval["omega"],
+            trans_eval["f1"],
         )
 
         if err_certificate >= reoptimization_threshold:
