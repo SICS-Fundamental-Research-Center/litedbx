@@ -1,40 +1,40 @@
 tasks:
-  - name: animals_image
-    exp_group: re_annotation_20
-    models: [qwen3-vl-30b]
-    release_model_after_task: false
-    objects:
-      - workload: animals
-        queries:
-          - [Q7]  # Target F1: 1.00
-    collect:
-      execution_trace:
-        iterations: ALL
-        features: [
-          pred_eval.f1, trans_eval.f1, L_static,
-          L_rew, penalty_rew, L_obj,
-          L_LOO, penalty_LOO, L_subj, 
-          overall_selectivity, total_size,
-          features,
-        ]
-  - name: ecomm_image
-    exp_group: re_annotation_20
-    models: [qwen3-vl-30b]
-    release_model_after_task: false
-    objects:
-      - workload: ecomm
-        queries:
-          - [Q2]  # Target F1: 1.00
-    collect:
-      execution_trace:
-        iterations: ALL
-        features: [
-          pred_eval.f1, trans_eval.f1, L_static,
-          L_rew, penalty_rew, L_obj,
-          L_LOO, penalty_LOO, L_subj, 
-          overall_selectivity, total_size,
-          features,
-        ]
+  # - name: animals_image
+  #   exp_group: re_annotation_20
+  #   models: [qwen3-vl-30b]
+  #   release_model_after_task: false
+  #   objects:
+  #     - workload: animals
+  #       queries:
+  #         - [Q7]  # Target F1: 1.00
+  #   collect:
+  #     execution_trace:
+  #       iterations: ALL
+  #       features: [
+  #         pred_eval.f1, trans_eval.f1, L_static,
+  #         L_rew, penalty_rew, L_obj,
+  #         L_LOO, penalty_LOO, L_subj,
+  #         overall_selectivity, total_size,
+  #         features,
+  #       ]
+  # - name: ecomm_image
+  #   exp_group: re_annotation_20
+  #   models: [qwen3-vl-30b]
+  #   release_model_after_task: false
+  #   objects:
+  #     - workload: ecomm
+  #       queries:
+  #         - [Q2]  # Target F1: 1.00
+  #   collect:
+  #     execution_trace:
+  #       iterations: ALL
+  #       features: [
+  #         pred_eval.f1, trans_eval.f1, L_static,
+  #         L_rew, penalty_rew, L_obj,
+  #         L_LOO, penalty_LOO, L_subj,
+  #         overall_selectivity, total_size,
+  #         features,
+  #       ]
   - name: medical_image
     exp_group: re_annotation_20
     models: [qwen3-vl-30b]
@@ -42,8 +42,8 @@ tasks:
     objects:
       - workload: medical
         queries:
-          - [Q3]  # Target F1: 0.84
-          - [Q8]  # Target F1: 0.63
+          # - [Q3]  # Target F1: 0.84
+          # - [Q8]  # Target F1: 0.63
           - [Q9]  # Target F1: 0.51
     collect:
       execution_trace:
@@ -51,7 +51,7 @@ tasks:
         features: [
           pred_eval.f1, trans_eval.f1, L_static,
           L_rew, penalty_rew, L_obj,
-          L_LOO, penalty_LOO, L_subj, 
+          L_LOO, penalty_LOO, L_subj,
           overall_selectivity, total_size,
           features,
         ]

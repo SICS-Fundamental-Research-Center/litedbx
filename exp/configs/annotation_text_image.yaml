@@ -6,6 +6,8 @@ tasks:
     objects:
       - workload: ecomm
         queries:
+          - [Q1]
+          - [Q2]
           - [Q13] # Target F1: 0.80
     collect:
       execution_trace:
