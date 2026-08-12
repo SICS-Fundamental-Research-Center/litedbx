@@ -667,7 +667,7 @@ class QueryExecution:
                 f"True selectivity is missing for query '{q_name}' "
                 f"in stream-{inc_round}."
             )
-        data_err, pred_err, error_bound = compute_inc_error_certificate(
+        data_err, pred_err, error_bound, b_new = compute_inc_error_certificate(
             prev_prop_Y_li=prev_prop_Y_li,
             prop_Y_li=pred_Y_li,
             error_certificate=error_certificate,
@@ -702,9 +702,11 @@ class QueryExecution:
             reoptimization_threshold,
         )
 
-        if err_certificate >= reoptimization_threshold:
-            return None
-
+        # Evaluate the UNCHANGED pre-update rewrite on the updated candidate
+        # set BEFORE the refresh decision. trans_eval["Err"] is Err_new -- the
+        # old rewrite's 0-1 error on the new data -- measured on every round
+        # (including ones about to be refreshed) so the dynamic certificate's
+        # pre-refresh slack is always observed.
         trans_Y_li = [
             apply_rules(
                 self.data_manager.rewrite_rules[q_name]["ucq"],
@@ -712,6 +714,29 @@ class QueryExecution:
             )
             for i in range(inc_round + 1)
         ]
+        trans_eval = self.data_manager.eval_query_quality(
+            q_name=q_name,
+            selected_cols=self.queries[q_name].selected,
+            stream_idx=inc_round,
+            pred_labels=trans_Y_li,
+        )
+        err_new = trans_eval["Err"]
+        logger.info(
+            "Dynamic certificate for query '%s' in stream-%s: "
+            "B_new=%.4f, Err_new=%.4f, slack=%.4f, Phi_new=%.4f, "
+            "pi_new=%.4f, |Omega|=%s.",
+            q_name,
+            inc_round,
+            b_new,
+            err_new,
+            b_new - err_new,
+            error_bound,
+            true_selectivity,
+            trans_eval["omega"],
+        )
+
+        if err_certificate >= reoptimization_threshold:
+            return None
 
         return {
             "error_certificate": err_certificate,
@@ -724,12 +749,7 @@ class QueryExecution:
                 stream_idx=inc_round,
                 pred_labels=pred_Y_li,
             ),
-            "trans_eval": self.data_manager.eval_query_quality(
-                q_name=q_name,
-                selected_cols=self.queries[q_name].selected,
-                stream_idx=inc_round,
-                pred_labels=trans_Y_li,
-            ),
+            "trans_eval": trans_eval,
         }
 
     def memory_cost(self, obj: pd.DataFrame | pd.Series) -> float:
@@ -944,14 +964,15 @@ def compute_inc_error_certificate(
     prop_Y_li: list[pd.Series],
     error_certificate: float,
     true_selectivity: float,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float]:
     assert len(prev_prop_Y_li) == len(prop_Y_li), (
         f"Length of prev_prop_Y_li and prop_Y_li must be the same. "
         f"Got {len(prev_prop_Y_li)} and {len(prop_Y_li)}."
     )
 
     if len(prop_Y_li) == 1:
-        return 0.0, 0.0, 0.0  # The first iteration introduces no error.
+        # The first iteration introduces no error; B_new is trivially 0.
+        return 0.0, 0.0, 0.0, 0.0
 
     # Data error = |D_{added}| / |D_{total}|.
     curr_data_size = sum(
@@ -960,10 +981,10 @@ def compute_inc_error_certificate(
     prev_data_size = curr_data_size - len(prev_prop_Y_li[-1])
     new_data_size = len(prev_prop_Y_li[-1])
     if curr_data_size == 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     data_err = new_data_size / curr_data_size
     if prev_data_size == 0:
-        return data_err, 0.0, 0.0
+        return data_err, 0.0, 0.0, data_err
 
     # Prediction error = |Err_{shared}| / |D_{total}|.
     pred_err = 0.0
@@ -976,7 +997,7 @@ def compute_inc_error_certificate(
                     data_err + pred_err)
     error_bound = compute_error_bound(B_new, true_selectivity)
 
-    return data_err, pred_err, error_bound
+    return data_err, pred_err, error_bound, B_new
 
 
 def compute_error_bound(B: float, pi: float) -> float:

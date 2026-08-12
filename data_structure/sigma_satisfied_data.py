@@ -233,12 +233,23 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         tp = len(ground_truth.intersection(retrieved_data))
         fp = len(retrieved_data - ground_truth)
         fn = len(ground_truth - retrieved_data)
-        metrics = _quality_metrics(q_name, stream_idx, tp, fp, fn)
+        # |Omega| = accumulated candidate-row count over streams 0..stream_idx,
+        # the universe this evaluation is scoped to. It equals curr_data_size,
+        # the normalizer B_new uses, so Err is coherent with the
+        # capture-recapture bound; at stream_idx==0 it reduces to candidate_size
+        # (the static 'err' denominator).
+        omega = sum(
+            self[sid][q_name]["candidate_size"]
+            for sid in range(stream_idx + 1)
+        )
+        metrics = _quality_metrics(q_name, stream_idx, tp, fp, fn, omega)
+        metrics["omega"] = omega
         metrics["retrieved_data"] = retrieved_data
 
         logger.info(
             "Query '%s' quality metrics in stream-%s: "
-            "TP=%s, FP=%s, FN=%s, Precision=%.4f, Recall=%.4f, F1=%.4f",
+            "TP=%s, FP=%s, FN=%s, Precision=%.4f, Recall=%.4f, F1=%.4f, "
+            "Err=%.4f (|Omega|=%s)",
             q_name,
             stream_idx,
             metrics["TP"],
@@ -247,6 +258,8 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             metrics["precision"],
             metrics["recall"],
             metrics["f1"],
+            metrics["Err"],
+            omega,
         )
         return metrics
 
@@ -620,9 +633,17 @@ def _row_keys(df: pd.DataFrame, selected_cols: list[str]) -> set[tuple]:
 
 
 def _quality_metrics(
-    q_name: str, stream_idx: int, tp: int, fp: int, fn: int
+    q_name: str, stream_idx: int, tp: int, fp: int, fn: int, omega: int
 ) -> dict:
-    """Build precision, recall, and F1 metrics from counts."""
+    """Build precision, recall, F1, and 0-1 error metrics from counts.
+
+    ``omega`` is the evaluation-universe size |Omega| -- the accumulated
+    candidate-row count over streams 0..stream_idx. ``Err = (FP+FN)/omega`` is
+    the 0-1 error rate of the evaluated labels against ground truth over that
+    universe; for the incremental ``trans_eval`` it is ``Err_new`` of the
+    unchanged pre-update rewrite, directly comparable to ``B_i^new``.
+    """
+    err = (fp + fn) / omega if omega > 0 else 0.0
     if fp == 0 and fn == 0 and tp == 0:
         logger.debug(
             "Both prediction and ground truth are empty for query '%s' "
@@ -634,6 +655,7 @@ def _quality_metrics(
             "f1": 1.0,
             "precision": 1.0,
             "recall": 1.0,
+            "Err": err,
             "TP": tp,
             "FP": fp,
             "FN": fn,
@@ -650,6 +672,7 @@ def _quality_metrics(
         "f1": f1,
         "precision": precision,
         "recall": recall,
+        "Err": err,
         "TP": tp,
         "FP": fp,
         "FN": fn,
