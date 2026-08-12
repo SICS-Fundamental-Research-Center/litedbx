@@ -25,3 +25,9 @@ data/**/ground_truth
 
 *.todo
 exp/results/*
+exp/*/_logs
+exp/*/_runs
+exp/*/*.md
+exp/*/*.py
+exp/*/*.log
+exp/*/*.jsonl
