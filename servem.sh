@@ -131,7 +131,13 @@ MODEL_PATHS[qwen3-30b-fp8]="/ssd_data/models/Qwen3-30B-A3B-Instruct-2507-FP8"
 MODEL_PORTS[qwen3-30b-fp8]=8004
 MODEL_MAX_LEN[qwen3-30b-fp8]=32768
 MODEL_TP_SIZE[qwen3-30b-fp8]=2
-MODEL_GPU_UTIL[qwen3-30b-fp8]=0.8
+# 0.8 (18.85 GiB) failed init_device on a GPU shared with another user's ~4.5 GiB
+# job (only ~18.77 GiB free at measurement) -- "Free memory ... is less than
+# desired GPU memory utilization". 0.75 (17.67 GiB) leaves ~1.1 GiB startup
+# margin. gpu_memory_utilization only reserves KV-cache headroom -- it does NOT
+# change model weights or outputs (temp=0 identical tokens), so this is hosting
+# tuning, not result-tuning.
+MODEL_GPU_UTIL[qwen3-30b-fp8]=0.75
 MODEL_MIN_FREE_MB[qwen3-30b-fp8]=18000
 
 MODEL_PATHS[qwen3-vl-8b]="/ssd_data/models/Qwen3-VL-8B-Instruct"
@@ -152,7 +158,7 @@ MODEL_PATHS[qwen3-vl-30b]="/ssd_data/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 MODEL_PORTS[qwen3-vl-30b]=8005
 MODEL_MAX_LEN[qwen3-vl-30b]=32768
 MODEL_TP_SIZE[qwen3-vl-30b]=2
-MODEL_GPU_UTIL[qwen3-vl-30b]=0.9
+MODEL_GPU_UTIL[qwen3-vl-30b]=0.8
 MODEL_MIN_FREE_MB[qwen3-vl-30b]=18000
 
 MODEL_PATHS[qwen3-vl-2b]="/ssd_data/models/Qwen3-VL-2B-Instruct"
@@ -398,6 +404,12 @@ start_model() {
     local -a cmd=(vllm serve "$model_path" --port "$port" --max-model-len "$max_len" --gpu-memory-utilization "$gpu_util")
     if (( tp_size > 1 )); then
         cmd+=(--tensor-parallel-size "$tp_size")
+    fi
+    # Shared-box accommodation: skip CUDA-graph capture (enforce eager) so a TP
+    # shard on a fragmented/contended GPU does not fault during graph capture.
+    # Env-gated (SERVEM_EAGER=1); identical model outputs (only ~10-20% slower).
+    if [[ "${SERVEM_EAGER:-0}" == "1" ]]; then
+        cmd+=(--enforce-eager)
     fi
 
     local launch_cmd
