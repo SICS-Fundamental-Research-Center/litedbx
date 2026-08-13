@@ -177,9 +177,11 @@ def annotation_sample_weights(
         weights.loc[:] = population_size / len(selection.indices)
     else:
         for stratum in selection.strata:
+            n_selected = len(stratum.anchor_indices) + len(stratum.random_indices)
+            if n_selected == 0:
+                continue
 
-            stratum_weight = stratum.population_size / \
-                (len(stratum.anchor_indices) + len(stratum.random_indices))         
+            stratum_weight = stratum.population_size / n_selected         
 
             weights.loc[stratum.anchor_indices] = stratum_weight
             weights.loc[stratum.random_indices] = stratum_weight
