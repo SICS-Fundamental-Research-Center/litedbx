@@ -91,10 +91,8 @@ class CoresetMaintainer:
             estimated_selectivity,
         )
         confidence_training_weights = class_balanced_sample_weights(
-            labels=labeled_y.iloc[: coreset["observed_size"]],
-            base_weight=coreset["annotation_weights"].iloc[
-                : coreset["observed_size"]
-            ],
+            labels=labeled_y,
+            base_weight=coreset["annotation_weights"],
         )
         selected_x_idx, selected_y, new_lb, new_ub = select_coreset(
             labeled_X=labeled_x,
@@ -125,6 +123,12 @@ class CoresetMaintainer:
         coreset["labels"] = pd.concat(
             [labeled_y, selected_y], ignore_index=True
         )
+        coreset["annotation_weights"] = pd.concat(
+            [coreset["annotation_weights"],
+             pd.Series(1.0, index=range(len(selected_y)))],
+            ignore_index=True,
+        )
+
 
         logger.info(
             "Inc-Round %s: Expanded coreset for query %s: added %s "
