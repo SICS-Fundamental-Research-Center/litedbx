@@ -25,8 +25,5 @@ data/**/ground_truth
 
 *.todo
 exp/_seed
-exp/data_evolution
-exp/dynamic_certificate_calibration
-exp/static_bound_calibration
-exp/static_main
+exp/[0-9]*_*/
 exp/results
