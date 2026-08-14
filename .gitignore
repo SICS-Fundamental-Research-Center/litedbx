@@ -24,10 +24,9 @@ data/**/data_full.csv
 data/**/ground_truth
 
 *.todo
-exp/results/*
-exp/*/_logs
-exp/*/_runs
-exp/*/*.md
-exp/*/*.py
-exp/*/*.log
-exp/*/*.jsonl
+exp/_seed
+exp/data_evolution
+exp/dynamic_certificate_calibration
+exp/static_bound_calibration
+exp/static_main
+exp/results
