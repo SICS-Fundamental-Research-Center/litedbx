@@ -17,6 +17,7 @@ UNIVERSAL_CONFIG_KEYS = frozenset(
         "enable_conf_pred",
         "enable_enrich",
         "enable_rewrite",
+        "enable_coreset_expansion",
         "loo_step",
         "delta",
         "dynamic_setting",
@@ -55,6 +56,7 @@ def validate_workload_config(config: Mapping[str, Any]) -> None:
         "enable_conf_pred",
         "enable_enrich",
         "enable_rewrite",
+        "enable_coreset_expansion",
     ):
         if not isinstance(config[key], bool):
             raise ValueError(f"Workload config {key!r} must be boolean.")

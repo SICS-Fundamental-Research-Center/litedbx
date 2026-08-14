@@ -246,7 +246,8 @@ class LdbWorkload:
         durations["query_trim"] = step_end - step_start
 
         step_start = step_end
-        self._coreset_maintainer.expand_coresets(inc_round=0)
+        if self.enable_coreset_expansion:
+            self._coreset_maintainer.expand_coresets(inc_round=0)
         step_end = time()
         durations["coreset_expand"] = step_end - step_start
         durations["coreset_total"] = step_end - phase_start
@@ -329,7 +330,8 @@ class LdbWorkload:
         )
         await probe_snapshot.feature_pipeline.sync_coreset_features(tag="init")
         await probe_snapshot.feature_pipeline.rank_and_trim_feature_space()
-        probe_snapshot.coreset_maintainer.expand_coresets(inc_round=0)
+        if self.enable_coreset_expansion:
+            probe_snapshot.coreset_maintainer.expand_coresets(inc_round=0)
         (
             probe_retrieved_data,
             _,
@@ -698,6 +700,7 @@ class LdbWorkload:
         self.enable_conf_struct = self.config["enable_conf_struct"]
         self.enable_enrich = self.config["enable_enrich"]
         self.enable_rewrite = self.config["enable_rewrite"]
+        self.enable_coreset_expansion = self.config["enable_coreset_expansion"]
         self.dynamic_setting = self.config["dynamic_setting"]
         self.data_manager = LdbDataManager(
             data_dir=self.data_dir,
