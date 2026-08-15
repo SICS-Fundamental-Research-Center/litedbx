@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable cache reads and writes for this run.",
     )
     parser.add_argument(
+        "--certificate",
+        action="store_true",
+        help="Compute error certificates after running the workload.",
+    )
+    parser.add_argument(
         "--ls-configs",
         action="store_true",
         help="List experiment configs under exp/.",
@@ -110,12 +115,14 @@ async def run_configs(
     debug: bool,
     logger: logging.Logger,
     cold: bool = False,
+    certificate: bool = False,
 ) -> None:
     """Run experiment configs and export results when rows are collected."""
     for config_name in config_names:
         config_path = resolve_config_path(config_name)
 
-        results = await run_config(config_path, debug=debug, cold=cold)
+        results = await run_config(
+            config_path, debug=debug, cold=cold, certificate=certificate)
 
         if has_collectable_rows(results):
             out_path = export_results(config_path, results)
@@ -142,7 +149,13 @@ def main() -> None:
     config_names = args.config or [DEFAULT_CONFIG]
 
     start = time()
-    asyncio.run(run_configs(config_names, args.debug, logger, cold=args.cold))
+    asyncio.run(run_configs(
+        config_names, 
+        args.debug, 
+        logger, 
+        cold=args.cold, 
+        certificate=args.certificate
+    ))
     end = time()
 
     logger.info("Total execution time: %s seconds", end - start)

@@ -41,6 +41,7 @@ class TaskRunContext:
     models: list[str]
     debug: bool
     cold: bool = False
+    certificate: bool = False
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -260,7 +261,8 @@ async def run_query_group(
     )
     engine = LdbEngine(workload)
     engine_result = await engine.execute(
-        debug=bool(context.task.get("debug", context.debug))
+        debug=context.debug,
+        certificate=context.certificate
     )
 
     collect_specs = context.task.get("collect", {})
@@ -317,7 +319,10 @@ async def run_task(context: TaskRunContext) -> TaskResult:
 
 
 async def run_config(
-    config_path: Path, debug: bool = False, cold: bool = False
+    config_path: Path, 
+    debug: bool = False, 
+    cold: bool = False,
+    certificate: bool = False,
 ) -> list[TaskResult]:
     """Run all tasks declared in one experiment config."""
     config = load_yaml(config_path)
@@ -330,6 +335,7 @@ async def run_config(
             models=task.get("models", []),
             debug=debug,
             cold=cold,
+            certificate=certificate,
         )
         results.append(await run_task(task_context))
     return results

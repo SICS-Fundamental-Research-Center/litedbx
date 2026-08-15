@@ -57,7 +57,11 @@ class LdbEngine:
                 durations[phase],
             )
 
-    async def execute(self, debug: bool = False) -> dict[str, Any]:
+    async def execute(
+        self, 
+        debug: bool = False,
+        certificate: bool = False
+    ) -> dict[str, Any]:
         """Run the workload and return all engine result payloads."""
         self._log_launch()
         (
@@ -70,7 +74,7 @@ class LdbEngine:
 
         error_certificates = {}
         error_bounds = {}
-        if retrieved_results:
+        if certificate and retrieved_results:
             error_certificates_path = (
                 Path(__file__).parent / ".data_ckpt" / "error_certificates.yaml"
             )
@@ -78,14 +82,6 @@ class LdbEngine:
                 path=error_certificates_path
             )
             scenario = self.workload.scenario
-            # The error certificate B is estimated from the partial evaluation
-            # (PEval) on the FIRST data fraction only, so it depends on
-            # (workload, queries, dynamic_setting[0]) -- not on the later steps
-            # of the plan. Fold that first fraction into the cache key so that
-            # certificates from different data fractions can never collide (a
-            # two-step B_initial@0.6 vs a one-step B@0.7 vs a static B@1.0),
-            # while still letting the [0.6, *] two-step family reuse one shared
-            # B_initial@0.6.
             first_fraction = self.dynamic_setting[0]
             query_key = f"[{', '.join(self.workload.queries)}]@{first_fraction}"
             error_certificates = error_certificates_log.get(scenario, {}).get(
@@ -113,7 +109,7 @@ class LdbEngine:
                 error_certificates,
             )
 
-        if error_certificates:
+        if certificate and error_certificates:
             for q_name, B in error_certificates.items():
                 error_bounds[q_name] = self.workload.compute_error_bound(
                     q_name=q_name,
