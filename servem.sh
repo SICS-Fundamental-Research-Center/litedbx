@@ -158,7 +158,13 @@ MODEL_PATHS[qwen3-vl-30b]="/ssd_data/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 MODEL_PORTS[qwen3-vl-30b]=8005
 MODEL_MAX_LEN[qwen3-vl-30b]=32768
 MODEL_TP_SIZE[qwen3-vl-30b]=2
-MODEL_GPU_UTIL[qwen3-vl-30b]=0.8
+# 0.8 leaves only ~1.48 GiB for KV cache, but max_model_len 32768 needs ~1.5 GiB
+# per seq -- engine dies at init with "1.5 GiB KV cache is needed, which is
+# larger than the available KV cache memory (1.48 GiB)". 0.9 gives ~3.9 GiB KV
+# headroom (proven Jun-Aug 2026). If shared-box pressure blocks launch at 0.9,
+# prefer dropping max_model_len to 12288 (validated VL recipe) over lowering
+# util below ~0.85, which cannot serve 32k context on 24 GiB GPUs.
+MODEL_GPU_UTIL[qwen3-vl-30b]=0.9
 MODEL_MIN_FREE_MB[qwen3-vl-30b]=18000
 
 MODEL_PATHS[qwen3-vl-2b]="/ssd_data/models/Qwen3-VL-2B-Instruct"
