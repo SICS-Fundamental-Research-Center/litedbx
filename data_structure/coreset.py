@@ -261,6 +261,15 @@ class CoresetStore(dict[str, CoresetRecord]):
             labeled_indices=labeled_indices,
             remaining_indices=remaining_indices,
         )
+        num_pos = acquired_labels.loc[labeled_indices].sum()
+        num_neg = len(labeled_indices) - num_pos
+        if num_pos * num_neg == 0:
+            raise ValueError(
+                f"Query '{q_name}' in stream-{stream_idx} has only one class "
+                f"after labeling: {num_pos} pos / {num_neg} neg. "
+                "Please ensure that the labeling budget is sufficient to "
+                "capture both classes."
+            )
         logger.info(
             "Initialized coreset for query '%s' in stream-%s with %s "
             "labeled samples (%s pos / %s neg) "
