@@ -36,9 +36,8 @@ def build_workload(
 
     workload = workload_func(queries)
     effective_override = config_override or {}
-    if exp_group != "default":
-        workload.inject_exp_setting(
-            exp_group=exp_group, exp_patch=effective_override
-        )
+    workload.inject_exp_setting(
+        exp_group=exp_group, exp_patch=effective_override
+    )
     workload.set_cache_enabled(enable_cache)
     return workload
