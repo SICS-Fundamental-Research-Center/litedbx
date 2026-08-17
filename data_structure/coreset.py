@@ -194,6 +194,27 @@ class CoresetStore(dict[str, CoresetRecord]):
             seed=seed,
             diversity_columns=diversity_columns,
         )
+        retry_seed = 0
+        while (
+            labels.loc[annotation_selection.indices].nunique() < 2
+            and retry_seed <= 42
+        ):
+            logger.warning(
+                "Query '%s' in stream-%s has only one class after labeling "
+                "Retrying with a new seed %s.",
+                q_name,
+                stream_idx,
+                retry_seed,
+            )
+            annotation_selection = _select_annotation_sample(
+                data=data,
+                pseudo_labels=pseudo_labels,
+                labeling_budget=labeling_budget,
+                strategy=annotation_strategy,
+                seed=retry_seed,
+                diversity_columns=diversity_columns,
+            )
+            retry_seed += 1
         return annotation_selection
 
     async def init_query_coreset(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,unused-argument
@@ -281,6 +302,8 @@ class CoresetStore(dict[str, CoresetRecord]):
             num_neg,
             len(remaining_indices),
         )
+        while True:
+            pass
 
     async def sync_features(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
