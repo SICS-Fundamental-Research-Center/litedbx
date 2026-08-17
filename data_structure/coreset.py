@@ -302,8 +302,6 @@ class CoresetStore(dict[str, CoresetRecord]):
             num_neg,
             len(remaining_indices),
         )
-        while True:
-            pass
 
     async def sync_features(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
