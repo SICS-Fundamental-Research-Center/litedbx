@@ -277,8 +277,8 @@ class CoresetStore(dict[str, CoresetRecord]):
             q_name,
             stream_idx,
             len(labeled_indices),
-            acquired_labels.loc[labeled_indices].sum(),
-            len(labeled_indices) - acquired_labels.loc[labeled_indices].sum(),
+            num_pos,
+            num_neg,
             len(remaining_indices),
         )
 
