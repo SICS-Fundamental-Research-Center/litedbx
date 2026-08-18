@@ -285,7 +285,7 @@ class CoresetStore(dict[str, CoresetRecord]):
         num_pos = acquired_labels.loc[labeled_indices].sum()
         num_neg = len(labeled_indices) - num_pos
         if num_pos * num_neg == 0:
-            raise ValueError(
+            logger.warning(
                 f"Query '{q_name}' in stream-{stream_idx} has only one class "
                 f"after labeling: {num_pos} pos / {num_neg} neg. "
                 "Please ensure that the labeling budget is sufficient to "
