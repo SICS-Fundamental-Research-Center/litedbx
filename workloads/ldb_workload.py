@@ -153,6 +153,8 @@ class LdbWorkload:
             b_rew=self.b_rew,
             b_lab=self.b_lab,
             delta=self.delta,
+            enable_subj=self.enable_subj,
+            enable_obj=self.enable_obj,
             enable_cache=enable_cache,
         )
         return feature_pipeline, coreset_maintainer, query_execution
@@ -701,6 +703,8 @@ class LdbWorkload:
         self.enable_enrich = self.config["enable_enrich"]
         self.enable_rewrite = self.config["enable_rewrite"]
         self.enable_coreset_expansion = self.config["enable_coreset_expansion"]
+        self.enable_subj = self.config.get("enable_subj", True)
+        self.enable_obj = self.config.get("enable_obj", True)
         self.dynamic_setting = self.config["dynamic_setting"]
         self.data_manager = LdbDataManager(
             data_dir=self.data_dir,
@@ -709,6 +713,11 @@ class LdbWorkload:
             llm_client=self.llm_client,
             dynamic_steps=self.dynamic_setting,
         )
+
+        if not (self.enable_subj or self.enable_obj):
+            raise ValueError(
+                "At least one of enable_subj or enable_obj must be True."
+            )
 
     def _ensure_query_ckpts(self) -> None:
         for q_name in self.queries:

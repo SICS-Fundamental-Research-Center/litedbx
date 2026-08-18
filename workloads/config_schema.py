@@ -18,6 +18,8 @@ UNIVERSAL_CONFIG_KEYS = frozenset(
         "enable_enrich",
         "enable_rewrite",
         "enable_coreset_expansion",
+        "enable_subj",
+        "enable_obj",
         "loo_step",
         "delta",
         "dynamic_setting",

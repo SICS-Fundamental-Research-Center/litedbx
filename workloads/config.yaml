@@ -13,6 +13,9 @@ enable_conf_pred: True
 enable_enrich: True
 enable_rewrite: True
 
+enable_subj: True
+enable_obj: True
+
 enable_coreset_expansion: True
 
 loo_step: 1

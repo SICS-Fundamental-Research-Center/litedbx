@@ -52,6 +52,8 @@ class QueryExecution:
         b_rew: int,
         b_lab: int,
         delta: float,
+        enable_subj: bool = True,
+        enable_obj: bool = True,
         enable_cache: bool = True,
     ) -> None:
         self._coreset_maintainer = coreset_maintainer
@@ -63,6 +65,8 @@ class QueryExecution:
         self.b_rew = b_rew
         self.b_lab = b_lab
         self.delta = delta
+        self.enable_subj = enable_subj
+        self.enable_obj = enable_obj
         self.enable_cache = enable_cache
 
     async def execute_queries(
@@ -119,7 +123,20 @@ class QueryExecution:
             ) / len(self.queries)
             execution_trace[index] = execution_results
 
-        best_results = self._compose_best_per_query(execution_trace, candidates)
+        best_query_metric = None
+        if self.enable_subj and self.enable_obj:
+            best_query_metric = "L_static"
+        elif self.enable_subj and not self.enable_obj:
+            best_query_metric = "L_subj"
+        elif self.enable_obj and not self.enable_subj:
+            best_query_metric = "L_obj"
+        else:
+            raise ValueError(
+                "At least one of enable_subj or enable_obj must be True."
+            )
+
+        best_results = self._compose_best_per_query(
+            execution_trace, candidates, best_query_metric)
         execution_trace[len(execution_trace)] = best_results
         for q_name in self.queries:
             self.data_manager.rewrite_rules[q_name] = {
@@ -166,6 +183,7 @@ class QueryExecution:
         self,
         execution_trace: dict,
         candidates: list[RewriteCandidate],
+        metric: str = "L_static",
     ) -> dict:
         """Compose the minimum-static-loss candidate for each query."""
         composite = self._init_execution_results()
@@ -173,7 +191,7 @@ class QueryExecution:
             best_index = select_candidate_index(
                 candidates=candidates,
                 estimated_losses=[
-                    execution_trace[index]["L_static"][q_name]
+                    execution_trace[index][metric][q_name]
                     for index in range(len(candidates))
                 ],
             )
