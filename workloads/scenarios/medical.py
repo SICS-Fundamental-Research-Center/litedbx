@@ -20,7 +20,7 @@ Q1 = SemCQ(
             succ_cond="The patient has an allergy",
             prompt=(
                 "You are a medical expert. "
-                "Please determine if the given symptom indicate "
+                "Please determine if the given symptom (eg, angioedema) indicate "
                 "that the patient has an allergy. "
                 'Please JUST answer "True" if they do, and "False" otherwise. '
                 "Do NOT provide any explanations."
