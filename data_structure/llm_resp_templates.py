@@ -1,3 +1,5 @@
+import json
+
 from pydantic import BaseModel, field_validator, model_validator
 from typing import Literal
 
@@ -48,9 +50,20 @@ class FeatureRefinementResponse(BaseModel):
         to_add = data.get("to_add")
         if isinstance(to_add, list):
             data = dict(data)
+            # Some backends serialize nested specs as JSON strings.
+            coerced = []
+            for item in to_add:
+                if isinstance(item, str):
+                    try:
+                        item = json.loads(item)
+                    except ValueError:
+                        print("[WARNING] INVALID FEATURE SPEC during the parsing.")
+                        continue
+                if item is not None:
+                    coerced.append(item)
             data["to_add"] = [
                 item
-                for item in to_add
+                for item in coerced
                 if not isinstance(item, dict)
                 or item.get("feature_type") in allowed
             ]
