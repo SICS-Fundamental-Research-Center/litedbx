@@ -25,6 +25,7 @@ data/**/ground_truth
 
 *.todo
 exp/_seed
+exp/_figures
 exp/[0-9]*_*/
 exp/results
 
