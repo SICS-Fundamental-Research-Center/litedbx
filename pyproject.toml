@@ -8,6 +8,7 @@ dependencies = [
     "duckdb>=1.5.0",
     "instructor>=1.13.0",
     "litellm[proxy]>=1.80.11",
+    "matplotlib>=3.11.1",
     "pandas>=2.3.3",
     "pillow>=12.1.1",
     "pyarrow>=23.0.1",
