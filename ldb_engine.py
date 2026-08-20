@@ -51,7 +51,7 @@ class LdbEngine:
             if phase not in durations:
                 logger.warning("Duration for phase '%s' is missing.", phase)
                 continue
-            logger.debug(
+            logger.info(
                 "Duration for phase '%s': %.2f seconds",
                 phase,
                 durations[phase],
