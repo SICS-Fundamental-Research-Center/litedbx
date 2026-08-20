@@ -212,6 +212,8 @@ class LdbWorkload:
             use_hitl=self.enable_hitl,
             enable_cache=self.enable_cache,
         )
+        step_end = time()
+        durations["coreset_annotation"] = step_end - step_start
         # Snapshot the pre-coreset probe state for certificate estimation.
         # The snapshot owns a deep copy of the data manager plus fresh
         # components bound to that copy, so certificate estimation runs in

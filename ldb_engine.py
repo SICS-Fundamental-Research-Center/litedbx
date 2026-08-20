@@ -40,6 +40,7 @@ class LdbEngine:
         phases = [
             "preprocessing",
             "coreset_feature_space",
+            "coreset_annotation",
             "coreset_sync",
             "coreset_expand",
             "coreset_total",
