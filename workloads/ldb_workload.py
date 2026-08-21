@@ -206,14 +206,15 @@ class LdbWorkload:
         phase_start = time()
         step_start = phase_start
         await self._feature_pipeline.construct_feature_space()
+        annotation_start = time()
         annotation_selections = await self.data_manager.acquire_annotation(
             b_lab=self.b_lab,
             seed=self.random_seed,
             use_hitl=self.enable_hitl,
             enable_cache=self.enable_cache,
         )
-        step_end = time()
-        durations["coreset_annotation"] = step_end - step_start
+        annotation_end = time()
+        durations["coreset_annotation"] = annotation_end - annotation_start
         # Snapshot the pre-coreset probe state for certificate estimation.
         # The snapshot owns a deep copy of the data manager plus fresh
         # components bound to that copy, so certificate estimation runs in
