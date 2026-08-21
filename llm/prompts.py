@@ -176,6 +176,7 @@ Return a JSON object with the following structure:
 
 IMPORTANT:
 - The returned field names must EXACTLY match the column names in the dataset schema
+- If only one field is retrieved for a semantic group, name the group after that field (e.g., "price": ["price"])
 - The fields (together with its available values) should be clearly relevant to the query description.
 - The available values of each fields CANNOT be ambiguous (eg, be an ambiguous acronym or have multiple meanings) to be considered compatible.
 - Include ALL relevant fields - it's better to be inclusive than exclusive
