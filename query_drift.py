@@ -17,15 +17,18 @@ under one of four modes:
 - reuse:     always apply the first query's rewrite directly.
 - rerun:     always full SEQR.
 
-Bypass evaluation mirrors the engine: rules are applied with
-workloads.utils.apply_rules over encode_features(df) of the persisted
-Sigma-satisfied view, and F1 follows data_structure.sigma_satisfied_data
-semantics (ground_truth/<q>.csv[selected] as key tuples). Patch state
-(rewrite UCQ + materialized view + metrics) is cached under
-.data_ckpt/<exp_group>/mmqa/.../<q>/drift_state.json; the CSV round-trip
-may shift dtypes vs the in-memory run (disclosed).
+Bypass evaluation is pure rule application: the state persists ONE
+combined view (residual rows + the compile-time selected/discarded
+annotation buckets, concatenated); retrieved = rule matches over
+encode_features of that view -- annotated rows carry no materialized
+features, so rules never fire on them and NO annotation label is ever
+used in evaluation; GT = the FULL ground_truth/<q>.csv[selected] key
+set; omega = len(view) = the compile's candidate_size. Patch state
+(rewrite UCQ + view + metrics) is cached under
+.data_ckpt/<exp_group>/mmqa/.../<q>/drift_state.json.
 
-The serving stack (text + VL for Q6c) must already be up. Usage::
+The text serving stack must already be up (Q6c's VectorText routes to
+the text front). Usage::
 
     uv run query_drift.py --mode selective --group recombine --seed 42
     uv run query_drift.py --mode align --queries Q3f Q3a
@@ -176,7 +179,9 @@ def aligned_with_first(client: LdbLLMClient, q_new: str, q_first: str):
     )
 
 
-def schema_supports(client: LdbLLMClient, q_new: str, columns: list[str]):
+def schema_supports(
+        client: LdbLLMClient, q_new: str, columns: list[str]
+        ) -> tuple[bool, float]:
     prompt = (
         "You are a data-reuse expert. The previous query materialized the "
         "following columns (schema):\n"
@@ -186,6 +191,7 @@ def schema_supports(client: LdbLLMClient, q_new: str, columns: list[str]):
         "needed semantic attributes already materialized)? Return True if "
         "yes, False otherwise."
     )
+    client.reset_usage_statistics()
     resp = cast(
         BooleanFeatureResponse,
         client.invoke(
@@ -193,11 +199,14 @@ def schema_supports(client: LdbLLMClient, q_new: str, columns: list[str]):
             prompt=prompt, response_model=BooleanFeatureResponse,
         ),
     )
-    return resp.value
+    cost = client.get_usage_statistics()["total_cost"]
+    client.reset_usage_statistics()
+    return resp.value, cost
 
 
 def regen_rules(client: LdbLLMClient, q_new: str, q_first: str,
-                prev_rules: list, columns: list[str]):
+                prev_rules: list, columns: list[str]
+                ) -> tuple[list, float]:
     def sql(rs):
         return " OR ".join(
             "(" + " AND ".join(f"{f} {op} {t:.4f}"
@@ -218,6 +227,7 @@ def regen_rules(client: LdbLLMClient, q_new: str, q_first: str,
         "condition is (feature, op, threshold) with op in {'<=', '>'}. "
         "Every feature MUST be one of the listed columns."
     )
+    client.reset_usage_statistics()
     resp = cast(
         RuleSetResponse,
         client.invoke(
@@ -225,8 +235,11 @@ def regen_rules(client: LdbLLMClient, q_new: str, q_first: str,
             prompt=prompt, response_model=RuleSetResponse,
         ),
     )
-    return [[(c.feature, c.threshold, c.op) for c in conj]
-            for conj in resp.rules]
+    cost = client.get_usage_statistics()["total_cost"]
+    client.reset_usage_statistics()
+    rules = [[(c.feature, c.threshold, c.op) for c in conj]
+             for conj in resp.rules]
+    return rules, cost
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +289,21 @@ async def run_seqr(q: str, args) -> dict:
     )
     elapsed = time.time() - start
 
+    data_manager = workload.data_manager
+    enriched_features = data_manager.enriched_features
+    sigma_satisfied = data_manager.sigma_satisfied_data
+    await sigma_satisfied.sync_annotation_features(
+        q_name=q,
+        enriched_features=enriched_features,
+        llm_client=workload.llm_client,
+    )
+
     trace = payload["execution_trace"]
+    if not trace:
+        raise RuntimeError(
+            "execution_trace is empty; enable_rewrite/enable_enrich must "
+            "be True for a SEQR run."
+        )
     best = trace[max(trace, key=int)][q]
     trans = {k: v for k, v in best["trans_eval"].items()
              if k != "retrieved_data"}
@@ -291,10 +318,15 @@ async def run_seqr(q: str, args) -> dict:
     }
     sp = _state_path(args, q)
     sp.parent.mkdir(parents=True, exist_ok=True)
-    sigma = workload.data_manager.sigma_satisfied_data[0][q]["ldb_data"].df
-    sigma.to_csv(sp.parent / "drift_sigma.csv", index=False)
+    record = workload.data_manager.sigma_satisfied_data[0][q]
+    residual = record["ldb_data"].df
+    view = pd.concat(
+        [residual, record["selected_data"], record["discarded_data"]],
+        ignore_index=True,
+    )
+    view.to_csv(sp.parent / "drift_view.csv", index=False)
     with open(sp, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+        json.dump(state, f, indent=2, default=float)
     logger.info("SEQR run for %s done: F1=%.4f cost=$%.4f (%.1fs) -> %s",
                 q, trans["f1"], state["cost_usd"], elapsed, sp)
     return state
@@ -305,8 +337,8 @@ async def load_or_run_first(q: str, args) -> dict:
     if sp.exists():
         with open(sp, encoding="utf-8") as f:
             state = json.load(f)
-        if not (sp.parent / "drift_sigma.csv").exists():
-            logger.warning("State for %s exists but sigma CSV is missing; "
+        if not (sp.parent / "drift_view.csv").exists():
+            logger.warning("State for %s exists but view CSV is missing; "
                            "recompiling.", q)
         else:
             logger.info("Reusing cached drift state for %s (F1=%.4f).",
@@ -319,16 +351,19 @@ async def load_or_run_first(q: str, args) -> dict:
 # Bypass execution + evaluation (engine-mirrored, no SEQR)
 # ---------------------------------------------------------------------------
 def eval_rules(df: pd.DataFrame, rules: list, sem_q: SemCQ, q: str) -> dict:
+    """Bypass eval: pure rule matches vs the FULL ground truth."""
     labels = apply_rules(rules, encode_features(df))
     sel = sem_q.selected
     gt_df = pd.read_csv(data_dir_of(q) / "ground_truth" / f"{q}.csv")[sel]
     gt = {tuple(row) for row in gt_df.values.tolist()}
-    retrieved = {tuple(row) for row in df.loc[labels.astype(bool), sel]
-                 .values.tolist()}
+    retrieved = {tuple(row) for row in
+                 df.loc[labels.astype(bool), sel].values.tolist()}
 
-    print(gt)
-    print(retrieved)
     tp, fp, fn = (len(gt & retrieved), len(retrieved - gt), len(gt - retrieved))
+
+    logger.info(f"Ground truth for {q}: {gt}")
+    logger.info(f"Retrieved for {q}: {retrieved}")
+    logger.info(f"Evaluating {q}: TP={tp}, FP={fp}, FN={fn}, Omega={len(df)}")
     return _quality_metrics(q, 0, tp, fp, fn, omega=len(df))
 
 
@@ -337,14 +372,21 @@ def eval_rules(df: pd.DataFrame, rules: list, sem_q: SemCQ, q: str) -> dict:
 # ---------------------------------------------------------------------------
 async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
     first = pair[0]
+    if any(data_dir_of(q) != data_dir_of(first) for q in pair):
+        raise SystemExit(f"Drift sequence spans datasets: {pair}")
     st0 = await load_or_run_first(first, args)
-    rows = [{"group": group, "pair": pair, "mode": args.mode, "q": first,
+    rows = [{"group": group, "pair": pair, "mode": args.mode,
+             "q_first": None, "q": first,
              "action": "compile", "f1": st0["f1"], "precision": st0["precision"],
              "recall": st0["recall"], "time_s": st0["time_s"],
              "cost_usd": st0["cost_usd"], "aligned": None,
              "schema_support": None}]
 
-    sigma = pd.read_csv(_state_path(args, first).parent / "drift_sigma.csv")
+    state_dir = _state_path(args, first).parent
+    view = pd.read_csv(state_dir / "drift_view.csv")
+    obj_cols = view.select_dtypes(include="object").columns
+    view[obj_cols] = view[obj_cols].fillna("")
+    columns = list(view.columns)
     prev_rules = st0["rules"]
 
     for q in pair[1:]:
@@ -358,14 +400,15 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
             if journal:
                 row["rules"] = rules
             row.update({k: v for k, v in eval_rules(
-                sigma, rules, ALL_QUERIES[q], q).items()
+                view, rules, ALL_QUERIES[q], q).items()
                 if not isinstance(v, set)})
 
         if args.mode == "rerun":
             s = await run_seqr(q, args)
             row.update(action="seqr", f1=s["f1"], precision=s["precision"],
-                       recall=s["recall"], time_s=s["time_s"],
-                       cost_usd=s["cost_usd"])
+                       recall=s["recall"],
+                       time_s=row["time_s"] + s["time_s"],
+                       cost_usd=row["cost_usd"] + s["cost_usd"])
         elif args.mode == "reuse":
             _apply("reuse", prev_rules)
         else:
@@ -379,20 +422,22 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
                 _apply("reuse", prev_rules)
             elif args.mode == "selective":
                 start = time.time()
-                supported = schema_supports(client, q, list(sigma.columns))
+                supported, gate_cost = schema_supports(client, q, columns)
                 row["schema_support"] = supported
                 rules = None
                 if supported:
                     logger.info("Schema supports %s; regenerating UCQ.", q)
-                    rules = regen_rules(client, q, first, prev_rules,
-                                        list(sigma.columns))
+                    rules, regen_cost = regen_rules(
+                        client, q, first, prev_rules, columns)
+                    row["cost_usd"] += regen_cost
                     logger.info("Regenerated UCQ for %s: %s", q, rules)
-                    if any(c[0] not in sigma.columns
+                    if any(c[0] not in columns or c[2] not in ("<=", ">")
                            for conj in rules for c in conj):
-                        logger.warning("Regenerated UCQ for %s references "
-                                       "unknown columns; falling back to "
-                                       "SEQR.", q)
+                        logger.warning("Regenerated UCQ for %s is invalid "
+                                       "(unknown column or op); falling "
+                                       "back to SEQR.", q)
                         rules = None
+                row["cost_usd"] += gate_cost
                 row["time_s"] += time.time() - start
                 if rules is not None:
                     _apply("rewrite_sql", rules, journal=True)
@@ -401,14 +446,15 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
                     logger.info("Falling back to SEQR for %s.", q)
                     row.update(action="seqr", f1=s["f1"],
                                precision=s["precision"],
-                               recall=s["recall"], time_s=s["time_s"],
-                               cost_usd=s["cost_usd"])
+                               recall=s["recall"],
+                               time_s=row["time_s"] + s["time_s"],
+                               cost_usd=row["cost_usd"] + s["cost_usd"])
             else:
                 s = await run_seqr(q, args)
                 row.update(action="seqr", f1=s["f1"],
                            precision=s["precision"], recall=s["recall"],
-                           time_s=s["time_s"], cost_usd=s["cost_usd"])
-        row["pair"] = list(pair)
+                           time_s=row["time_s"] + s["time_s"],
+                           cost_usd=row["cost_usd"] + s["cost_usd"])
         rows.append(row)
     return rows
 
@@ -424,8 +470,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "--queries Q3f Q3a; overrides --group.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--b-lab", type=int, default=20)
-    parser.add_argument("--fraction", type=float, default=0.6)
-    parser.add_argument("--exp-group", default="query_drift")
+    parser.add_argument("--fraction", type=float, default=1.0)
+    parser.add_argument("--exp-group", default="_query_drift")
     parser.add_argument("--cold", action="store_true",
                         help="Disable engine cache reads/writes for SEQR runs.")
     parser.add_argument("--debug", action="store_true")
@@ -460,7 +506,7 @@ async def drift_main(args) -> None:
         rows = await run_pair(group, pair, args, client)
         with open(out, "a", encoding="utf-8") as f:
             for row in rows:
-                f.write(json.dumps(row, default=str) + "\n")
+                f.write(json.dumps(row, default=float) + "\n")
         for row in rows:
             logger.info("[%s/%s] %s->%s %s: F1=%.4f $%.4f %.1fs",
                         group, args.mode, pair[0], row["q"], row["action"],
