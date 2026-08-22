@@ -7,10 +7,13 @@ sequence is a list of query names (len >= 2); the FIRST query is compiled by
 the normal SEQR pipeline in-process, then every subsequent query is answered
 under one of four modes:
 
-- align:     Preprocessing.query_router(new, first) decides semantic
-             alignment; aligned -> apply the first query's rewrite directly,
-             otherwise full SEQR.
-- selective: as align, but a failed alignment first asks whether the first
+- align:     an LLM gate relates new vs first: same -> apply the first
+             query's rewrite directly; contained (results(new) is a
+             subset of results(first)) -> the prev UCQ's predicates are
+             appended to the new query's Sigma at runtime and the query
+             runs the normal SEQR pipeline over the shrunk scope;
+             neither -> full SEQR.
+- selective: as align, but on neither first ask whether the first
              query's materialized schema can support the new query; if yes,
              an LLM regenerates the UCQ over that schema (bypassing SEQR);
              otherwise full SEQR.
@@ -41,6 +44,7 @@ import logging
 import shutil
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Literal, cast
 
@@ -48,12 +52,11 @@ import pandas as pd
 import yaml
 from pydantic import BaseModel
 
-from data_structure import LdbDataManager, SemCQ, SemPredicate
+from data_structure import Predicate, SemCQ, SemPredicate
 from data_structure.llm_resp_templates import BooleanFeatureResponse
 from data_structure.sigma_satisfied_data import _quality_metrics
 from ldb_engine import LdbEngine
 from llm import LdbLLMClient
-from workloads.core.preprocessing import Preprocessing
 from workloads.ldb_workload import LdbWorkload, experiment_checkpoint_path
 from workloads.scenarios import mmqa
 from workloads.utils import apply_rules, encode_features
@@ -165,18 +168,37 @@ class RuleSetResponse(BaseModel):
     rules: list[list[RuleCondition]]
 
 
-def _router(client: LdbLLMClient) -> Preprocessing:
-    # query_router only touches llm_client; the other deps are placeholders.
-    return Preprocessing(
-        llm_client=client, data_manager=cast(LdbDataManager, None), queries={},
-        ckpt_path=Path("."), usage_statistics=[{}], enable_cache=False,
-    )
+class RelationResponse(BaseModel):
+    relation: Literal["same", "contained", "neither"]
 
 
-def aligned_with_first(client: LdbLLMClient, q_new: str, q_first: str):
-    return _router(client).query_router(
-        ALL_QUERIES[q_new], ALL_QUERIES[q_first]
+def aligned_with_first(
+        client: LdbLLMClient, q_new: str, q_first: str
+        ) -> tuple[str, float]:
+    """Relate the new query to the first: same / contained / neither."""
+    prompt = (
+        "You are a query-reuse expert. Compare two queries:\n"
+        f"A (new): {ALL_QUERIES[q_new].Ps[0].succ_cond}\n"
+        f"B (previous): {ALL_QUERIES[q_first].Ps[0].succ_cond}\n"
+        "Answer with exactly one word:\n"
+        "- same: A and B ask for the same results (mere rewording).\n"
+        "- contained: EVERY result of A is also a result of B (A's "
+        "results are a subset of B's), e.g. A = 'destinations in "
+        "Germany', B = 'destinations in Europe'.\n"
+        "- neither: anything else, including B's results being a "
+        "subset of A's."
     )
+    client.reset_usage_statistics()
+    resp = cast(
+        RelationResponse,
+        client.invoke(
+            is_remote=True, modality="Text",
+            prompt=prompt, response_model=RelationResponse,
+        ),
+    )
+    cost = client.get_usage_statistics()["total_cost"]
+    client.reset_usage_statistics()
+    return resp.relation, cost
 
 
 def schema_supports(
@@ -272,16 +294,22 @@ def _usage_totals(payload: dict) -> dict:
     }
 
 
-async def run_seqr(q: str, args) -> dict:
+async def run_seqr(q: str, args, sem: SemCQ | None = None,
+                   materialize: bool = True,
+                   reused_view: pd.DataFrame | None = None) -> dict:
     """Full SEQR run for one query; captures rewrite + view + metrics."""
     with open(mmqa.CURRENT_DIR / "config.yaml") as f:
         config = yaml.safe_load(f)
     workload = LdbWorkload(
         data_dir=str(data_dir_of(q)), scenario="mmqa",
-        queries={q: ALL_QUERIES[q]}, config=config,
+        queries={q: sem or ALL_QUERIES[q]}, config=config,
     )
-    workload.inject_exp_setting(exp_group=args.exp_group, exp_patch=_override(args))
+    workload.inject_exp_setting(exp_group=args.exp_group,
+                                exp_patch=_override(args))
     workload.set_cache_enabled(not args.cold)
+
+    if reused_view is not None:
+        workload.data_manager.complete_dataset.df = reused_view
 
     start = time.time()
     payload = await LdbEngine(workload).execute(
@@ -316,19 +344,23 @@ async def run_seqr(q: str, args) -> dict:
         **_usage_totals(payload),
         **trans,
     }
-    sp = _state_path(args, q)
-    sp.parent.mkdir(parents=True, exist_ok=True)
-    record = workload.data_manager.sigma_satisfied_data[0][q]
-    residual = record["ldb_data"].df
-    view = pd.concat(
-        [residual, record["selected_data"], record["discarded_data"]],
-        ignore_index=True,
-    )
-    view.to_csv(sp.parent / "drift_view.csv", index=False)
-    with open(sp, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, default=float)
-    logger.info("SEQR run for %s done: F1=%.4f cost=$%.4f (%.1fs) -> %s",
-                q, trans["f1"], state["cost_usd"], elapsed, sp)
+    if materialize:  # only the first query of a pair persists its state
+        sp = _state_path(args, q)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        record = workload.data_manager.sigma_satisfied_data[0][q]
+        residual = record["ldb_data"].df
+        view = pd.concat(
+            [residual, record["selected_data"], record["discarded_data"]],
+            ignore_index=True,
+        )
+        view.to_csv(sp.parent / "drift_view.csv", index=False)
+        with open(sp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, default=float)
+        logger.info("SEQR run for %s done: F1=%.4f cost=$%.4f (%.1fs) -> %s",
+                    q, trans["f1"], state["cost_usd"], elapsed, sp)
+    else:
+        logger.info("SEQR run for %s done: F1=%.4f cost=$%.4f (%.1fs)",
+                    q, trans["f1"], state["cost_usd"], elapsed)
     return state
 
 
@@ -382,8 +414,7 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
              "cost_usd": st0["cost_usd"], "aligned": None,
              "schema_support": None}]
 
-    state_dir = _state_path(args, first).parent
-    view = pd.read_csv(state_dir / "drift_view.csv")
+    view = pd.read_csv(_state_path(args, first).parent / "drift_view.csv")
     obj_cols = view.select_dtypes(include="object").columns
     view[obj_cols] = view[obj_cols].fillna("")
     columns = list(view.columns)
@@ -407,7 +438,7 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
                 if not isinstance(v, set)})
 
         if args.mode == "rerun":
-            s = await run_seqr(q, args)
+            s = await run_seqr(q, args, materialize=False)
             row.update(action="seqr", f1=s["f1"], precision=s["precision"],
                        recall=s["recall"],
                        time_s=row["time_s"] + s["time_s"],
@@ -416,14 +447,28 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
             _apply("reuse", prev_rules)
         else:
             start = time.time()
-            aligned, usage = aligned_with_first(client, q, first)
-            row["aligned"] = aligned
+            relation, cost = aligned_with_first(client, q, first)
+            row["aligned"] = relation
             row["time_s"] = time.time() - start
-            row["cost_usd"] = usage["total_cost"]
-            if aligned:
-                logger.info("Query %s aligned with %s; reusing rules.", q, first)
+            row["cost_usd"] = cost
+            if relation == "same":
+                logger.info("Query %s same as %s; reusing rules.", q, first)
                 _apply("reuse", prev_rules)
-            elif args.mode == "selective":
+            elif relation == "contained":
+                logger.info("Query %s contained in %s; SEQR with prev-"
+                            "rule Sigma.", q, first)
+                sem = deepcopy(ALL_QUERIES[q])
+                sem.Sigma += [Predicate(c, op, t)
+                              for c, t, op in prev_rules[0]]
+                row["added_sigma"] = prev_rules[0]
+                s = await run_seqr(
+                    q, args, sem=sem, materialize=False, reused_view=view)
+                row["action"] = "sigma_seqr"
+                row.update(f1=s["f1"], precision=s["precision"],
+                           recall=s["recall"],
+                           time_s=row["time_s"] + s["time_s"],
+                           cost_usd=row["cost_usd"] + s["cost_usd"])
+            if row["action"] is None and args.mode == "selective":
                 start = time.time()
                 supported, gate_cost = schema_supports(client, q, columns)
                 row["schema_support"] = supported
@@ -444,18 +489,12 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
                 row["time_s"] += time.time() - start
                 if rules is not None:
                     _apply("rewrite_sql", rules, journal=True)
-                else:
-                    s = await run_seqr(q, args)
-                    logger.info("Falling back to SEQR for %s.", q)
-                    row.update(action="seqr", f1=s["f1"],
-                               precision=s["precision"],
-                               recall=s["recall"],
-                               time_s=row["time_s"] + s["time_s"],
-                               cost_usd=row["cost_usd"] + s["cost_usd"])
-            else:
-                s = await run_seqr(q, args)
+            if row["action"] is None:
+                s = await run_seqr(q, args, materialize=False)
+                logger.info("Falling back to SEQR for %s.", q)
                 row.update(action="seqr", f1=s["f1"],
-                           precision=s["precision"], recall=s["recall"],
+                           precision=s["precision"],
+                           recall=s["recall"],
                            time_s=row["time_s"] + s["time_s"],
                            cost_usd=row["cost_usd"] + s["cost_usd"])
         rows.append(row)
