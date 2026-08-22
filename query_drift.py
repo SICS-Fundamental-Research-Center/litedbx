@@ -388,6 +388,9 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
     view[obj_cols] = view[obj_cols].fillna("")
     columns = list(view.columns)
     prev_rules = st0["rules"]
+    if not prev_rules:
+        prev_rules = [[(c, 0.5, ">") for c in columns
+                       if c.startswith("llm_label_")]]
 
     for q in pair[1:]:
         row = {"group": group, "pair": pair, "mode": args.mode,
