@@ -133,6 +133,41 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             data_dir=data_dir,
         )
 
+    async def sync_annotation_features(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+        self,
+        q_name: str,
+        enriched_features: dict[str, list[PopulationSpec]],
+        llm_client: LdbLLMClient,
+        stream_idx: int = 0,
+        is_remote: bool = False,
+    ) -> dict:
+
+        selected_data  = LdbData(
+            df=self[stream_idx][q_name]["selected_data"],
+            config=self[stream_idx][q_name]["ldb_data"].config,)
+        discarded_data  = LdbData(
+            df=self[stream_idx][q_name]["discarded_data"],
+            config=self[stream_idx][q_name]["ldb_data"].config,)
+
+        await selected_data.sync_with_enriched_features(
+            enriched_features=enriched_features[q_name],
+            llm_client=llm_client,
+            is_remote=is_remote,
+        )
+
+        await discarded_data.sync_with_enriched_features(
+            enriched_features=enriched_features[q_name],
+            llm_client=llm_client,
+            is_remote=is_remote,
+        )
+
+        self[stream_idx][q_name]["selected_data"] = selected_data.df
+        self[stream_idx][q_name]["discarded_data"] = discarded_data.df
+
+        llm_usage_statistics = llm_client.get_usage_statistics()
+        llm_client.reset_usage_statistics()
+        return llm_usage_statistics
+
     async def sync_features(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         q_name: str,

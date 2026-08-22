@@ -62,14 +62,8 @@ class Preprocessing:
 
         prompt = f"""You are an expert in query optimization and result reuse.
 
-Your task is to determine whether Query 1 can reuse the query results of
-Query 2.
-
-Query 1 can reuse Query 2's results if Query 2's results already contain or 
-subsume the information needed by Query 1.
-For example, if Query 2 retrieves all "romantic comedy" movies (which includes 
-both romance and comedy), then Query 1 asking for all "comedy" movies can reuse 
-Query 2's results.
+Your task is to determine whether Query 1 and Query 2 have the same semantic meaning,
+and therefore Query 2 can directly reuse the results of Query 1.
 
 === Query 1 (wants to reuse results) ===
 {q1_desc}
@@ -77,16 +71,8 @@ Query 2's results.
 === Query 2 (providing results) ===
 {q2_desc}
 
-=== Instructions ===
-
-Analyze whether Query 1's requirements can be satisfied by Query 2's results. 
-Consider:
-1. Does Query 2's success condition cover or subsume Query 1's requirements?
-2. If Query 2 returns items that satisfy a broader or related category, 
-   do they include items that satisfy Query 1?
-3. Are the fields compatible between the two queries?
-
-Return True if Query 1 can reuse Query 2's results, False otherwise.
+Return True if Query 2 has the same semantic meaning as Query 1 and hence the results
+of Q1 can be reused for Q2. Otherwise, return False.
 """
 
         response = cast(
