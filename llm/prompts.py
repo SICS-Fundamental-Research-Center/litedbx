@@ -264,6 +264,9 @@ For multi-value predicates in equality operators (== or !=), the value can be a 
 5. Return conjunctive groups that contains at most 4 MOST-important predicates.
    - NEVER return an over-complicated UCQ. Make sure the generated UCQ is as simple as possible.
 
+6. MAKE SURE THE CONSTANT VALUE IN EACH PREDICATE IS VALID AND EXISTS IN THE DATASET
+    - For example, if a predicate is "title == 'Inception'", make sure that the value 'Inception' actually exists in the title column of the dataset.
+
 === Response Format ===
 
 Return a JSON object with the following structure:
