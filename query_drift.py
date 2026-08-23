@@ -197,6 +197,8 @@ def aligned_with_first(
         ),
     )
     cost = client.get_usage_statistics()["total_cost"]
+    logger.info("LLM aligned %s vs %s: %s (cost=$%.4f)",
+                q_new, q_first, resp.relation, cost)
     client.reset_usage_statistics()
     return resp.relation, cost
 
@@ -222,6 +224,8 @@ def schema_supports(
         ),
     )
     cost = client.get_usage_statistics()["total_cost"]
+    logger.info("LLM schema support for %s: %s (cost=$%.4f)",
+                q_new, resp.value, cost)
     client.reset_usage_statistics()
     return resp.value, cost
 
@@ -258,6 +262,8 @@ def regen_rules(client: LdbLLMClient, q_new: str, q_first: str,
         ),
     )
     cost = client.get_usage_statistics()["total_cost"]
+    logger.info("LLM regenerated UCQ for %s vs %s: %s (cost=$%.4f)",
+                q_new, q_first, resp.rules, cost)
     client.reset_usage_statistics()
     rules = [[(c.feature, c.threshold, c.op) for c in conj]
              for conj in resp.rules]
@@ -433,9 +439,13 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
             row["action"] = label
             if journal:
                 row["rules"] = rules
-            row.update({k: v for k, v in eval_rules(
-                view, rules, ALL_QUERIES[q], q).items()
-                if not isinstance(v, set)})
+            t0 = time.time()
+            m = eval_rules(view, rules, ALL_QUERIES[q], q)
+            # bypass eval is pure local compute (no LLM) but not free —
+            # measure it instead of journaling the 0.0 init value
+            row["time_s"] += time.time() - t0
+            row.update({k: v for k, v in m.items()
+                        if not isinstance(v, set)})
 
         if args.mode == "rerun":
             s = await run_seqr(q, args, materialize=False)
