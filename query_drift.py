@@ -447,66 +447,96 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
             row.update({k: v for k, v in m.items()
                         if not isinstance(v, set)})
 
-        if args.mode == "rerun":
+        async def _full_seqr():
             s = await run_seqr(q, args, materialize=False)
             row.update(action="seqr", f1=s["f1"], precision=s["precision"],
                        recall=s["recall"],
                        time_s=row["time_s"] + s["time_s"],
                        cost_usd=row["cost_usd"] + s["cost_usd"])
-        elif args.mode == "reuse":
-            _apply("reuse", prev_rules)
-        else:
+
+        async def _contained_seqr():
+            """Scoped refresh: prev-rule predicates appended to q_new's
+            Sigma, engine dataset swapped to the first's materialized
+            view (sigma_seqr)."""
+            logger.info("Query %s contained in %s; SEQR with prev-"
+                        "rule Sigma.", q, first)
+            sem = deepcopy(ALL_QUERIES[q])
+            sem.Sigma += [Predicate(c, op, t)
+                          for c, t, op in prev_rules[0]]
+            row["added_sigma"] = prev_rules[0]
+            s = await run_seqr(
+                q, args, sem=sem, materialize=False, reused_view=view)
+            row.update(action="sigma_seqr", f1=s["f1"],
+                       precision=s["precision"], recall=s["recall"],
+                       time_s=row["time_s"] + s["time_s"],
+                       cost_usd=row["cost_usd"] + s["cost_usd"])
+
+        def _gate():
             start = time.time()
             relation, cost = aligned_with_first(client, q, first)
             row["aligned"] = relation
-            row["time_s"] = time.time() - start
-            row["cost_usd"] = cost
-            if relation == "same":
+            row["time_s"] += time.time() - start
+            row["cost_usd"] += cost
+
+        def _try_regen() -> bool:
+            """Selective router: cheap rule regeneration over the first's
+            materialized columns. Verdict-independent by design (user
+            ruling 08-23) — considered on ANY non-`same` verdict, never
+            only when the gate cannot align. True = rewrite_sql applied."""
+            start = time.time()
+            supported, gate_cost = schema_supports(client, q, columns)
+            row["schema_support"] = supported
+            rules = None
+            if supported:
+                logger.info("Schema supports %s; regenerating UCQ.", q)
+                rules, regen_cost = regen_rules(
+                    client, q, first, prev_rules, columns)
+                row["cost_usd"] += regen_cost
+                logger.info("Regenerated UCQ for %s: %s", q, rules)
+                if any(c[0] not in columns or c[2] not in ("<=", ">")
+                       for conj in rules for c in conj):
+                    logger.warning("Regenerated UCQ for %s is invalid "
+                                   "(unknown column or op); falling "
+                                   "back to SEQR.", q)
+                    rules = None
+            row["cost_usd"] += gate_cost
+            row["time_s"] += time.time() - start
+            if rules is not None:
+                _apply("rewrite_sql", rules, journal=True)
+                return True
+            return False
+
+        # ---- four mode routes ----------------------------------------
+        if args.mode == "rerun":
+            # Full-SEQR: no drift machinery; recompile q_new from scratch
+            await _full_seqr()
+        elif args.mode == "reuse":
+            # Always-reuse: no gate; apply the first's rules blindly
+            _apply("reuse", prev_rules)
+        elif args.mode == "align":
+            # Align only: 3-way gate; scoped SEQR on `contained`
+            _gate()
+            if row["aligned"] == "same":
                 logger.info("Query %s same as %s; reusing rules.", q, first)
                 _apply("reuse", prev_rules)
-            elif relation == "contained":
-                logger.info("Query %s contained in %s; SEQR with prev-"
-                            "rule Sigma.", q, first)
-                sem = deepcopy(ALL_QUERIES[q])
-                sem.Sigma += [Predicate(c, op, t)
-                              for c, t, op in prev_rules[0]]
-                row["added_sigma"] = prev_rules[0]
-                s = await run_seqr(
-                    q, args, sem=sem, materialize=False, reused_view=view)
-                row["action"] = "sigma_seqr"
-                row.update(f1=s["f1"], precision=s["precision"],
-                           recall=s["recall"],
-                           time_s=row["time_s"] + s["time_s"],
-                           cost_usd=row["cost_usd"] + s["cost_usd"])
-            if row["action"] is None and args.mode == "selective":
-                start = time.time()
-                supported, gate_cost = schema_supports(client, q, columns)
-                row["schema_support"] = supported
-                rules = None
-                if supported:
-                    logger.info("Schema supports %s; regenerating UCQ.", q)
-                    rules, regen_cost = regen_rules(
-                        client, q, first, prev_rules, columns)
-                    row["cost_usd"] += regen_cost
-                    logger.info("Regenerated UCQ for %s: %s", q, rules)
-                    if any(c[0] not in columns or c[2] not in ("<=", ">")
-                           for conj in rules for c in conj):
-                        logger.warning("Regenerated UCQ for %s is invalid "
-                                       "(unknown column or op); falling "
-                                       "back to SEQR.", q)
-                        rules = None
-                row["cost_usd"] += gate_cost
-                row["time_s"] += time.time() - start
-                if rules is not None:
-                    _apply("rewrite_sql", rules, journal=True)
-            if row["action"] is None:
-                s = await run_seqr(q, args, materialize=False)
+            elif row["aligned"] == "contained":
+                await _contained_seqr()
+            else:
+                await _full_seqr()
+        elif args.mode == "selective": 
+            _gate()
+            if row["aligned"] == "same":
+                logger.info("Query %s same as %s; reusing rules.", q, first)
+                _apply("reuse", prev_rules)
+            elif _try_regen():
+                pass  # rewrite_sql applied — served without any SEQR
+            elif row["aligned"] == "contained":
+                await _contained_seqr()
+            else:
                 logger.info("Falling back to SEQR for %s.", q)
-                row.update(action="seqr", f1=s["f1"],
-                           precision=s["precision"],
-                           recall=s["recall"],
-                           time_s=row["time_s"] + s["time_s"],
-                           cost_usd=row["cost_usd"] + s["cost_usd"])
+                await _full_seqr()
+        else:
+            raise SystemExit(f"Unknown mode: {args.mode}")
         rows.append(row)
     return rows
 
