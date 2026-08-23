@@ -76,7 +76,8 @@ Modality = Literal["Text", "Image", "VectorText", "VectorImage"]
 # ground truth is copied from the base query at runtime (same gold set).
 # ---------------------------------------------------------------------------
 PARAPHRASES = {
-    "Q3a_p": ("Q3a", "The film falls into the comedy genre",
+    "Q3a_p": ("Q3a", "Pictures that fail to amuse lie outside the scope "
+              "of this request",
               "Please determine whether the given text suggests that the "
               "film belongs to the comedy genre. Please JUST answer \"True\" "
               "if it does, and \"False\" otherwise. Do NOT provide any "
@@ -111,57 +112,6 @@ PARAPHRASES = {
               "airline flies to destinations in Europe. Please JUST answer "
               "\"True\" if it does, and \"False\" otherwise. Do NOT provide "
               "any explanations."),
-    # Hard variants v2 (08-23): gate-facing succ_cond is a STRUCTURAL
-    # reframe of the base condition (negation/exclusion, quantifier
-    # framing, partition/legal/perspective indirection) -- probe-selected
-    # via _probe_gate.py: every text below drew a non-`same` verdict from
-    # the real gate, stable across 3 repeat probes. (v1 co-referent
-    # riddles -- ECB seat, flag colors -- were all resolved to `same` by
-    # the judge and are superseded.) The labeling prompt stays anchored to
-    # the base semantics (identical to the *_p prompt), so GT identity and
-    # annotation semantics are unchanged; only the alignment surface the
-    # gate sees differs. Reach them via `--queries <base> <base>_h`
-    # (deliberately NOT in DRIFT_GROUPS; existing *_p texts untouched).
-    "Q3a_h": ("Q3a", "Pictures that fail to amuse lie outside the scope "
-              "of this request",
-              "Please determine whether the given text suggests that the "
-              "film belongs to the comedy genre. Please JUST answer \"True\" "
-              "if it does, and \"False\" otherwise. Do NOT provide any "
-              "explanations."),
-    "Q3c_h": ("Q3c", "An affair of the heart drives this picture's story",
-              "Please determine whether the given text suggests that the "
-              "film belongs to the romance genre. Please JUST answer \"True\" "
-              "if it does, and \"False\" otherwise. Do NOT provide any "
-              "explanations."),
-    "Q3f_h": ("Q3f", "Affection provides the central plot engine; "
-              "amusement drives the telling",
-              "Please determine whether the given text suggests that the "
-              "film is categorized as a romantic comedy. Please JUST answer "
-              "\"True\" if it does, and \"False\" otherwise. Do NOT provide "
-              "any explanations."),
-    "Q3g_h": ("Q3g", "Real-life subject matter is staged here with levity",
-              "Please determine whether the given text suggests that the "
-              "film can be classified as a biographical comedy. Please JUST "
-              "answer \"True\" if it does, and \"False\" otherwise. Do NOT "
-              "provide any explanations."),
-    "Q6a_h": ("Q6a", "The carrier counts Germany's fifth-largest city "
-              "among its stops",
-              "Please determine whether the given text indicates that the "
-              "airline operates flights with Frankfurt as a destination. "
-              "Please JUST answer \"True\" if it does, and \"False\" "
-              "otherwise. Do NOT provide any explanations."),
-    "Q6b_h": ("Q6b", "The carrier maintains at least one stop in a land "
-              "where the Basic Law governs",
-              "Please determine whether the given text indicates that the "
-              "airline serves destinations within Germany. Please JUST "
-              "answer \"True\" if it does, and \"False\" otherwise. Do NOT "
-              "provide any explanations."),
-    "Q6c_h": ("Q6c", "At least one stop of this carrier lies on the far "
-              "side of the Atlantic, west of the Urals",
-              "Please determine whether the given text indicates that the "
-              "airline flies to destinations in Europe. Please JUST answer "
-              "\"True\" if it does, and \"False\" otherwise. Do NOT provide "
-              "any explanations."),
 }
 
 ALL_QUERIES = dict(mmqa.SEM_QUERIES)
@@ -180,7 +130,7 @@ for _p, (_base, _succ, _prompt) in PARAPHRASES.items():
 
 # "Q3b" in the user's construction is a typo for Q3c (mmqa.py has no Q3b).
 DRIFT_GROUPS = {
-    "paraphrase": [[q, f"{q}_p", f"{q}_h"] for q in
+    "paraphrase": [[q, f"{q}_p"] for q in
                    ["Q3a", "Q3f", "Q3g", "Q6a", "Q6b", "Q6c"]],
     "recombine": [["Q3f", "Q3a"], ["Q3f", "Q3c"], ["Q3g", "Q3a"]],
     "unseen": [["Q3a", "Q3f"], ["Q3c", "Q3f"], ["Q3a", "Q3g"]],
