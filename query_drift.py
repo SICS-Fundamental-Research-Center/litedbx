@@ -82,7 +82,7 @@ PARAPHRASES = {
               "film belongs to the comedy genre. Please JUST answer \"True\" "
               "if it does, and \"False\" otherwise. Do NOT provide any "
               "explanations."),
-    "Q3c_p": ("Q3c", "The film belongs to the romance genre",
+    "Q3c_p": ("Q3c", "An affair of the heart drives this picture's story",
               "Please determine whether the given text suggests that the "
               "film belongs to the romance genre. Please JUST answer \"True\" "
               "if it does, and \"False\" otherwise. Do NOT provide any "
