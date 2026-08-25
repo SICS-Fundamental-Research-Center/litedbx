@@ -190,7 +190,7 @@ class LdbWorkload:
     async def run_partial_evaluation(
         self, debug: bool = False
     ) -> tuple[
-        dict[str, Any],
+        dict,
         dict[str, float],
         LiteDBXRuntimeSnapshot,
         dict[str, set[tuple]],

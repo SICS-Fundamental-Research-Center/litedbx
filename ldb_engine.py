@@ -134,6 +134,30 @@ class LdbEngine:
         )
         self.workload.report_results(execution_trace, incremental_results)
 
+        # Report the basic info for the first step.
+        for q_name in self.workload.queries:
+            best_trace = execution_trace[len(execution_trace) - 1]
+            trans_eval_results = best_trace["trans_eval"][q_name]
+            logger.info(
+                "Query: %s, F1-score: %s, 0-1-Error Err: %s",
+                q_name,
+                trans_eval_results["f1"],
+                trans_eval_results["Err"],
+            )
+            if error_certificates:
+                logger.info(
+                    "Query: %s, Error certificate B: %s",
+                    q_name,
+                    error_certificates[q_name],
+                )
+            if error_bounds:
+                logger.info(
+                    "Query: %s, Error bound: %s",
+                    q_name,
+                    error_bounds[q_name],
+                )
+
+
         return self.workload.build_result_payload(
             execution_trace=execution_trace,
             phase_durations=phase_durations,
