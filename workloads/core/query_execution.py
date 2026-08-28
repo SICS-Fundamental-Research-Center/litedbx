@@ -575,10 +575,22 @@ class QueryExecution:
                     "ldb_data"
                 ].df.empty:
                     logger.info(
-                        "Inc-Round %s: No sigma-satisfied data available.",
+                        "Inc-Round %s: No sigma-satisfied data available for "
+                        "query '%s'; the stream adds no Sigma rows, so the "
+                        "certificate carries over unchanged.",
                         inc_round,
+                        q_name,
                     )
-                    break
+                    eval_results_single_step[q_name] = (
+                        await self._carryover_query_step(
+                            q_name=q_name,
+                            inc_round=inc_round,
+                            error_certificate=error_certificates.get(
+                                q_name, 0.0
+                            ),
+                        )
+                    )
+                    continue
 
                 step_result = await self._incremental_query_step(
                     q_name=q_name,
@@ -602,6 +614,74 @@ class QueryExecution:
                 }
             )
         return False, eval_results
+
+    async def _carryover_query_step(
+        self,
+        q_name: str,
+        inc_round: int,
+        error_certificate: float,
+    ) -> dict[str, Any]:
+        """Emit the dynamic certificate when a stream adds no Sigma rows.
+
+        The candidate pool is unchanged from the previous stream, so the
+        certificate carries over exactly: sigma_curr = 0 gives d = 0 and
+        B_new = B0 in compute_inc_error_certificate's formula, and
+        pi / |Omega| stay at their accumulated stream-0 values.
+        """
+        ss_data_obj = self.data_manager.sigma_satisfied_data
+        active_external_features = self.data_manager.rewrite_rules[q_name][
+            "active_external_features"
+        ]
+        candidate_kind = self.data_manager.rewrite_rules[q_name]["candidate"]
+        ucq = self.data_manager.rewrite_rules[q_name]["ucq"]
+        trans_Y_li = []
+        for i in range(inc_round + 1):
+            stream_ldb_data = ss_data_obj[i][q_name]["ldb_data"]
+            if stream_ldb_data.df.empty:
+                trans_Y_li.append(pd.Series(dtype=int))
+                continue
+            test_X = self._select_candidate_features(
+                ldb_data=stream_ldb_data,
+                active_external_features=active_external_features,
+                candidate_kind=candidate_kind,
+                eligible_base_features=(
+                    self.data_manager.relevant_base_features.get(q_name)
+                ),
+            )
+            trans_Y_li.append(apply_rules(ucq, encode_features(test_X)))
+        trans_eval = self.data_manager.eval_query_quality(
+            q_name=q_name,
+            selected_cols=self.queries[q_name].selected,
+            stream_idx=inc_round,
+            pred_labels=trans_Y_li,
+        )
+        err_new = trans_eval["Err"]
+        true_selectivity = ss_data_obj[inc_round][q_name][
+            "accumulated_true_selectivity"
+        ]
+        assert true_selectivity
+        error_bound = compute_error_bound(error_certificate, true_selectivity)
+        logger.info(
+            "Dynamic certificate for query '%s' in stream-%s: "
+            "B_new=%.4f, Err_new=%.4f, slack=%.4f, Phi_new=%.4f, "
+            "pi_new=%.4f, |Omega|=%s, F1_reuse=%.4f.",
+            q_name,
+            inc_round,
+            error_certificate,
+            err_new,
+            error_certificate - err_new,
+            error_bound,
+            true_selectivity,
+            trans_eval["omega"],
+            trans_eval["f1"],
+        )
+        return {
+            "error_certificate": error_certificate,
+            "data_err": 0.0,
+            "pred_err": 0.0,
+            "pred_eval": trans_eval,
+            "trans_eval": trans_eval,
+        }
 
     async def _incremental_query_step(
         self,
@@ -685,11 +765,15 @@ class QueryExecution:
                 f"True selectivity is missing for query '{q_name}' "
                 f"in stream-{inc_round}."
             )
+        ss_data_obj = self.data_manager.sigma_satisfied_data
         data_err, pred_err, error_bound, b_new = compute_inc_error_certificate(
             prev_prop_Y_li=prev_prop_Y_li,
             prop_Y_li=pred_Y_li,
             error_certificate=error_certificate,
             true_selectivity=true_selectivity,
+            sigma_size_prev=ss_data_obj[inc_round - 1][q_name]["candidate_size"],
+            sigma_size_curr=ss_data_obj[inc_round][q_name]["candidate_size"],
+            selected_tp=len(ss_data_obj[inc_round - 1][q_name]["selected_data"])
         )
         err_certificate = data_err + pred_err
         logger.info(
@@ -983,6 +1067,9 @@ def compute_inc_error_certificate(
     prop_Y_li: list[pd.Series],
     error_certificate: float,
     true_selectivity: float,
+    sigma_size_prev: int,
+    sigma_size_curr: int,
+    selected_tp: int,
 ) -> tuple[float, float, float, float]:
     assert len(prev_prop_Y_li) == len(prop_Y_li), (
         f"Length of prev_prop_Y_li and prop_Y_li must be the same. "
@@ -1001,19 +1088,23 @@ def compute_inc_error_certificate(
     new_data_size = len(prev_prop_Y_li[-1])
     if curr_data_size == 0:
         return 0.0, 0.0, 0.0, 0.0
-    data_err = new_data_size / curr_data_size
-    if prev_data_size == 0:
-        return data_err, 0.0, 0.0, data_err
+    # data_err = new_data_size / curr_data_size
+    data_err = sigma_size_curr / (sigma_size_prev + sigma_size_curr)
+    # if prev_data_size == 0:
+    #     return data_err, 0.0, 0.0, data_err
 
     # Prediction error = |Err_{shared}| / |D_{total}|.
     pred_err = 0.0
     for i in range(len(prev_prop_Y_li) - 1):
         pred_err += sum(prev_prop_Y_li[i] != prop_Y_li[i])
-    pred_err /= curr_data_size
+    pred_err /= (curr_data_size + selected_tp)
 
+    # B_new = min(1, 
+    #             prev_data_size / curr_data_size * error_certificate + \
+    #                 data_err + pred_err)
     B_new = min(1, 
-                prev_data_size / curr_data_size * error_certificate + \
-                    data_err + pred_err)
+                sigma_size_prev / ((sigma_size_prev + sigma_size_curr)) \
+                    * error_certificate + data_err + pred_err)
     error_bound = compute_error_bound(B_new, true_selectivity)
 
     return data_err, pred_err, error_bound, B_new
