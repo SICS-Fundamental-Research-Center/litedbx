@@ -40,6 +40,14 @@ class DataStream(list[LdbData]):
         steps = [0] + dynamic_steps
         data_ladder = [int(total_rows * step) for step in steps]
 
+        for i in range(1, len(data_ladder)):
+            if data_ladder[i] <= data_ladder[i - 1]:
+                data_ladder[i] = data_ladder[i - 1] + 1
+        if data_ladder[-1] > total_rows:
+            raise ValueError(
+                f"Dynamic steps {dynamic_steps} exceed total rows {total_rows}."
+            )
+
         data_stream = []
         for i in range(1, len(data_ladder)):
             selected_indices = indices[data_ladder[i - 1] : data_ladder[i]]
