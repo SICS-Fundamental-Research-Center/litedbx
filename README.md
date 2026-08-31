@@ -1,89 +1,60 @@
 # LiteDBX
 
-A lightweight query engine for processing multi-modal data with LLM-based feature extraction and query translation.
+A lightweight query engine for multi-modal data with LLM-based feature extraction and query translation, with provable error certificates.
 
 ## Features
 
-- **Semantic Query Processing**: Process complex semantic queries over multi-modal data using LLMs
-- **Coreset Construction**: Intelligent sampling and coreset expansion for efficient labeling
-- **Feature Space Generation**: Automatic feature extraction from text and image modalities
-- **Feature Refinement**: LLM-driven feature space refinement with feedback loops
-- **Label Propagation**: Semi-supervised learning with classifier-based label propagation
-- **Query Translation**: Convert semantic queries to interpretable rule-based queries
-- **Objective & Subjective Error Estimation**: Theoretical bounds for query translation quality
-- **Multi-Modal Support**: Handle text, images, and structured tabular data
+- **Semantic Query Processing**: run semantic queries (SemCQ) over text, image, and structured data
+- **Coreset Construction**: label-efficient sampling with k-NN coreset expansion
+- **Feature Space Generation & Refinement**: LLM-driven attribute extraction with feedback loops
+- **Label Propagation**: classifier-based semi-supervised propagation to unlabeled data
+- **Query Translation**: semantic predicates → interpretable bounded-UCQ rules
+- **Error Certificates**: objective and subjective bounds on translation quality, including dynamic σ-pool certificates under data updates (with carryover for drained streams)
+- **Incremental Maintenance**: selective refresh — reuse or refresh per query, guided by the certificate
+- **Dynamic Data Streams**: update-stream execution and drifted-query reuse (`query_drift.py`)
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.12+
-- [uv](https://github.com/astral-sh/uv) - Fast Python package installer
-- [vLLM](https://github.com/vllm-project/vllm) - For hosting local models (requires separate environment)
+- Python 3.12+ and [uv](https://github.com/astral-sh/uv)
+- [vLLM](https://github.com/vllm-project/vllm) (separate environment) for local model hosting
 
-### Hardware Configuration
+### Hardware
 
-We host local models with vLLM on 4× NVIDIA GeForce RTX 3090 (24 GiB each)
-- Supports simultaneous 30B LLM and 30B VLM hosting in FP8 (text/image multi-modal)
+Local models are hosted with vLLM on 4× NVIDIA GeForce RTX 3090 (24 GiB each); a 30B LLM and a 30B VLM run simultaneously in FP8.
 
 ### Installation
 
-#### 1. Main Project Installation
-
 ```bash
-# Install dependencies using uv
-uv sync
+# Main environment (does not include vLLM)
+uv sync && source .venv/bin/activate
 
-# Activate the virtual environment
-source .venv/bin/activate
-```
-
-**Note**: The `uv sync` command does **not** include vLLM dependencies. You need to set up a separate environment for vLLM.
-
-#### 2. vLLM Environment Setup
-
-For hosting local models, you need to create a separate environment with vLLM:
-
-```bash
-# Create a dedicated venv for vLLM (recommended location: ~/venv/vllm)
+# Dedicated vLLM environment (servem.sh activates it automatically)
 python -m venv ~/venv/vllm
-source ~/venv/vllm/bin/activate
-
-# Install vLLM
-pip install vllm
+source ~/venv/vllm/bin/activate && pip install vllm
 ```
-
-The [`servem.sh`](servem.sh) script automatically activates this venv at line 198. If your vLLM is installed in a different location, modify line 198 in [`servem.sh`](servem.sh:198) to point to your environment.
 
 ### Environment Configuration
 
-Configure your API keys by setting up the `.env` file:
+```bash
+mv .env.example .env   # then fill in your keys
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `BLSC_API_KEY` / `BLSC_ENDPOINT` | BLSC gateway (remote models) |
+| `DASHSCOPE_API_KEY` / `DASHSCOPE_ENDPOINT` | DashScope (remote models) |
+
+## Serving Local Models
 
 ```bash
-# Rename the env file
-mv .env.example .env
-
-# Edit .env with your actual API keys
-# Required variables:
-# - BLSC_API_KEY: Your BLSC API key
-# - DASHSCOPE_API_KEY: Your DashScope API key
+./servem.sh                     # list preconfigured models
+./servem.sh start qwen3-30b-fp8 # serve a model (tmux); API at http://localhost:<PORT>/v1
+./servem.sh stop qwen3-30b-fp8  # stop the session and clear state
+./servem.sh status [MODEL]      # show session status
+./servem.sh help                # full instructions
 ```
-
-Example `.env` file:
-```env
-BLSC_API_KEY=your_api_key_here
-BLSC_ENDPOINT=https://llmapi.blsc.cn/v1/
-DASHSCOPE_API_KEY=your_dashscope_key_here
-DASHSCOPE_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1/
-```
-
-### Locally-Hosted Models
-
-For running LLMs locally, use the provided [`servem.sh`](servem.sh) script to serve models with vLLM:
-
-#### Available Models
-
-The script supports pre-configured models:
 
 | Model | Type | Default Port | GPUs | Max Length |
 |-------|------|--------------|------|------------|
@@ -96,269 +67,134 @@ The script supports pre-configured models:
 | `llava-v1.6-7b` | Vision | 8003 | 2,3 | 32768 |
 | `qwen3-vl-30b` | Vision | 8005 | 2,3 | 32768 |
 
-#### Usage
+Tensor parallelism is enabled automatically for multi-GPU models; GPU memory utilization is configured per model and ports auto-increment if busy. To add models, edit the configuration arrays at the top of [`servem.sh`](servem.sh).
 
-```bash
-# List all available models
-./servem.sh
+## Data Setup
 
-# Start a specific model (e.g., Qwen3 4B)
-./servem.sh qwen3-4b
+Download the [SemBench](https://sembench.ngrok.io/) `data/` directory into the repo root. Expected layout (plus scale-factor variants such as `movie_sf_16000`, `movie_sf_2000`, `mmqa_sf_25`):
 
-# The server will start on the configured port
-# Access the API at: http://localhost:<PORT>/v1
 ```
-
-#### Model Configuration
-
-Each model is pre-configured with the following settings:
-- **Tensor Parallelism (TP)**: Automatically enabled for multi-GPU models
-- **GPU Memory Utilization**: Configured per model (0.8-0.9)
-- **Port Management**: Auto-increments if default port is in use
-- **Virtual Environment**: Automatically activates `~/venv/vllm` (configurable at [line 198](servem.sh:198))
-
-To add new models, edit the configuration arrays in [`servem.sh`](servem.sh:75-139).
-
-### Data Setup
-
-This project uses datasets from [SemBench](https://sembench.ngrok.io/). To set up the data:
-
-1. **Download the data directory**:
-   ```bash
-   # Place the 'data' directory under ./litedbx/
-   # Your directory structure should look like:
-   # litedbx/
-   #   ├── data/
-   #   │   ├── medical/
-   #   │   │   ├── data.csv
-   #   │   │   └── ground_truth/
-   #   │   └── ...
-   #   └── ...
-   ```
-
-2. **Verify data setup**:
-   ```bash
-   # Check that the data directory exists
-   ls -la data/
-
-   # You should see dataset directories like:
-   # medical/ movie/ ecomm/ animals/ mmqa/
-   ```
+data/
+├── medical/    
+├── movie/    
+├── ecomm_sf_2000/    
+├── animals/    
+└── mmqa/
+```
 
 ## Usage
 
-### Basic Usage
-
-The query pipeline consists of three main steps:
-
-1. **Define your workload** in `workloads/{dataset}.py` (e.g., `workloads/medical.py`)
-2. **Configure the query parameters** in `workloads/config.yaml`
-3. **Execute queries** using the engine
-
-### Example Query Pipeline
-
-```python
-from time import time
-import logging
-import sys
-from workloads.scenarios import medical
-from ldb_engine import LdbEngine
-import asyncio
-
-if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    logger = logging.getLogger(__name__)
-
-    # Define which queries to run
-    queries = ["Q1"]
-
-    # Build the workload
-    workload = medical.get_workload(queries=queries)
-
-    # Create the query engine
-    ldb_engine = LdbEngine(workload)
-
-    # Execute queries
-    start = time()
-    asyncio.run(ldb_engine.execute(debug=True))
-    end = time()
-    logger.info(f"Total execution time: {end - start} seconds")
-```
-
-### Running the Demo
+### CLI (experiment harness)
 
 ```bash
-python main.py
+uv run main.py --ls-configs                        # list experiment configs
+uv run main.py --config configs/default.yaml       # run a config (repeat --config for several)
+uv run main.py --config <cfg> --cold --certificate # no cache reads/writes + error certificates
 ```
 
-## Execution Phases
+Configs live under `exp/` as `<group>/<file>.yaml` task lists: each task names models, a `config_override` block (task-level knobs; the global `workloads/config.yaml` is shared live state), and workload/query objects — see `exp/configs/default.yaml`. Experiment directories under `exp/` are self-documenting: each carries its spec (`*_experiment.md`) and a script-generated `_summary.md`.
 
-The `LdbEngine.execute()` method orchestrates the following phases:
+### Python API
 
-1. **Preprocessing (Phase 1)**: Apply static filters (Σ) to retrieve sigma-satisfied data
-2. **Coreset Construction (Phase 2)**: 
-   - Initialize feature space with human labels
-   - Materialize features for unlabeled data
-   - Expand coreset using k-NN based selection
-3. **Schema Selection & Query Translation (Phase 3)**:
-   - Rank and trim feature space according to selection budget
-   - Select optimal schema and translate queries
+```python
+import asyncio, logging
+from workloads.scenarios import medical
+from ldb_engine import LdbEngine
 
-## Workload Configuration
+logging.basicConfig(level=logging.INFO)
 
-Configure your queries in the `workloads/` directory. Each dataset should have its own workload module (e.g., `medical.py`).
+workload = medical.get_workload(queries=["Q1"])   # loads workloads/config.yaml
+asyncio.run(LdbEngine(workload).execute(debug=True))
+```
 
-### Configuration File (`workloads/config.yaml`)
+### Execution Phases
+
+1. **Preprocessing (Phase 1)** — static filters (Σ) retrieve sigma-satisfied data
+2. **Coreset Construction (Phase 2)** — seed with human labels, materialize features for unlabeled data, expand the coreset via k-NN selection
+3. **Schema Selection & Query Translation (Phase 3)** — rank and trim the feature space under the selection budget, then rewrite the semantic predicate into rules
+
+## Configuration
+
+Global defaults in [`workloads/config.yaml`](workloads/config.yaml):
 
 ```yaml
 random_seed: 42
-b_lab: 20          # Number of human labels to acquire
-b_se: 5            # External feature selection budget
-b_rew: 5           # Query rewriting (disjunction) budget
-b_fs: 10           # Feature space generation budget
-k_neighbors: 5     # Number of neighbors for coreset expansion
-loo_step: 1        # Step size for leave-one-out validation
-delta: 0.05        # Confidence level for error estimation
+b_lab: 20            # human labels acquired initially
+b_se: 5              # external feature selection budget
+b_rew: 5             # query rewriting (disjunction) budget
+b_fs: 10             # feature space generation budget
+k_neighbors: 5       # neighbors for coreset expansion
+loo_step: 1          # leave-one-out validation step
+delta: 0.2           # bounds hold with probability ≥ 1 − delta
+dynamic_setting: [1.0]  # dynamic update plan (growth fractions)
 ```
+
+Feature toggles (all `True` by default): `enable_hitl`, `enable_conf_struct`, `enable_conf_pred`, `enable_enrich`, `enable_rewrite`, `enable_subj`, `enable_obj`, `enable_coreset_expansion`.
+
+Experiments override these per task via `config_override` in the experiment config — never by editing the global file.
 
 ### Defining a Workload
 
+Each dataset is a module in `workloads/scenarios/`:
+
 ```python
-from pathlib import Path
-from typing import Optional
-import yaml
 from data_structure import Predicate, SemPredicate, SemCQ
-from .ldb_workload import LdbWorkload
 
-DATASET_PATH = Path(__file__).parent.parent / "data/medical"
-CURRENT_DIR = Path(__file__).parent
-
-# Define semantic query
 Q1 = SemCQ(
     selected=["patient_id"],
-    Sigma=[Predicate("symptoms", "!=", "")],  # Static filter
-    Ps=[
-        SemPredicate(
-            field="symptoms",
-            modality="Text",
-            succ_cond="The patient has an allergy",
-            prompt=(
-                "You are a medical expert. "
-                "Please determine if the given symptom indicate "
-                "that the patient has an allergy. "
-                "Please JUST answer \"True\" if they do, and \"False\" otherwise. "
-                "Do NOT provide any explanations."
-            ))
-    ]
+    Sigma=[Predicate("symptoms", "!=", "")],       # static filter
+    Ps=[SemPredicate(
+        field="symptoms", modality="Text",
+        succ_cond="The patient has an allergy",
+        prompt="... judge whether the symptoms indicate an allergy ...",
+    )],
 )
+SEM_QUERIES = {"Q1": Q1}
 
-SEM_QUERIES = {
-    "Q1": Q1,
-    # Add more queries...
-}
-
-def get_workload(queries: list[str], config: Optional[dict] = None) -> LdbWorkload:
-    sem_queries = {}
-    for q in queries:
-        assert q in SEM_QUERIES, f"Invalid query {q} in medical dataset."
-        sem_queries[q] = SEM_QUERIES[q]
-
-    if config is None:
-        with open(CURRENT_DIR / "config.yaml") as f:
-            config = yaml.safe_load(f)
-
-    return LdbWorkload(
-        data_dir=str(DATASET_PATH),
-        scenario="medical",
-        queries=sem_queries,
-        config=config
-    )
+def get_workload(queries, config=None): ...        # -> LdbWorkload
 ```
-
-## Parameters
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `random_seed` | Random seed for reproducibility | 42 |
-| `b_lab` | Number of human labels to acquire initially | 20 |
-| `b_se` | Budget for selecting external features | 5 |
-| `b_rew` | Budget for query rewriting disjunctions | 5 |
-| `b_fs` | Budget for feature space generation | 10 |
-| `k_neighbors` | Number of neighbors for coreset expansion | 5 |
-| `loo_step` | Step size for leave-one-out validation | 1 |
-| `delta` | Confidence parameter (1 - delta) for error bounds | 0.05 |
 
 ## Project Structure
 
 ```
 litedbx/
-├── ldb_engine.py          # Main query engine orchestration
-├── main.py                # Entry point for running queries
-├── servem.sh              # vLLM model serving script
-├── workloads/             # Workload facade, core implementation, scenarios
-│   ├── config.yaml           # Configuration parameters
-│   ├── ldb_workload.py       # Engine-facing workload facade
-│   ├── core/                 # LiteDBX workload implementation components
-│   │   ├── feature_pipeline.py   # Feature generation, sync, and selection
-│   │   ├── coreset_maintainer.py # Coreset expansion and thresholds
-│   │   ├── query_execution.py    # Query rewrite, errors, and incremental execution
-│   │   ├── preprocessing.py      # Query reuse and Sigma refinement
-│   │   └── reporting.py          # Usage and result reporting
-│   ├── utils.py              # Feature encoding, classifiers, rules, losses
-│   └── scenarios/            # Dataset-specific query definitions
-│       ├── medical.py
-│       ├── movie.py
-│       ├── ecomm.py
-│       ├── animals.py
-│       └── mmqa.py
-├── data_structure/         # Data structures
-│   ├── sem_query.py          # Semantic query (SemCQ, SemPredicate)
-│   ├── ldb_data.py           # LdbData wrapper
-│   ├── ldb_data_manager.py   # Data management
-│   └── llm_resp_templates.py # LLM response templates
-├── llm/                   # LLM integration
-│   ├── config.yaml           # LLM configuration (remote/local)
-│   ├── ldb_llm_client.py     # LLM API client
-│   └── prompts.py            # LLM prompt templates
-├── data/                  # Dataset directory
-│   ├── medical/              # Medical dataset
-│   ├── movie/                # Movie dataset
-│   ├── ecomm_sf_2000/        # E-commerce dataset (scale factor 2000)
-│   ├── animals/              # Wildlife dataset
-│   └── mmqa/                 # MMQA dataset
-├── .data_ckpt/            # Cached checkpoints
-│   ├── medical/
-│   ├── movie/
-│   ├── ecomm/
-│   └── ...
-├── files/                 # External reference files
-│   └── ...
-└── litedbx_full.pdf       # Full-version paper (with appendix)
+├── main.py                     # CLI entrance (experiment configs)
+├── ldb_engine.py               # engine orchestration
+├── query_drift.py              # reuse-aware execution of drifted query sequences
+├── servem.sh                   # vLLM model serving
+├── workloads/
+│   ├── config.yaml             # global configuration (live shared state)
+│   ├── config_schema.py        # config validation
+│   ├── ldb_workload.py         # engine-facing workload facade
+│   ├── registry.py             # workload registry
+│   ├── utils.py                # encoding, classifiers, rules, losses
+│   ├── core/                   # feature_pipeline, semantic_features, feature_selection,
+│   │                           # rewrite_candidates, coreset_maintainer,
+│   │                           # query_execution (rewrite, errors, incremental), preprocessing, reporting
+│   └── scenarios/              # medical, movie, ecomm, animals, mmqa
+├── data_structure/             # sem_query, ldb_data(_manager), coreset, data_stream,
+│                               # sigma_satisfied_data, annotation_sampling, llm_resp_templates
+├── llm/                        # config.yaml (remote/local model routing), ldb_llm_client, prompts
+├── exp/                        # experiment campaigns: <NN>_<name>/ specs, configs, results, _summary.md
+├── paper/                      # paper sources (main + appendix)
+├── data/                       # datasets (see Data Setup)
+└── litedbx_full.pdf            # paper with appendix
 ```
 
 ## Experimental Setup
 
 ### Models
 
-**Remote (Cloud) Models:**
-- Default LLM: `Qwen3-235B-A22B`
-- Default VLM: `Qwen3-VL-235B-A22B-Instruct`
+| Regime | Text | Vision |
+|--------|------|--------|
+| Remote (gateway) | `Qwen3.6-Plus` | `Qwen3.6-Plus` |
+| Local (vLLM) | `Qwen3-30B-A3B-Instruct-2507-FP8` (:8004) | `Qwen3-VL-30B-A3B-Instruct-FP8` (:8005) |
 
-**Local Models (hosted via vLLM):**
-- Default LLM: `Qwen3-30B-A3B-Instruct-2507-FP8`
-- Default VLM: `Qwen3-VL-30B-A3B-Instruct-FP8`
+Routing is configured in [`llm/config.yaml`](llm/config.yaml).
 
 ### Benchmark
 
-LiteDBX is evaluated on [SemBench](https://sembench.ngrok.io/), a benchmark for semantic query processing over multi-modal data.
-
-**Datasets and Scale Factors:**
+Evaluated on [SemBench](https://sembench.ngrok.io/):
 
 | Dataset | Scale Factor | Note |
 |---------|--------------|------|
@@ -370,16 +206,15 @@ LiteDBX is evaluated on [SemBench](https://sembench.ngrok.io/), a benchmark for 
 
 ### Query Mapping
 
-| SemBench | LiteDBX |
-|---------|---------|
-| Movie.Q1, Q2 | Movie.Q1, Q2 |
-| Wildlife.Q7 | Wildlife.Q1 |
-| E-Commerce.Q1, Q2, Q13 | E-Commerce.Q1, Q2, Q3 |
-| MMQA.Q3a, Q3f, Q6a, Q6b, Q6c | MMQA.Q1, Q2, Q3, Q4, Q5 |
-| Medical.Q1, Q3, Q8, Q9 | Medical.Q1, Q2, Q3, Q4 |
+| SemBench | LiteDBX (repo qid) |
+|----------|---------|
+| Movie.Q1, Q2 | movie.Q1, Q2 |
+| Wildlife.Q1 | animals.Q7 |
+| E-Commerce.Q1, Q2, Q3 | ecomm.Q1, Q2, Q13 |
+| MMQA.Q1, Q2, Q3, Q4, Q5 | mmqa.Q3a, Q3f, Q6a, Q6b, Q6c |
+| Medical.Q1, Q2, Q3, Q4 | medical.Q1, Q3, Q8, Q9 |
 
 ### Evaluation Notes
 
-1. **Aggregation Queries**: Excluded from evaluation as they require human-provided annotations (e.g., `SUM`, `COUNT`).
-
-2. **LIMIT Clauses**: Removed from queries before execution (LIMIT optimization not supported).
+1. **Aggregation queries** are excluded (require human-provided annotations, e.g. `SUM`, `COUNT`).
+2. **LIMIT clauses** are removed before execution (LIMIT optimization not supported).
