@@ -8,6 +8,7 @@ set -euo pipefail
 #   ./servem.sh                 # list models
 #   ./servem.sh list            # list models
 #   ./servem.sh start MODEL     # stop prior session, probe GPUs, start in tmux
+#   ./servem.sh swap MODEL      # stop ALL our sessions, then start MODEL (timed)
 #   ./servem.sh stop MODEL      # stop tmux session and release resources
 #   ./servem.sh status [MODEL]  # show session status
 #   ./servem.sh state MODEL KEY  # print a saved state value
@@ -38,14 +39,6 @@ check_port() {
     lsof -Pi ":$port" -sTCP:LISTEN -t >/dev/null 2>&1
 }
 
-find_available_port() {
-    local port=$1
-    while check_port "$port"; do
-        port=$((port + 1))
-    done
-    echo "$port"
-}
-
 wait_for_port_free() {
     local port=$1
     local timeout=${2:-30}
@@ -57,6 +50,19 @@ wait_for_port_free() {
             return 1
         fi
     done
+}
+
+# The port is part of the CLIENT contract (llm/config.yaml hardcodes
+# localhost:<port>): silently renumbering would report success while every
+# client still points at the old port. Fail hard and show the squatter.
+require_port_free() {
+    local port=$1
+    if ! check_port "$port"; then
+        return 0
+    fi
+    print_error "Port $port is still in use -- refusing to renumber (client contract port):"
+    lsof -Pi ":$port" -sTCP:LISTEN 2>/dev/null || true
+    return 1
 }
 
 wait_for_http_ready() {
@@ -112,6 +118,7 @@ declare -A MODEL_MAX_LEN
 declare -A MODEL_TP_SIZE
 declare -A MODEL_GPU_UTIL
 declare -A MODEL_MIN_FREE_MB
+declare -A MODEL_EXTRA_ARGS
 
 MODEL_PATHS[llama3-8b]="/ssd_data/models/llama3-8b-instruct"
 MODEL_PORTS[llama3-8b]=8000
@@ -180,6 +187,42 @@ MODEL_MAX_LEN[qwen3-vl-4b]=32768
 MODEL_TP_SIZE[qwen3-vl-4b]=2
 MODEL_GPU_UTIL[qwen3-vl-4b]=0.9
 MODEL_MIN_FREE_MB[qwen3-vl-4b]=8000
+
+# Audio(+vision) model, bf16 Instruct. The -FP8 checkpoint is NOT servable on
+# this box (4x3090/Ampere + vllm 0.19.0): TP=2 -> Marlin shard 576 % block_k
+# 128; PP=2 auto -> Marlin tile size_n 4304 % 64; PP=2 triton -> quant scheme
+# unsupported; PP=2 cutlass -> disabled on SM86. bf16 needs TP=4 (~15GB
+# weights/card). OOM note: 16-way concurrent AUDIO prefill spikes activations;
+# keep util <= 0.75-0.80 or raise it only with audio-batch caps.
+# 11-16 (R1.D1.1 audio arm): engine sem_map / timing replay fire one-shot
+# gathers (client semaphore 20) -- the audio chunk-8 recipe is enforced
+# SERVER-SIDE via max-num-seqs 8 so any client concurrency is safe.
+MODEL_PATHS[qwen3-omni-30b]="/ssd_data/models/Qwen3-Omni-30B-A3B-Instruct"
+MODEL_PORTS[qwen3-omni-30b]=8008
+MODEL_MAX_LEN[qwen3-omni-30b]=32768
+MODEL_TP_SIZE[qwen3-omni-30b]=4
+MODEL_GPU_UTIL[qwen3-omni-30b]=0.75
+MODEL_MIN_FREE_MB[qwen3-omni-30b]=18000
+MODEL_EXTRA_ARGS[qwen3-omni-30b]="--max-num-seqs 8"
+
+# R1.D3.1 Phase C (11-16): community AWQ W4A16 quant of the omni model
+# (cyankiwi/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit, tower/talker left bf16,
+# thinker-only AWQ -> TP2 fits ~13.8 GiB/card). Same audio OOM recipe as
+# bf16: util 0.75 + server-side max-num-seqs 8.
+# PATH IS TEMPORARY: served straight from the staging download dir because
+# /ssd_data had only 21 GiB free (ckpt 27.57 GiB). Pending user ruling:
+# promote to /ssd_data/models/ when space allows (update this path), or
+# delete the ckpt (drop this entry) if AWQ is retired.
+MODEL_PATHS[qwen3-omni-30b-awq]="/home/baiwenchao/models/staging/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit"
+MODEL_PORTS[qwen3-omni-30b-awq]=8009
+MODEL_MAX_LEN[qwen3-omni-30b-awq]=32768
+MODEL_TP_SIZE[qwen3-omni-30b-awq]=2
+MODEL_GPU_UTIL[qwen3-omni-30b-awq]=0.75
+# min-free 18000 = util 0.75 x 24576 MiB (18.4G) needs a card that free or
+# better, else selection passes and vllm dies at init_device (the fp8 death
+# mode documented above); matches the bf16 sibling entry.
+MODEL_MIN_FREE_MB[qwen3-omni-30b-awq]=18000
+MODEL_EXTRA_ARGS[qwen3-omni-30b-awq]="--max-num-seqs 8"
 
 session_name() {
     local model_key=$1
@@ -325,23 +368,15 @@ select_gpu_slots() {
     echo "${chosen[*]}"
 }
 
+# Returns 1 (does not exit) so callers -- notably swap_model -- can run their
+# own failure accounting before exiting.
 ensure_model_exists() {
     local model_key=$1
     local model_path=${MODEL_PATHS[$model_key]}
     if [[ ! -d "$model_path" ]]; then
         print_error "Model not found at: $model_path"
-        exit 1
+        return 1
     fi
-}
-
-ensure_port() {
-    local port=$1
-    if check_port "$port"; then
-        print_warning "Port $port is already in use. Finding available port..." >&2
-        port=$(find_available_port "$port")
-        print_info "Using port $port instead" >&2
-    fi
-    echo "$port"
 }
 
 stop_model() {
@@ -393,23 +428,30 @@ start_model() {
     require_cmd lsof
     require_cmd nvidia-smi
 
-    ensure_model_exists "$model_key"
+    # Failure paths below RETURN 1 (not exit): swap_model must survive them
+    # to write its timing row (status=load-failed) before exiting.
+    ensure_model_exists "$model_key" || return 1
 
-    # Kill the previous hosting session for the same model first.
+    # Kill the previous hosting session for the same model first, then verify
+    # the contract port is actually free (hard fail -- see require_port_free).
     stop_model "$model_key" || true
     wait_for_port_free "$port" 30 || true
+    require_port_free "$port" || return 1
 
-    port=$(ensure_port "$port")
     gpus=$(select_gpu_slots "$model_key") || {
         print_error "No GPU slot has enough free memory for $model_key"
         print_gpu_probe "$model_key"
-        exit 1
+        return 1
     }
 
     session=$(session_name "$model_key")
     local -a cmd=(vllm serve "$model_path" --port "$port" --max-model-len "$max_len" --gpu-memory-utilization "$gpu_util")
     if (( tp_size > 1 )); then
         cmd+=(--tensor-parallel-size "$tp_size")
+    fi
+    if [[ -n "${MODEL_EXTRA_ARGS[$model_key]:-}" ]]; then
+        read -ra extra_args <<< "${MODEL_EXTRA_ARGS[$model_key]}"
+        cmd+=("${extra_args[@]}")
     fi
     # Shared-box accommodation: skip CUDA-graph capture (enforce eager) so a TP
     # shard on a fragmented/contended GPU does not fault during graph capture.
@@ -424,6 +466,9 @@ start_model() {
     for ((i=1; i<${#cmd[@]}; i++)); do
         printf -v launch_cmd '%s%q ' "$launch_cmd" "${cmd[$i]}"
     done
+    # Persist server output: a silently-dead tmux session otherwise leaves no
+    # trace of the crash.
+    printf -v launch_cmd '%s >> %q 2>&1' "$launch_cmd" "/tmp/servem-${model_key}.log"
 
     print_info "Starting model in tmux session: $session"
     print_info "CUDA_VISIBLE_DEVICES=$gpus"
@@ -435,11 +480,90 @@ start_model() {
     if ! wait_for_http_ready "$port" 600; then
         print_error "Model failed to become ready on port $port"
         stop_model "$model_key" || true
-        exit 1
+        return 1
     fi
 
     print_success "Model started. Attach with: tmux attach -t $session"
     print_info "API: http://localhost:$port/v1"
+}
+
+# Coarse-grained serving swap -- stop ALL of OUR vllm-* sessions, then start
+# MODEL -- with two-segment wall-clock timing:
+#   evict segment = swap issued -> all our tmux sessions gone
+#   load  segment = start issued -> HTTP /v1/models ready
+# Timing rows are appended (never rewritten) to $SERVEM_SWAP_LOG -- a
+# NEUTRAL default (/tmp/servem-swap.log); experiments that need a ledger set
+# SERVEM_SWAP_LOG themselves (R1.D3.1 used
+# revision/exp/R1.D3.1/2-batch-run/swap_raw.log). The already-serving
+# short-circuit records a zero-cost row without evicting.
+our_vllm_sessions() {
+    tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^vllm-' || true
+}
+
+swap_model() {
+    local model_key=$1
+    local raw_log="${SERVEM_SWAP_LOG:-/tmp/servem-swap.log}"
+    local evict0 evict1 load0 load1 stopped="" status=ok
+
+    # Short-circuit: target already served and healthy -> record and return.
+    # (swap semantics = "ensure MODEL is served"; no pointless evict+reload)
+    local port="${MODEL_PORTS[$model_key]:-}"
+    if [[ -n "$port" && -f "$HOST_STATE_DIR/${model_key}.env" ]] \
+        && tmux has-session -t "vllm-$model_key" 2>/dev/null \
+        && curl -sf "http://127.0.0.1:${port}/v1/models" >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$raw_log")"
+        [[ -f "$raw_log" ]] || printf 'ts\tmodel\tstopped\tevict_start\tevict_end\tload_start\tload_end\tevict_s\tload_s\tstatus\n' >> "$raw_log"
+        local now=$(date +%s.%N)
+        printf '%s\t%s\tnone\t%s\t%s\t%s\t%s\t0.000\t0.000\talready-serving\n' \
+            "$(date -Is)" "$model_key" "$now" "$now" "$now" "$now" >> "$raw_log"
+        print_success "swap: $model_key already serving on :$port (recorded, no-op)"
+        return 0
+    fi
+
+    evict0=$(date +%s.%N)
+    # Stop every model we host (state files are the ground truth for "ours"),
+    # then sweep any orphan vllm-* sessions by prefix.
+    local state_dir="$HOST_STATE_DIR"
+    local f key
+    for f in "$state_dir"/*.env; do
+        [[ -f "$f" ]] || continue
+        key=$(grep -m1 '^MODEL_KEY=' "$f" | cut -d= -f2-)
+        [[ -n "$key" ]] || continue
+        stopped+="${stopped:+,}$key"
+        stop_model "$key" || true
+    done
+    local s
+    for s in $(our_vllm_sessions); do
+        stopped+="${stopped:+,}${s#vllm-}(session-only)"
+        tmux kill-session -t "$s" 2>/dev/null || true
+    done
+    # Eviction completes when no vllm-* session remains (bounded wait).
+    local waited=0
+    while [[ -n "$(our_vllm_sessions)" ]]; do
+        sleep 1
+        waited=$((waited + 1))
+        if (( waited >= 120 )); then
+            status="evict-timeout"
+            break
+        fi
+    done
+    evict1=$(date +%s.%N)
+    load0=$evict1
+
+    if ! start_model "$model_key"; then
+        status="load-failed"
+    fi
+    load1=$(date +%s.%N)
+
+    mkdir -p "$(dirname "$raw_log")"
+    [[ -f "$raw_log" ]] || printf 'ts\tmodel\tstopped\tevict_start\tevict_end\tload_start\tload_end\tevict_s\tload_s\tstatus\n' >> "$raw_log"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.3f\t%.3f\t%s\n' \
+        "$(date -Is)" "$model_key" "${stopped:-none}" \
+        "$evict0" "$evict1" "$load0" "$load1" \
+        "$(echo "$evict1 $evict0" | awk '{print $1-$2}')" \
+        "$(echo "$load1 $load0" | awk '{print $1-$2}')" \
+        "$status" >> "$raw_log"
+    [[ "$status" == ok ]] || exit 1
 }
 
 status_model() {
@@ -517,6 +641,8 @@ Usage:
   $0                    # list models
   $0 list               # list models
   $0 start MODEL        # stop previous session, probe GPUs, start in tmux
+  $0 swap MODEL         # stop ALL our sessions, then start MODEL (timed;
+                        #   raw rows appended to ${SERVEM_SWAP_LOG:-/tmp/servem-swap.log})
   $0 stop MODEL        # stop tmux session and clear state
   $0 status [MODEL]    # show session status
   $0 state MODEL KEY   # print a saved state value
@@ -545,6 +671,13 @@ main() {
             model_key=$(echo "$2" | tr '[:upper:]' '[:lower:]')
             [[ -v "MODEL_PATHS[$model_key]" ]] || { print_error "Unknown model: $2"; exit 1; }
             stop_model "$model_key"
+            ;;
+        swap)
+            [[ $# -ge 2 ]] || { usage; exit 1; }
+            local model_key
+            model_key=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+            [[ -v "MODEL_PATHS[$model_key]" ]] || { print_error "Unknown model: $2"; exit 1; }
+            swap_model "$model_key"
             ;;
         status)
             if [[ $# -ge 2 ]]; then
