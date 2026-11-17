@@ -205,15 +205,11 @@ MODEL_GPU_UTIL[qwen3-omni-30b]=0.75
 MODEL_MIN_FREE_MB[qwen3-omni-30b]=18000
 MODEL_EXTRA_ARGS[qwen3-omni-30b]="--max-num-seqs 8"
 
-# R1.D3.1 Phase C (11-16): community AWQ W4A16 quant of the omni model
-# (cyankiwi/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit, tower/talker left bf16,
-# thinker-only AWQ -> TP2 fits ~13.8 GiB/card). Same audio OOM recipe as
-# bf16: util 0.75 + server-side max-num-seqs 8.
-# PATH IS TEMPORARY: served straight from the staging download dir because
-# /ssd_data had only 21 GiB free (ckpt 27.57 GiB). Pending user ruling:
-# promote to /ssd_data/models/ when space allows (update this path), or
-# delete the ckpt (drop this entry) if AWQ is retired.
-MODEL_PATHS[qwen3-omni-30b-awq]="/home/baiwenchao/models/staging/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit"
+# Community AWQ W4A16 quant of the omni model (cyankiwi/Qwen3-Omni-30B-
+# A3B-Instruct-AWQ-4bit; tower/talker left bf16, thinker-only AWQ -> TP2
+# fits ~13.8 GiB/card). Same audio OOM recipe as bf16: util 0.75 +
+# server-side max-num-seqs 8.
+MODEL_PATHS[qwen3-omni-30b-awq]="/ssd_data/models/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit"
 MODEL_PORTS[qwen3-omni-30b-awq]=8009
 MODEL_MAX_LEN[qwen3-omni-30b-awq]=32768
 MODEL_TP_SIZE[qwen3-omni-30b-awq]=2
