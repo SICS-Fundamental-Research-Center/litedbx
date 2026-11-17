@@ -62,6 +62,16 @@ class PromptParams:
                     },
                 }
             )
+        elif modality == "Audio":
+            audio_format = Path(data_item).suffix.lstrip(".").lower() or "wav"
+            with Path(data_item).open("rb") as f:
+                audio = base64.b64encode(f.read()).decode("utf-8")
+            self.kwargs["messages"][-1]["content"].append(
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": audio, "format": audio_format},
+                }
+            )
         elif modality == "Text":
             self.kwargs["messages"][-1]["content"].append(
                 {"type": "text", "text": data_item}
@@ -196,11 +206,13 @@ class LdbLLMClient:
             invoke_modality = "Text"
         if modality == "VectorImage":
             invoke_modality = "Image"
+        if modality == "VectorAudio":
+            invoke_modality = "Audio"
 
         if (
             data_items
             and data_items_metadata
-            and modality in ["VectorText", "VectorImage"]
+            and modality in ["VectorText", "VectorImage", "VectorAudio"]
         ):
             flattened_data_items = []
             flattened_metadata = []
@@ -246,11 +258,19 @@ class LdbLLMClient:
         original_indices = []
 
         for original_idx, data_item in enumerate(data_items):
-            if modality == "VectorText" or modality == "VectorImage":
-                # Split Vector content into individual items
+            if (
+                modality == "VectorText"
+                or modality == "VectorImage"
+                or modality == "VectorAudio"
+            ):
+                # Split Vector content into individual items. Audio path
+                # lists are ";"-separated (media filenames may contain
+                # commas, e.g. medical lung wavs) -- ";" takes precedence
+                # there; text/image keep the comma convention.
+                sep = ";" if (modality == "VectorAudio" and ";" in data_item[0]) else ","
                 split_items = [
                     item.strip()
-                    for item in data_item[0].split(",")
+                    for item in data_item[0].split(sep)
                     if item.strip()
                 ]
                 for split_item in split_items:
@@ -269,6 +289,8 @@ class LdbLLMClient:
                 invoke_modality = "Text"
             if modality == "VectorImage":
                 invoke_modality = "Image"
+            if modality == "VectorAudio":
+                invoke_modality = "Audio"
             params, cost_params, mode = self._construct_prompt_params(
                 is_remote=is_remote,
                 modality=invoke_modality,
@@ -294,7 +316,11 @@ class LdbLLMClient:
         results = await tqdm_asyncio.gather(*tasks)
 
         # Reduce phase: Group results by original indices
-        if modality == "VectorText" or modality == "VectorImage":
+        if (
+            modality == "VectorText"
+            or modality == "VectorImage"
+            or modality == "VectorAudio"
+        ):
             # Group results by original index
             grouped_results = {}
             for (_exp_idx, resp), orig_idx in zip(
@@ -369,8 +395,6 @@ class LdbLLMClient:
         response_model: type[BaseModel] | None = None,
         model_index: int | None = None,
     ) -> tuple[PromptParams, dict, str]:
-        if not model_index:
-            model_index = 0
         kwargs, cost_params, mode = self._get_model_kw(
             is_remote=is_remote, modality=modality, model_index=model_index
         )
@@ -395,7 +419,7 @@ class LdbLLMClient:
     def _get_model_kw(
         self, is_remote: bool, modality: str, model_index: int | None = None
     ):
-        if not model_index:
+        if model_index is None:
             model_index = 0
         lm_type = "REMOTE_MODELS" if is_remote else "LOCAL_MODELS"
 
