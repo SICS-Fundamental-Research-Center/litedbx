@@ -1,9 +1,12 @@
+import ast
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +87,55 @@ class PromptParams:
         self.kwargs["response_model"] = response_model
 
 
+def _fix_python_json(args: str) -> str:
+    """Return the arguments as valid JSON, rewriting only when necessary.
+
+    Models occasionally emit Python literals (True/False/None) instead of
+    JSON. Valid JSON passes through untouched so string values keep their
+    exact characters ("True Grit" stays "True Grit").
+    """
+    try:
+        json.loads(args)
+        return args
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.dumps(ast.literal_eval(args))
+    except (ValueError, SyntaxError):
+        return args
+
+
+def _split_vector_cell(modality: str, cell: str) -> list[str]:
+    """Split one Vector-modality cell into individual items.
+
+    Audio cells are ";"-joined by construction (build_dataset.py
+    ``agg(";".join)``) because media filenames may contain commas, e.g.
+    medical lung wavs; text/image keep the comma convention.
+    """
+    sep = ";" if modality == "VectorAudio" else ","
+    return [item.strip() for item in cell.split(sep) if item.strip()]
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Transient failures only: rate limits, server errors, timeouts, network."""
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
+    name = type(exc).__name__
+    return any(
+        key in name
+        for key in (
+            "Timeout",
+            "ConnectionError",
+            "RateLimit",
+            "ServiceUnavailable",
+            "Overloaded",
+        )
+    )
+
+
 def _clean_tool_args(response: Any) -> Any:
     """Clean tool call arguments by stripping whitespace and fixing JSON."""
     if hasattr(response, "choices") and response.choices:
@@ -99,10 +151,7 @@ def _clean_tool_args(response: Any) -> Any:
                     ):
                         # Strip leading/trailing whitespace from arguments
                         args = tool_call.function.arguments.strip()
-                        # Fix Python booleans to JSON booleans
-                        args = args.replace("True", "true").replace(
-                            "False", "false"
-                        )
+                        args = _fix_python_json(args)
                         tool_call.function.arguments = args
     return response
 
@@ -170,7 +219,7 @@ class LdbLLMClient:
 
         self.kwargs = {
             "timeout": self.config.get("timeout"),
-            "max_retries": self.config.get("max_retries"),
+            "max_retries": 0,  # litellm inner retries off; retries are ours
             "max_tokens": self.config.get("max_tokens"),
             "top_p": self.config.get("top_p"),
             "temperature": self.config.get("temperature"),
@@ -217,9 +266,7 @@ class LdbLLMClient:
             flattened_data_items = []
             flattened_metadata = []
             for item, meta in zip(data_items, data_items_metadata, strict=True):
-                split_items = [i.strip() for i in item.split(",") if i.strip()][
-                    :5
-                ]
+                split_items = _split_vector_cell(modality, item)
                 flattened_data_items.extend(split_items)
                 flattened_metadata.extend([meta] * len(split_items))
             data_items = flattened_data_items
@@ -258,22 +305,8 @@ class LdbLLMClient:
         original_indices = []
 
         for original_idx, data_item in enumerate(data_items):
-            if (
-                modality == "VectorText"
-                or modality == "VectorImage"
-                or modality == "VectorAudio"
-            ):
-                # Split Vector content into individual items. Audio path
-                # lists are ";"-separated (media filenames may contain
-                # commas, e.g. medical lung wavs) -- ";" takes precedence
-                # there; text/image keep the comma convention.
-                sep = ";" if (modality == "VectorAudio" and ";" in data_item[0]) else ","
-                split_items = [
-                    item.strip()
-                    for item in data_item[0].split(sep)
-                    if item.strip()
-                ]
-                for split_item in split_items:
+            if modality in ("VectorText", "VectorImage", "VectorAudio"):
+                for split_item in _split_vector_cell(modality, data_item[0]):
                     expanded_items.append([split_item])
                     original_indices.append(original_idx)
             else:
@@ -382,7 +415,8 @@ class LdbLLMClient:
 
         raise TypeError(
             f"Vector reduction is not supported for type {result_type_name}. "
-            f"Only BooleanFeatureResponse is supported."
+            f"Supported: BooleanFeatureResponse (OR), "
+            f"Int/FloatFeatureResponse (SUM)."
         )
 
     def _construct_prompt_params(
@@ -458,7 +492,16 @@ class LdbLLMClient:
         enable_token_usage: bool = True,
         cost_params: dict | None = None,
     ):
-        resp = self.client.completion(**params.kwargs)
+        attempt = 0
+        while True:
+            try:
+                resp = self.client.completion(**params.kwargs)
+                break
+            except Exception as e:
+                if not _is_retryable(e) or attempt >= self.max_retries:
+                    raise
+                attempt += 1
+                time.sleep(min(2**attempt, 30))
         if enable_token_usage:
             assert cost_params is not None, (
                 "Cost params required when token usage tracking is enabled."
@@ -499,7 +542,18 @@ class LdbLLMClient:
         else:
             raise ValueError(f"Unsupported mode: {mode}")
         # Call instructor - mode is already set during initialization
-        resp, completion = _client.create_with_completion(**params.kwargs)
+        attempt = 0
+        while True:
+            try:
+                resp, completion = _client.create_with_completion(
+                    **params.kwargs
+                )
+                break
+            except Exception as e:
+                if not _is_retryable(e) or attempt >= self.max_retries:
+                    raise
+                attempt += 1
+                time.sleep(min(2**attempt, 30))
         if enable_token_usage:
             assert cost_params is not None, (
                 "Cost params required when token usage tracking is enabled."
@@ -570,9 +624,9 @@ class LdbLLMClient:
                         )
                     return (worker_id, resp)
             except Exception as e:
+                if not _is_retryable(e) or attempt >= self.max_retries:
+                    raise
                 attempt += 1
-                if attempt > self.max_retries:
-                    raise e
                 await asyncio.sleep(min(2**attempt, 30))
 
     async def _ainvoke_structured(
@@ -632,9 +686,9 @@ class LdbLLMClient:
                         )
                     return (worker_id, resp)
             except Exception as e:
+                if not _is_retryable(e) or attempt >= self.max_retries:
+                    raise
                 attempt += 1
-                if attempt > self.max_retries:
-                    raise e
                 await asyncio.sleep(min(2**attempt, 30))
 
     def _extract_usage(self, resp):
