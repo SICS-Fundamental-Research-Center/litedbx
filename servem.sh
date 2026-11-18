@@ -52,9 +52,8 @@ wait_for_port_free() {
     done
 }
 
-# The port is part of the CLIENT contract (llm/config.yaml hardcodes
-# localhost:<port>): silently renumbering would report success while every
-# client still points at the old port. Fail hard and show the squatter.
+# The port is a client contract (llm/config.yaml hardcodes localhost:<port>):
+# fail hard and show the squatter, never renumber silently.
 require_port_free() {
     local port=$1
     if ! check_port "$port"; then
@@ -138,12 +137,8 @@ MODEL_PATHS[qwen3-30b-fp8]="/ssd_data/models/Qwen3-30B-A3B-Instruct-2507-FP8"
 MODEL_PORTS[qwen3-30b-fp8]=8004
 MODEL_MAX_LEN[qwen3-30b-fp8]=32768
 MODEL_TP_SIZE[qwen3-30b-fp8]=2
-# 0.8 (18.85 GiB) failed init_device on a GPU shared with another user's ~4.5 GiB
-# job (only ~18.77 GiB free at measurement) -- "Free memory ... is less than
-# desired GPU memory utilization". 0.75 (17.67 GiB) leaves ~1.1 GiB startup
-# margin. gpu_memory_utilization only reserves KV-cache headroom -- it does NOT
-# change model weights or outputs (temp=0 identical tokens), so this is hosting
-# tuning, not result-tuning.
+# 0.8 died at init_device on a contended GPU; 0.75 leaves ~1.1 GiB startup
+# margin. util only affects KV headroom, not model outputs.
 MODEL_GPU_UTIL[qwen3-30b-fp8]=0.75
 MODEL_MIN_FREE_MB[qwen3-30b-fp8]=18000
 
@@ -165,12 +160,9 @@ MODEL_PATHS[qwen3-vl-30b]="/ssd_data/models/Qwen3-VL-30B-A3B-Instruct-FP8"
 MODEL_PORTS[qwen3-vl-30b]=8005
 MODEL_MAX_LEN[qwen3-vl-30b]=32768
 MODEL_TP_SIZE[qwen3-vl-30b]=2
-# 0.8 leaves only ~1.48 GiB for KV cache, but max_model_len 32768 needs ~1.5 GiB
-# per seq -- engine dies at init with "1.5 GiB KV cache is needed, which is
-# larger than the available KV cache memory (1.48 GiB)". 0.9 gives ~3.9 GiB KV
-# headroom (proven Jun-Aug 2026). If shared-box pressure blocks launch at 0.9,
-# prefer dropping max_model_len to 12288 (validated VL recipe) over lowering
-# util below ~0.85, which cannot serve 32k context on 24 GiB GPUs.
+# 32k context needs ~1.5 GiB KV/seq: 0.8 leaves too little, 0.9 gives ~3.9 GiB
+# headroom. If shared-box pressure blocks 0.9, drop max_model_len to 12288 --
+# do NOT lower util below ~0.85 (cannot serve 32k on 24 GiB cards).
 MODEL_GPU_UTIL[qwen3-vl-30b]=0.9
 MODEL_MIN_FREE_MB[qwen3-vl-30b]=18000
 
@@ -188,15 +180,10 @@ MODEL_TP_SIZE[qwen3-vl-4b]=2
 MODEL_GPU_UTIL[qwen3-vl-4b]=0.9
 MODEL_MIN_FREE_MB[qwen3-vl-4b]=8000
 
-# Audio(+vision) model, bf16 Instruct. The -FP8 checkpoint is NOT servable on
-# this box (4x3090/Ampere + vllm 0.19.0): TP=2 -> Marlin shard 576 % block_k
-# 128; PP=2 auto -> Marlin tile size_n 4304 % 64; PP=2 triton -> quant scheme
-# unsupported; PP=2 cutlass -> disabled on SM86. bf16 needs TP=4 (~15GB
-# weights/card). OOM note: 16-way concurrent AUDIO prefill spikes activations;
-# keep util <= 0.75-0.80 or raise it only with audio-batch caps.
-# 11-16 (R1.D1.1 audio arm): engine sem_map / timing replay fire one-shot
-# gathers (client semaphore 20) -- the audio chunk-8 recipe is enforced
-# SERVER-SIDE via max-num-seqs 8 so any client concurrency is safe.
+# Audio(+vision), bf16, TP4 (~15 GiB weights/card). The -FP8 checkpoint is
+# unservable on this box (4x3090 + vllm 0.19.0; 4 backend rejections, evidence
+# in R1.D1.1 journal). Audio prefill spikes activations: keep util 0.75 and
+# cap batches server-side (max-num-seqs 8) so any client concurrency is safe.
 MODEL_PATHS[qwen3-omni-30b]="/ssd_data/models/Qwen3-Omni-30B-A3B-Instruct"
 MODEL_PORTS[qwen3-omni-30b]=8008
 MODEL_MAX_LEN[qwen3-omni-30b]=32768
@@ -205,20 +192,25 @@ MODEL_GPU_UTIL[qwen3-omni-30b]=0.75
 MODEL_MIN_FREE_MB[qwen3-omni-30b]=18000
 MODEL_EXTRA_ARGS[qwen3-omni-30b]="--max-num-seqs 8"
 
-# Community AWQ W4A16 quant of the omni model (cyankiwi/Qwen3-Omni-30B-
-# A3B-Instruct-AWQ-4bit; tower/talker left bf16, thinker-only AWQ -> TP2
-# fits ~13.8 GiB/card). Same audio OOM recipe as bf16: util 0.75 +
-# server-side max-num-seqs 8.
+# Community AWQ W4A16 quant (cyankiwi), thinker-only -> TP2 ~13.8 GiB/card.
+# Same audio recipe as bf16: util 0.75 + max-num-seqs 8.
 MODEL_PATHS[qwen3-omni-30b-awq]="/ssd_data/models/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit"
 MODEL_PORTS[qwen3-omni-30b-awq]=8009
 MODEL_MAX_LEN[qwen3-omni-30b-awq]=32768
 MODEL_TP_SIZE[qwen3-omni-30b-awq]=2
 MODEL_GPU_UTIL[qwen3-omni-30b-awq]=0.75
-# min-free 18000 = util 0.75 x 24576 MiB (18.4G) needs a card that free or
-# better, else selection passes and vllm dies at init_device (the fp8 death
-# mode documented above); matches the bf16 sibling entry.
 MODEL_MIN_FREE_MB[qwen3-omni-30b-awq]=18000
 MODEL_EXTRA_ARGS[qwen3-omni-30b-awq]="--max-num-seqs 8"
+
+# Community AWQ W4A16 quant (jart25), 27.6 GiB -> TP2 ~14 GiB/card; 2-GPU
+# deployability UNVERIFIED (test queued after reruns).
+MODEL_PATHS[qwen3-omni-30b-w4a16]="/ssd_data/models/Qwen3-Omni-30B-A3B-Instruct-AWQ-W4A16"
+MODEL_PORTS[qwen3-omni-30b-w4a16]=8009
+MODEL_MAX_LEN[qwen3-omni-30b-w4a16]=32768
+MODEL_TP_SIZE[qwen3-omni-30b-w4a16]=2
+MODEL_GPU_UTIL[qwen3-omni-30b-w4a16]=0.75
+MODEL_MIN_FREE_MB[qwen3-omni-30b-w4a16]=18000
+MODEL_EXTRA_ARGS[qwen3-omni-30b-w4a16]="--max-num-seqs 8"
 
 session_name() {
     local model_key=$1
@@ -364,8 +356,7 @@ select_gpu_slots() {
     echo "${chosen[*]}"
 }
 
-# Returns 1 (does not exit) so callers -- notably swap_model -- can run their
-# own failure accounting before exiting.
+# Returns 1 (not exit) so swap_model can do its own failure accounting.
 ensure_model_exists() {
     local model_key=$1
     local model_path=${MODEL_PATHS[$model_key]}
@@ -424,12 +415,10 @@ start_model() {
     require_cmd lsof
     require_cmd nvidia-smi
 
-    # Failure paths below RETURN 1 (not exit): swap_model must survive them
-    # to write its timing row (status=load-failed) before exiting.
+    # Failure paths RETURN 1 (not exit): swap_model must survive them to write
+    # its timing row before exiting.
     ensure_model_exists "$model_key" || return 1
 
-    # Kill the previous hosting session for the same model first, then verify
-    # the contract port is actually free (hard fail -- see require_port_free).
     stop_model "$model_key" || true
     wait_for_port_free "$port" 30 || true
     require_port_free "$port" || return 1
@@ -449,9 +438,8 @@ start_model() {
         read -ra extra_args <<< "${MODEL_EXTRA_ARGS[$model_key]}"
         cmd+=("${extra_args[@]}")
     fi
-    # Shared-box accommodation: skip CUDA-graph capture (enforce eager) so a TP
-    # shard on a fragmented/contended GPU does not fault during graph capture.
-    # Env-gated (SERVEM_EAGER=1); identical model outputs (only ~10-20% slower).
+    # Shared-box: skip CUDA-graph capture so a TP shard on a contended GPU
+    # does not fault during capture. Identical outputs, ~10-20% slower.
     if [[ "${SERVEM_EAGER:-0}" == "1" ]]; then
         cmd+=(--enforce-eager)
     fi
@@ -462,8 +450,7 @@ start_model() {
     for ((i=1; i<${#cmd[@]}; i++)); do
         printf -v launch_cmd '%s%q ' "$launch_cmd" "${cmd[$i]}"
     done
-    # Persist server output: a silently-dead tmux session otherwise leaves no
-    # trace of the crash.
+    # Persist server output: a dead tmux session otherwise leaves no crash trace.
     printf -v launch_cmd '%s >> %q 2>&1' "$launch_cmd" "/tmp/servem-${model_key}.log"
 
     print_info "Starting model in tmux session: $session"
@@ -483,15 +470,10 @@ start_model() {
     print_info "API: http://localhost:$port/v1"
 }
 
-# Coarse-grained serving swap -- stop ALL of OUR vllm-* sessions, then start
-# MODEL -- with two-segment wall-clock timing:
-#   evict segment = swap issued -> all our tmux sessions gone
-#   load  segment = start issued -> HTTP /v1/models ready
-# Timing rows are appended (never rewritten) to $SERVEM_SWAP_LOG -- a
-# NEUTRAL default (/tmp/servem-swap.log); experiments that need a ledger set
-# SERVEM_SWAP_LOG themselves (R1.D3.1 used
-# revision/exp/R1.D3.1/2-batch-run/swap_raw.log). The already-serving
-# short-circuit records a zero-cost row without evicting.
+# Coarse-grained serving swap: stop ALL our vllm-* sessions, then start MODEL.
+# Two-segment wall-clock (evict = swap->sessions gone; load = start->HTTP
+# ready) appended to $SERVEM_SWAP_LOG; /tmp default is neutral, experiments
+# that need a ledger set it themselves.
 our_vllm_sessions() {
     tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^vllm-' || true
 }
@@ -501,8 +483,7 @@ swap_model() {
     local raw_log="${SERVEM_SWAP_LOG:-/tmp/servem-swap.log}"
     local evict0 evict1 load0 load1 stopped="" status=ok
 
-    # Short-circuit: target already served and healthy -> record and return.
-    # (swap semantics = "ensure MODEL is served"; no pointless evict+reload)
+    # Short-circuit: swap semantics = "ensure MODEL is served".
     local port="${MODEL_PORTS[$model_key]:-}"
     if [[ -n "$port" && -f "$HOST_STATE_DIR/${model_key}.env" ]] \
         && tmux has-session -t "vllm-$model_key" 2>/dev/null \
@@ -517,8 +498,7 @@ swap_model() {
     fi
 
     evict0=$(date +%s.%N)
-    # Stop every model we host (state files are the ground truth for "ours"),
-    # then sweep any orphan vllm-* sessions by prefix.
+    # State files are the ground truth for "ours"; then sweep orphans by prefix.
     local state_dir="$HOST_STATE_DIR"
     local f key
     for f in "$state_dir"/*.env; do
