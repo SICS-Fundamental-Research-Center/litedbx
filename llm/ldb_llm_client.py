@@ -132,6 +132,7 @@ def _is_retryable(exc: Exception) -> bool:
             "RateLimit",
             "ServiceUnavailable",
             "Overloaded",
+            "Retry",  # tenacity.RetryError wrapping a retryable inner exc
         )
     )
 
@@ -166,12 +167,12 @@ def _encode_image_adaptive(file_path: Path):
         w, h = img.size
         pixels = w * h
 
-        # ---- Case 1: small image -> send original ----
+        # small image -> send original
         if pixels <= MAX_PIXELS:
             with file_path.open("rb") as f:
                 return base64.b64encode(f.read()).decode("utf-8")
 
-        # ---- Case 2: large image -> resize ----
+        # large image -> resize
         img.thumbnail((MAX_DIM, MAX_DIM), Image.Resampling.LANCZOS)
 
         buffer = io.BytesIO()
