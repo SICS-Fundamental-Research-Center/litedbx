@@ -35,7 +35,7 @@ class LdbEngine:
         )
 
     @staticmethod
-    def _log_phase_durations(durations: dict[str, float]) -> None:
+    def _log_phase_durations(durations: dict[str, Any]) -> None:
         """Log measured phase durations."""
         phases = [
             "preprocessing",
@@ -57,6 +57,14 @@ class LdbEngine:
                 phase,
                 durations[phase],
             )
+        # serving-swap accounting keys (auto_swap): net/overlap/probe
+        for key in sorted(durations):
+            if key in phases or not isinstance(durations[key], (int, float)):
+                continue
+            if "swap" in key or "net_s" in key or "probe" in key:
+                logger.info(
+                    "Duration for %s: %.2f seconds", key, durations[key]
+                )
 
     async def execute(
         self, 
@@ -70,6 +78,7 @@ class LdbEngine:
             phase_durations,
             probe_snapshot,
             retrieved_results,
+            retrieved_tables,
         ) = await self.workload.run_partial_evaluation(debug=debug)
         self._log_phase_durations(phase_durations)
 
@@ -127,12 +136,25 @@ class LdbEngine:
             )
 
         (
-            _,
+            rerun,
             incremental_results,
         ) = await self.workload.run_incremental_evaluation(
             error_certificates=error_certificates
         )
         self.workload.report_results(execution_trace, incremental_results)
+
+        # Unified answer layer (user order 2026-11-19): the engine owns
+        # assemble + evaluate. Tables come from partial eval, updated to
+        # the final accumulated retrieval state when inc eval ran
+        # (rerun=True leaves the partial tables -- inc returned no valid
+        # results); SemUCQ answers are assembled and scored once, at the
+        # end, over that final state.
+        retrieved_tables = self.workload.final_retrieved_tables(
+            retrieved_tables=retrieved_tables,
+            rerun=rerun,
+            incremental_results=incremental_results,
+        )
+        ucq_results = self.workload.evaluate_ucqs(retrieved_tables)
 
         # Report the basic info for the first step.
         for q_name in self.workload.queries:
@@ -157,11 +179,21 @@ class LdbEngine:
                     error_bounds[q_name],
                 )
 
+        for name, res in ucq_results.items():
+            metrics = res["metrics"]
+            logger.info(
+                "SemUCQ: %s, answer kind: %s, quality: %s",
+                name,
+                metrics.get("kind"),
+                metrics.get("f1", metrics.get("quality")),
+            )
 
         return self.workload.build_result_payload(
             execution_trace=execution_trace,
             phase_durations=phase_durations,
             incremental_results=incremental_results,
+            retrieved_tables=retrieved_tables,
+            ucq_results=ucq_results,
         )
 
     def load_error_certificates_log(
