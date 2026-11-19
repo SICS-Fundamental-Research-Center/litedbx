@@ -39,7 +39,7 @@ help:
 	@echo "  make clean_cache DATASET=mmqa QUERY_ID=Q6a DRY_RUN=false"
 
 code-stat:
-	../cloc/cloc . --exclude-dir=files --exclude-ext=csv,json,md
+	../cloc/cloc . --exclude-dir=files,exp,paper,revision,archived --exclude-ext=csv,json,md
 
 lint:
 	@if [ -z "$(LINT_FILES)" ]; then \
