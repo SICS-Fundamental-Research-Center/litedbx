@@ -60,6 +60,9 @@ class AutoSwapManager:
         self.enabled = os.environ.get("LDB_AUTO_SWAP", "1") != "0"
         # swap wall-clock intervals (epoch seconds), newest last
         self.intervals: list[dict] = []
+        # cumulative time spent probing /models (ensure overhead when no
+        # swap fires; swap time itself lives in `intervals`)
+        self.probe_seconds = 0.0
         self._path_to_key = parse_servem_keys(self.servem)
 
     @staticmethod
@@ -94,7 +97,10 @@ class AutoSwapManager:
         if not str(api_base).startswith("http://localhost"):
             return True
         expect = model.split("//", 1)[-1].lstrip("/")
-        if self._serves(self.probe(api_base), expect):
+        t0 = time.time()
+        served = self.probe(api_base)
+        self.probe_seconds += time.time() - t0
+        if self._serves(served, expect):
             return True
         key = self._path_to_key.get(expect)
         if key is None:
