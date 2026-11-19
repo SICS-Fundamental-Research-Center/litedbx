@@ -116,17 +116,27 @@ PARAPHRASES = {
 
 ALL_QUERIES = dict(mmqa.SEM_QUERIES)
 for _p, (_base, _succ, _prompt) in PARAPHRASES.items():
-    _baseq = mmqa.SEM_QUERIES[_base]
-    ALL_QUERIES[_p] = SemCQ(
-        selected=_baseq.selected,
-        Sigma=list(_baseq.Sigma),
-        Ps=[SemPredicate(
-            field=_baseq.Ps[0].field,
-            modality=cast(Modality, _baseq.Ps[0].modality),
-            succ_cond=_succ,
-            prompt=_prompt,
-        )],
+    _baseq = mmqa.branch(_base)
+    ALL_QUERIES[_p] = mmqa.self_ucq(
+        _p,
+        SemCQ(
+            selected=_baseq.selected,
+            Sigma=list(_baseq.Sigma),
+            Ps=[SemPredicate(
+                field=_baseq.Ps[0].field,
+                modality=cast(Modality, _baseq.Ps[0].modality),
+                succ_cond=_succ,
+                prompt=_prompt,
+            )],
+        ),
+        mmqa.DATA_MAP[_base] / "ground_truth" / f"{_p}.csv",
     )
+
+
+def _branch(q: str) -> SemCQ:
+    """Engine branch of a (possibly paraphrased) mmqa query -- every
+    entry of ALL_QUERIES is a self-named single-branch UCQ."""
+    return ALL_QUERIES[q].queries[q]
 
 # "Q3b" in the user's construction is a typo for Q3c (mmqa.py has no Q3b).
 DRIFT_GROUPS = {
@@ -179,8 +189,8 @@ def aligned_with_first(
     """Relate the new query to the first: same / contained / neither."""
     prompt = (
         "You are a query-reuse expert. Compare two queries:\n"
-        f"A (new): {ALL_QUERIES[q_new].Ps[0].succ_cond}\n"
-        f"B (previous): {ALL_QUERIES[q_first].Ps[0].succ_cond}\n"
+        f"A (new): {_branch(q_new).Ps[0].succ_cond}\n"
+        f"B (previous): {_branch(q_first).Ps[0].succ_cond}\n"
         "Answer with exactly one word:\n"
         "- same: A and B ask for the same results (mere rewording).\n"
         "- contained: EVERY result of A is also a result of B (A's "
@@ -211,7 +221,7 @@ def schema_supports(
         "You are a data-reuse expert. The previous query materialized the "
         "following columns (schema):\n"
         + "\n".join(f"- {c}" for c in columns)
-        + f"\n\nNew query: {ALL_QUERIES[q_new].Ps[0].succ_cond}\n\n"
+        + f"\n\nNew query: {_branch(q_new).Ps[0].succ_cond}\n\n"
         "Can these columns ALONE support answering the new query (are all "
         "needed semantic attributes already materialized)? Return True if "
         "yes, False otherwise."
@@ -245,11 +255,11 @@ def regen_rules(client: LdbLLMClient, q_new: str, q_first: str,
         "You are an expert in query rewriting. Given the previous query's "
         "UCQ over a fixed materialized schema, rewrite it for the new query "
         "using ONLY the listed columns.\n\n"
-        f"Previous query: {ALL_QUERIES[q_first].Ps[0].succ_cond}\n"
+        f"Previous query: {_branch(q_first).Ps[0].succ_cond}\n"
         f"Previous UCQ: {sql(prev_rules)}\n\n"
         "Available columns:\n"
         + "\n".join(f"- {c}" for c in columns)
-        + f"\n\nNew query: {ALL_QUERIES[q_new].Ps[0].succ_cond}\n\n"
+        + f"\n\nNew query: {_branch(q_new).Ps[0].succ_cond}\n\n"
         "Return the new UCQ: a list of conjunctions (OR-ed together); each "
         "condition is (feature, op, threshold) with op in {'<=', '>'}. "
         "Every feature MUST be one of the listed columns."
@@ -307,9 +317,15 @@ async def run_seqr(q: str, args, sem: SemCQ | None = None,
     """Full SEQR run for one query; captures rewrite + view + metrics."""
     with open(mmqa.CURRENT_DIR / "config.yaml") as f:
         config = yaml.safe_load(f)
+    query = sem or ALL_QUERIES[q]
+    if isinstance(query, SemCQ):
+        # sigma_seqr hands in a raw (Sigma-augmented) branch SemCQ --
+        # wrap it to satisfy the all-UCQ workload contract.
+        query = mmqa.self_ucq(
+            q, query, data_dir_of(q) / "ground_truth" / f"{q}.csv")
     workload = LdbWorkload(
         data_dir=str(data_dir_of(q)), scenario="mmqa",
-        queries={q: sem or ALL_QUERIES[q]}, config=config,
+        queries={q: query}, config=config,
     )
     workload.inject_exp_setting(exp_group=args.exp_group,
                                 exp_patch=_override(args))
@@ -341,7 +357,7 @@ async def run_seqr(q: str, args, sem: SemCQ | None = None,
         )
     best = trace[max(trace, key=int)][q]
     trans = {k: v for k, v in best["trans_eval"].items()
-             if k != "retrieved_data"}
+             if k not in ("retrieved_data", "retrieved_frame")}
     state = {
         "q": q,
         "rules": best["rules"],
@@ -441,7 +457,7 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
             if journal:
                 row["rules"] = rules
             t0 = time.time()
-            m = eval_rules(view, rules, ALL_QUERIES[q], q)
+            m = eval_rules(view, rules, _branch(q), q)
             # bypass eval is pure local compute (no LLM) but not free —
             # measure it instead of journaling the 0.0 init value
             row["time_s"] += time.time() - t0
@@ -461,7 +477,7 @@ async def run_pair(group: str, pair: list[str], args, client) -> list[dict]:
             view (sigma_seqr)."""
             logger.info("Query %s contained in %s; SEQR with prev-"
                         "rule Sigma.", q, first)
-            sem = deepcopy(ALL_QUERIES[q])
+            sem = deepcopy(_branch(q))
             sem.Sigma += [Predicate(c, op, t)
                           for c, t, op in prev_rules[0]]
             row["added_sigma"] = prev_rules[0]
