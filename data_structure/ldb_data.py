@@ -10,6 +10,7 @@ import pandas as pd
 import yaml
 
 from llm import LdbLLMClient
+from llm.auto_swap import MODALITY_RANK
 
 from .llm_resp_templates import (
     BooleanFeatureResponse,
@@ -206,6 +207,15 @@ class LdbData:
             for spec in enriched_features
             if spec.target_col not in current_external_features
         ]
+        # Group annotation work by modality (user order 2026-11-18): a
+        # query's per-modality materialization runs back-to-back so each
+        # serving layout serves a whole group -- at most one swap between
+        # groups. Text last (prefilter/rewrite are Text). Stable sort
+        # keeps the original within-modality order.
+        features_to_add.sort(
+            key=lambda spec: MODALITY_RANK.get(
+                spec.source_modality, len(MODALITY_RANK))
+        )
 
         # Remove features that are no longer in the enriched feature space
         self.df.drop(columns=features_to_remove, inplace=True)

@@ -24,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import litellm
 
+from llm.auto_swap import AutoSwapManager
+
 litellm.telemetry = False
 
 load_dotenv()
@@ -205,6 +207,11 @@ class LdbLLMClient:
         with open(Path(__file__).parent / "config.yaml") as f:
             self.config = yaml.safe_load(f)
 
+        # Engine-initiated serving swap (user order 2026-11-18): LOCAL
+        # call batches ensure their endpoint first; the manager records
+        # swap intervals for run-timing exclusion.
+        self.auto_swap = AutoSwapManager()
+
         self.max_retries = self.config.get("max_retries")
         self.parallelism = self.config.get("parallelism")
         self.sem = asyncio.Semaphore(self.parallelism)
@@ -273,6 +280,9 @@ class LdbLLMClient:
             data_items = flattened_data_items
             data_items_metadata = flattened_metadata
 
+        if not is_remote:
+            self._ensure_local_serving(invoke_modality, model_id)
+
         params, cost_params, mode = self._construct_prompt_params(
             is_remote=is_remote,
             modality=invoke_modality,
@@ -316,15 +326,22 @@ class LdbLLMClient:
                 original_indices.append(original_idx)
 
         # Create tasks for all expanded items
+        invoke_modality = modality
+        if modality == "VectorText":
+            invoke_modality = "Text"
+        if modality == "VectorImage":
+            invoke_modality = "Image"
+        if modality == "VectorAudio":
+            invoke_modality = "Audio"
+
+        if not is_remote:
+            # blocking probe/swap off the event loop
+            await asyncio.to_thread(
+                self._ensure_local_serving, invoke_modality, model_id
+            )
+
         tasks = []
         for exp_idx, exp_data_item in enumerate(expanded_items):
-            invoke_modality = modality
-            if modality == "VectorText":
-                invoke_modality = "Text"
-            if modality == "VectorImage":
-                invoke_modality = "Image"
-            if modality == "VectorAudio":
-                invoke_modality = "Audio"
             params, cost_params, mode = self._construct_prompt_params(
                 is_remote=is_remote,
                 modality=invoke_modality,
@@ -486,6 +503,19 @@ class LdbLLMClient:
             }
 
         return dict(lm_params, **self.kwargs), cost_params, mode
+
+    def _ensure_local_serving(
+        self, modality: str, model_index: int | None
+    ) -> None:
+        """Auto-swap guard for LOCAL calls (user order 2026-11-18): make
+        the modality's endpoint serve its configured model before we
+        batch; swap via servem.sh when it doesn't. No-op for remote
+        entries patched into LOCAL_MODELS (their api_base is not
+        localhost) and under LDB_AUTO_SWAP=0."""
+        if not self.auto_swap.enabled:
+            return
+        entry = self.config["LOCAL_MODELS"][modality][model_index or 0]
+        self.auto_swap.ensure(entry["model"], entry["api_base"])
 
     def _invoke(
         self,
