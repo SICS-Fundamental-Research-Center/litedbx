@@ -13,7 +13,7 @@ from .llm_resp_templates import (
     PopulationSpecs,
     StringListFeatureResponse,
 )
-from .sem_query import Predicate, SemCQ, SemPredicate
+from .sem_query import Predicate, SemCQ, SemPredicate, SemUCQ
 from .sigma_satisfied_data import SigmaRecord, SigmaSatisfiedData
 
 __all__ = [
@@ -31,6 +31,7 @@ __all__ = [
     "Predicate",
     "SemCQ",
     "SemPredicate",
+    "SemUCQ",
     "SigmaRecord",
     "SigmaSatisfiedData",
     "StringListFeatureResponse",
