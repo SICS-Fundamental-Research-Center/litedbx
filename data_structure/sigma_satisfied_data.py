@@ -259,7 +259,11 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         pred_labels: list[pd.Series],
     ) -> dict:
         """Evaluate predicted labels against query ground truth."""
-        ground_truth, retrieved_data = self._collect_quality_sets(
+        (
+            ground_truth,
+            retrieved_data,
+            retrieved_frame,
+        ) = self._collect_quality_sets(
             q_name=q_name,
             selected_cols=selected_cols,
             stream_idx=stream_idx,
@@ -280,6 +284,12 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         metrics = _quality_metrics(q_name, stream_idx, tp, fp, fn, omega)
         metrics["omega"] = omega
         metrics["retrieved_data"] = retrieved_data
+        # One row per retrieved tuple -- the same raw equality the set uses,
+        # on the same slices, so len(frame) == len(retrieved_data) holds by
+        # construction. Consumers trim to the universe schema downstream.
+        metrics["retrieved_frame"] = retrieved_frame.drop_duplicates(
+            subset=selected_cols
+        ).reset_index(drop=True)
 
         logger.info(
             "Query '%s' quality metrics in stream-%s: "
@@ -376,16 +386,21 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         selected_cols: list[str],
         stream_idx: int,
         pred_labels: list[pd.Series],
-    ) -> tuple[set[tuple], set[tuple]]:
-        """Collect ground-truth and retrieved row keys for quality metrics."""
+    ) -> tuple[set[tuple], set[tuple], pd.DataFrame]:
+        """Collect ground-truth/retrieved row keys and the retrieved frame."""
         if len(pred_labels) != stream_idx + 1:
             raise ValueError(
                 f"The number of predicted label series ({len(pred_labels)}) "
                 f"does not match the number of streams ({stream_idx + 1})."
             )
         ground_truth, retrieved_data = set(), set()
+        retrieved_frames: list[pd.DataFrame] = []
         for sid in range(stream_idx + 1):
-            stream_ground_truth, stream_retrieved = self._stream_quality_sets(
+            (
+                stream_ground_truth,
+                stream_retrieved,
+                stream_frame,
+            ) = self._stream_quality_sets(
                 q_name=q_name,
                 selected_cols=selected_cols,
                 stream_idx=sid,
@@ -393,7 +408,9 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
             )
             ground_truth.update(stream_ground_truth)
             retrieved_data.update(stream_retrieved)
-        return ground_truth, retrieved_data
+            retrieved_frames.append(stream_frame)
+        retrieved_frame = pd.concat(retrieved_frames, ignore_index=True)
+        return ground_truth, retrieved_data, retrieved_frame
 
     def _stream_quality_sets(
         self,
@@ -401,8 +418,8 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         selected_cols: list[str],
         stream_idx: int,
         pred_labels: pd.Series,
-    ) -> tuple[set[tuple], set[tuple]]:
-        """Collect quality row keys for one stream."""
+    ) -> tuple[set[tuple], set[tuple], pd.DataFrame]:
+        """Collect quality row keys and the retrieved frame for one stream."""
         ss_data = self[stream_idx][q_name]
         ss_df = ss_data["ldb_data"].df
 
@@ -423,6 +440,19 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
         ground_truth_labels = ss_data["labels"].astype(bool).to_numpy()
         ground_truth = _row_keys(ss_df.iloc[ground_truth_labels], selected_cols)
         retrieved_data = _row_keys(ss_df.iloc[retrieved_labels], selected_cols)
+        # The retrieved rows themselves, alongside the keys: predicted
+        # positives from the remaining candidate frame plus the annotated
+        # positives (which bypass retrieval and are output directly). Same
+        # slices the two key sets above come from, so frame and sets are
+        # consistent by construction (user order 2026-11-19: runs return
+        # DataFrames; this replaces the retired export_tables join).
+        retrieved_frame = pd.concat(
+            [
+                ss_df.iloc[retrieved_labels],
+                ss_data["selected_data"],
+            ],
+            ignore_index=True,
+        )
 
         selected_keys = _selected_quality_keys(ss_data, selected_cols)
         ground_truth.update(selected_keys)
@@ -435,7 +465,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
                 stream_idx=stream_idx,
             )
         )
-        return ground_truth, retrieved_data
+        return ground_truth, retrieved_data, retrieved_frame
 
     def _init_query_record(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
