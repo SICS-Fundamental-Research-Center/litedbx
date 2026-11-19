@@ -4,6 +4,7 @@
 
 import copy
 import logging
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import time
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import hypergeom
 
-from data_structure import LdbDataManager, SemCQ
+from data_structure import LdbDataManager, SemCQ, SemUCQ
 from data_structure.annotation_sampling import AnnotationSelection
 from data_structure.ldb_data import LdbData
 from llm import LdbLLMClient
@@ -23,6 +24,7 @@ from workloads.core.feature_pipeline import FeaturePipeline
 from workloads.core.preprocessing import Preprocessing
 from workloads.core.query_execution import QueryExecution
 from workloads.core.reporting import Reporting
+from workloads.core.ucq_exec import flatten_sem_queries
 from workloads.utils import (
     apply_rules,
     encode_features,
@@ -71,14 +73,21 @@ class LdbWorkload:
         self,
         data_dir: str,
         scenario: str,
-        queries: dict[str, SemCQ],
+        queries: dict[str, SemUCQ],
         config: dict,
     ) -> None:
         self.llm_client = LdbLLMClient()
 
         self.data_dir = data_dir
         self.scenario = scenario
-        self.queries = queries
+        # All-UCQ workload contract (plain filter queries arrive wrapped
+        # in self-named single-branch UCQs): flatten to engine-level
+        # branch SemCQs here; the engine and every downstream component
+        # only ever see the flat dict, keyed by engine query name.
+        flat_queries, ucq_map = flatten_sem_queries(queries)
+        self.queries: dict[str, SemCQ] = flat_queries
+        self.ucq_map: dict[str, list[str]] = ucq_map
+        self.ucqs: dict[str, SemUCQ] = dict(queries)
         validate_workload_config(config)
         self.config = dict(config)
         self.enable_cache = True
@@ -191,17 +200,32 @@ class LdbWorkload:
         self, debug: bool = False
     ) -> tuple[
         dict,
-        dict[str, float],
+        dict[str, Any],
         LiteDBXRuntimeSnapshot,
         dict[str, set[tuple]],
+        dict[str, pd.DataFrame],
     ]:
-        durations: dict[str, float] = {}
+        # float phase seconds + model-swap accounting (list intervals)
+        durations: dict[str, Any] = {}
+        # epoch bounds of each timed phase, for swap-interval exclusion
+        # (user order 2026-11-18: engine-initiated model swaps are
+        # servicing overhead, not query time)
+        phase_bounds: dict[str, tuple[float, float]] = {}
 
         phase_start = time()
         self.data_manager.init_data_stream()
         self.data_manager.init_sigma_satisfied_data()
-        self._preprocessing.refine_sigma_satisfied_data()
+        if os.environ.get("LDB_DISABLE_PREFILTER") == "1":
+            # R3.D13 variant run: skip the LLM prefilter UCQ stage and mirror
+            # the zero-suggestion downstream state (no base features eligible)
+            # so schema columns stay out of rewrite candidates — identical to
+            # queries where the prefilter suggests nothing.
+            for q_name in self.queries:
+                self.data_manager.relevant_base_features[q_name] = []
+        else:
+            self._preprocessing.refine_sigma_satisfied_data()
         durations["preprocessing"] = time() - phase_start
+        phase_bounds["preprocessing"] = (phase_start, time())
 
         phase_start = time()
         step_start = phase_start
@@ -239,11 +263,13 @@ class LdbWorkload:
         )
         step_end = time()
         durations["coreset_feature_space"] = step_end - step_start
+        phase_bounds["coreset_feature_space"] = (step_start, step_end)
 
         step_start = step_end
         await self._feature_pipeline.sync_coreset_features(tag="init")
         step_end = time()
         durations["coreset_sync"] = step_end - step_start
+        phase_bounds["coreset_sync"] = (step_start, step_end)
 
         step_start = step_end
         await self._feature_pipeline.rank_and_trim_feature_space()
@@ -261,6 +287,7 @@ class LdbWorkload:
         step_start = phase_start
         (
             retrieved_results,
+            retrieved_frames,
             execution_trace,
         ) = await self._query_execution.execute_queries(
             enable_rewrite=self.enable_rewrite,
@@ -270,8 +297,85 @@ class LdbWorkload:
         step_end = time()
         durations["query_rewrite"] = step_end - step_start
         durations["query_total"] = step_end - phase_start
+        phase_bounds["query_rewrite"] = (step_start, step_end)
+        phase_bounds["query_total"] = (phase_start, step_end)
 
-        return execution_trace, durations, probe_snapshot, retrieved_results
+        # Swap-interval exclusion (user order 2026-11-18): gross stays
+        # keyed as before; each phase overlapped by an engine-initiated
+        # servem.sh swap additionally reports net + overlap, and the
+        # swap intervals + probe overhead ride along for the run summary.
+        swap_mgr = getattr(self.llm_client, "auto_swap", None)
+        if swap_mgr is not None:
+            if getattr(swap_mgr, "probe_seconds", 0.0):
+                durations["ensure_probe_total_s"] = round(
+                    swap_mgr.probe_seconds, 3)
+            if swap_mgr.intervals:
+                durations["model_swap_total_s"] = swap_mgr.total_seconds()
+                durations["model_swap_intervals"] = list(swap_mgr.intervals)
+                for phase, (t0, t1) in phase_bounds.items():
+                    overlap = swap_mgr.overlap_seconds(t0, t1)
+                    if overlap > 0:
+                        durations[f"{phase}__swap_overlap_s"] = round(
+                            overlap, 3)
+                        durations[f"{phase}__net_s"] = round(
+                            durations[phase] - overlap, 3)
+
+        return (
+            execution_trace,
+            durations,
+            probe_snapshot,
+            retrieved_results,
+            retrieved_frames,
+        )
+
+    def final_retrieved_tables(
+        self,
+        retrieved_tables: dict[str, pd.DataFrame],
+        rerun: bool,
+        incremental_results: list,
+    ) -> dict[str, pd.DataFrame]:
+        """Replace the partial-eval tables when incremental evaluation ran.
+
+        The answer basis is the FINAL accumulated retrieval state: the
+        last inc round's trans_eval frames aggregate streams 0..k (see
+        SigmaSatisfiedData._collect_quality_sets), so the last entry
+        wins. ``rerun=True`` means a step demanded full re-execution and
+        incremental_processing returned no valid results ([]); the
+        partial-eval tables stand. Frames carry whatever columns the
+        per-query Sigma frames have (base + enriched llm_label_*); all
+        consumers are name-based, so no schema normalization happens
+        (user order 2026-11-19).
+        """
+        if rerun or not incremental_results:
+            return retrieved_tables
+        last_round = incremental_results[-1]["eval_results"]
+        return {
+            q_name: last_round[q_name]["trans_eval"]["retrieved_frame"]
+            for q_name in self.queries
+        }
+
+    def evaluate_ucqs(
+        self, tables: dict[str, pd.DataFrame]
+    ) -> dict[str, dict[str, Any]]:
+        """Assemble and score every SemUCQ answer against its gt_path."""
+        results: dict[str, dict[str, Any]] = {}
+        for name, ucq in self.ucqs.items():
+            missing = [b for b in ucq.queries if b not in tables]
+            if missing:
+                raise KeyError(
+                    f"SemUCQ {name!r} needs branch tables {missing} that "
+                    "were not exported."
+                )
+            answer = ucq.assembler({b: tables[b] for b in ucq.queries})
+            metrics = ucq.evaluator(answer, ucq.gt_path)
+            logger.info(
+                "SemUCQ '%s' answer evaluated: kind=%s quality=%s",
+                name,
+                metrics.get("kind"),
+                metrics.get("quality", metrics.get("f1")),
+            )
+            results[name] = {"answer": answer, "metrics": metrics}
+        return results
 
     @staticmethod
     def error_bound(B: float, pi: float) -> float:
@@ -339,6 +443,7 @@ class LdbWorkload:
             probe_snapshot.coreset_maintainer.expand_coresets(inc_round=0)
         (
             probe_retrieved_data,
+            _,  # retrieved frames: unused, certificate math is set-based
             _,
         ) = await probe_snapshot.query_execution.execute_queries(
             enable_rewrite=self.enable_rewrite,
@@ -644,10 +749,12 @@ class LdbWorkload:
     def build_result_payload(
         self,
         execution_trace: dict[str, Any],
-        phase_durations: dict[str, float],
+        phase_durations: dict[str, Any],
         incremental_results: list[Any],
+        retrieved_tables: dict[str, pd.DataFrame] | None = None,
+        ucq_results: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "scenario": self.scenario,
             "queries": list(self.queries.keys()),
             "dynamic_setting": self.dynamic_setting,
@@ -656,6 +763,11 @@ class LdbWorkload:
             "incremental_results": incremental_results,
             "usage_statistics": self.usage_statistics[0],
         }
+        if retrieved_tables is not None:
+            payload["retrieved_tables"] = retrieved_tables
+        if ucq_results is not None:
+            payload["ucq_results"] = ucq_results
+        return payload
 
     def inject_exp_setting(self, exp_group: str, exp_patch: dict) -> None:
         assert exp_group != "", (
