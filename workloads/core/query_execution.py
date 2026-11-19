@@ -7,7 +7,7 @@
 
 import logging
 import math
-from time import time
+from time import perf_counter, time
 from typing import Any
 
 import numpy as np
@@ -74,13 +74,13 @@ class QueryExecution:
         enable_rewrite: bool,
         enable_enrich: bool,
         debug: bool = False,
-    ) -> tuple[dict[str, set[tuple]], dict]:
+    ) -> tuple[dict[str, set[tuple]], dict[str, pd.DataFrame], dict]:
         if not enable_rewrite:
             await self._execute_without_rewrite(debug=debug)
-            return {}, {}
+            return {}, {}, {}
         if not enable_enrich:
             self._execute_without_enrichment(debug=debug)
-            return {}, {}
+            return {}, {}, {}
         best_result, execution_trace = self._rewrite_and_execute_query(
             debug=debug
         )
@@ -88,8 +88,12 @@ class QueryExecution:
             q_name: best_result["trans_eval"][q_name]["retrieved_data"] \
                 for q_name in self.queries
         }
+        retrieved_frames = {
+            q_name: best_result["trans_eval"][q_name]["retrieved_frame"] \
+                for q_name in self.queries
+        }
 
-        return retrieved_data, execution_trace
+        return retrieved_data, retrieved_frames, execution_trace
 
     def _rewrite_and_execute_query(
         self, debug: bool = False
@@ -108,12 +112,25 @@ class QueryExecution:
         rules_trace = {}
         for index, candidate in enumerate(candidates):
             execution_results = self._init_execution_results()
+            execution_results["candidate_eval_time"] = {}
             for q_name in self.queries:
+                candidate_started_at = perf_counter()
                 query_results = self._execute_rewrite_candidate(
                     q_name=q_name,
                     candidate=candidate,
                     rules_trace=rules_trace,
                     debug=debug,
+                )
+                candidate_elapsed_time = perf_counter() - candidate_started_at
+                execution_results["candidate_eval_time"][q_name] = (
+                    candidate_elapsed_time
+                )
+                logger.info(
+                    "Rewrite candidate %s for query %s completed in %.6f "
+                    "seconds.",
+                    candidate,
+                    q_name,
+                    candidate_elapsed_time,
                 )
                 self._record_execution_results(
                     execution_results, q_name, query_results
