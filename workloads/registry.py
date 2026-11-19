@@ -3,9 +3,10 @@
 from typing import Any
 
 from workloads.ldb_workload import LdbWorkload
-from workloads.scenarios import animals, ecomm, medical, mmqa, movie
+from workloads.scenarios import animals, cars, ecomm, medical, mmqa, movie
 
 WORKLOAD_FACTORIES = {
+    "cars": cars.get_workload,
     "medical": medical.get_workload,
     "movie": movie.get_workload,
     "ecomm": ecomm.get_workload,
