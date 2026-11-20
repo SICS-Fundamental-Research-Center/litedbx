@@ -14,8 +14,9 @@ top of them:
   / q7.py branch dicts):
     Q7__txt / Q7__xray / Q7__aud / Q7__skin
     Q6__xray / Q6__aud  (x-ray/audio-normal AND >=2 modalities
-    available -- mirrors the tightened DNF Sigma in q6.py; the dropped
-    single-modality patients can never satisfy Q6)
+    available within the official Q6 scope {symptoms, x-ray, audio}
+    -- mirrors the DNF Sigma in q6.py; skin never counts, and the
+    dropped single-modality patients can never satisfy Q6)
 
 Sources: data_full.csv (patient_id, age, smoking_history) left-joined
 1:1 with the answer-key label table
@@ -67,9 +68,9 @@ SETS = {
     "Q7__aud": aud_sick,
     "Q7__skin": m.skin_cancer_diagnosis == "malignant",
     "Q6__xray": (m.x_ray_diagnosis == "00_normal")
-    & ((m.audio_path != "") | (m.symptoms != "") | (m.image_path != "")),
+    & ((m.audio_path != "") | (m.symptoms != "")),
     "Q6__aud": (m.audio_diagnosis == "normal")
-    & ((m.image_path_xray != "") | (m.symptoms != "") | (m.image_path != "")),
+    & ((m.image_path_xray != "") | (m.symptoms != "")),
     "Q4__tuple": text_sick & (m.text_diagnosis == "acne"),
     "Q5__tuple": (m.smoking_history == "Current") & aud_sick & xray_sick,
 }
