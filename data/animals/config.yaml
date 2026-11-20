@@ -1,3 +1,7 @@
-base_features: []
-id_features: [City,StationID]
-foreign_keys: [ImagePath,Species]
+# R1.D3.1 animals_full universe (11-16): one row per image/recording
+# from sf_200; split path columns so per-modality predicates mask
+# naturally on rows of the other modality. Species/Animal label
+# columns stay GT-side.
+base_features: [media_type,City,StationID]
+id_features: [media_id]
+foreign_keys: [image_path,audio_path]

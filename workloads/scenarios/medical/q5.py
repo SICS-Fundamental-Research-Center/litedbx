@@ -56,11 +56,13 @@ Q5_SEMCQ = SemCQ(
     ],
 )
 
+# Branch key Q5__tuple (not "Q5"): same collision rule as Q4 -- the
+# official group-answer GT occupies the bare name.
 Q5 = SemUCQ(
-    queries={"Q5": Q5_SEMCQ},
+    queries={"Q5__tuple": Q5_SEMCQ},
     gt_path=GT_DIR / "Q5.csv",
     assembler=lambda t: pd.DataFrame(
-        {"smoking_history": ["Current"], "count": [len(t["Q5"])]}
+        {"smoking_history": ["Current"], "count": [len(t["Q5__tuple"])]}
     ),
     evaluator=lambda a, p: eval_group_rel_err(
         a, p, "smoking_history", "count"

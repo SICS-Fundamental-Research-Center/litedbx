@@ -29,11 +29,14 @@ Q4_SEMCQ = SemCQ(
     ],
 )
 
+# Branch key Q4__tuple (not "Q4"): the engine reads
+# ground_truth/{branch}.csv for labels, and the official scalar answer
+# lives in Q4.csv -- a self-named branch would collide with it.
 Q4 = SemUCQ(
-    queries={"Q4": Q4_SEMCQ},
+    queries={"Q4__tuple": Q4_SEMCQ},
     gt_path=GT_DIR / "Q4.csv",
     assembler=lambda t: pd.DataFrame(
-        {"average_acne_age": [t["Q4"]["age"].mean()]}
+        {"average_acne_age": [t["Q4__tuple"]["age"].mean()]}
     ),
     evaluator=eval_rel_err,
 )
