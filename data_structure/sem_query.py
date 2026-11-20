@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, cast
 
 import pandas as pd
 
@@ -38,11 +38,32 @@ class SemPredicate:
 
 
 class SemCQ:
-    def __init__(self, selected: list[str], Sigma: list[Predicate], Ps: list[SemPredicate]):
+    """Single semantic filter query.
+
+    ``Sigma`` is either a flat conjunction (``list[Predicate]``) or a
+    disjunction of conjunctions (``list[list[Predicate]]``) -- Sigma
+    retrieval ORs the groups and ANDs the predicates within a group
+    (see ``sigma_as_ucq`` / ``LdbData.sigma_retrieve_ucq``).
+    """
+
+    def __init__(self, selected: list[str],
+                 Sigma: list[Predicate] | list[list[Predicate]],
+                 Ps: list[SemPredicate]):
         self.selected = selected
         self.Sigma = Sigma
         self.Ps = Ps
         self.Ps_translated = []
+
+
+def sigma_as_ucq(sigma: list[Predicate] | list[list[Predicate]]) -> list[list[Predicate]]:
+    """Normalize a SemCQ Sigma to UCQ form (a list of conjunctions).
+
+    A flat Sigma is one conjunction; a nested Sigma is already
+    disjunctive and passes through unchanged.
+    """
+    if sigma and isinstance(sigma[0], list):
+        return cast(list[list[Predicate]], sigma)
+    return [cast(list[Predicate], sigma)]
 
 
 class SemUCQ:

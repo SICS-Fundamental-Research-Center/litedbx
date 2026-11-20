@@ -11,7 +11,7 @@ from llm import LdbLLMClient
 
 from .ldb_data import LdbData
 from .llm_resp_templates import PopulationSpec
-from .sem_query import Predicate, SemCQ
+from .sem_query import Predicate, SemCQ, sigma_as_ucq
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class SigmaSatisfiedData(list[dict[str, SigmaRecord]]):
                 self.apply_query_sigma_and_build_ground_truth(
                     stream_idx=stream_idx,
                     q_name=q_name,
-                    ucq=[sem_cq.Sigma],
+                    ucq=sigma_as_ucq(sem_cq.Sigma),
                     stream_data=stream_data,
                     selected_cols=sem_cq.selected,
                     complete_config=complete_config,
