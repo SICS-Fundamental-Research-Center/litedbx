@@ -1,0 +1,8 @@
+# R1.D3.1 cars engine universe at the OFFICIAL scale sf_19672
+# (seed 42, 11-18; n_avail removed 11-20 by user order -- derived
+# features never enter the base table, iron rule 2026-11-19).
+# Native columns only; judgment labels (damage_status/detailed_problem
+# /crash/fire/component_class) live GT-side, never as engine features.
+base_features: [fuel_type,transmission,year]
+id_features: [car_id,vin]
+foreign_keys: [summary,image_path,audio_path]
