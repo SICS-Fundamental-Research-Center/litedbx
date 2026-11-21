@@ -129,19 +129,20 @@ def query_trace_for_iteration(
         raise ValueError(
             f"Execution trace iteration {iter_num} must be a mapping"
         )
-    if query_name not in iter_trace:
+    # Engine traces are keyed by (flattened) SemCQ BRANCH names. A UCQ
+    # whose branch was renamed (consolidation "<ucq>__<suffix>" collision
+    # convention) or that expands to several branches traces under those
+    # keys, so resolve the requested query to every serving trace key and
+    # emit one row per key (row["query"] = the branch key). Callers that
+    # pre-flatten (branch names passed through) hit the exact match.
+    trace_keys = [query_name] if query_name in iter_trace else [
+        k for k in iter_trace if k.startswith(f"{query_name}__")]
+    if not trace_keys:
         raise ValueError(
             f"Missing query {query_name} in execution "
             f"trace iteration: {iter_num}"
         )
-
-    query_trace = iter_trace[query_name]
-    if not isinstance(query_trace, dict):
-        raise ValueError(
-            f"Execution trace for query {query_name} in iteration "
-            f"{iter_num} must be a mapping"
-        )
-    return query_trace
+    return {k: iter_trace[k] for k in trace_keys}
 
 
 def collect_execution_trace_info(
@@ -167,23 +168,22 @@ def collect_execution_trace_info(
     execution_trace_info = []
 
     for iter_num in iterations:
-        query_trace = query_trace_for_iteration(
-            execution_trace, iter_num, query_name
-        )
-        feature_values = {
-            feature: get_nested_field_value(
-                query_trace, feature, query_name, iter_num
-            )
-            for feature in features
-        }
-
-        execution_trace_info.append(
-            {
-                "iter_num": iter_num,
-                "query": query_name,
-                **feature_values,
+        for trace_key, query_trace in query_trace_for_iteration(
+                execution_trace, iter_num, query_name).items():
+            feature_values = {
+                feature: get_nested_field_value(
+                    query_trace, feature, trace_key, iter_num
+                )
+                for feature in features
             }
-        )
+
+            execution_trace_info.append(
+                {
+                    "iter_num": iter_num,
+                    "query": trace_key,
+                    **feature_values,
+                }
+            )
 
     return execution_trace_info
 
