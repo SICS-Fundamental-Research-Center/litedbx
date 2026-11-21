@@ -10,8 +10,11 @@
   Q6's own normal branches). The same SemCQ object may live under several
   engine names (movie Q3/Q4/Q8 clone Q2); one engine name must not map
   to two different objects.
-- ``union_frames`` / ``intersect_frames`` / ``single``: assembler-side
-  table algebra over the shared ``selected`` columns.
+- ``union_frames`` / ``intersect_frames`` / ``difference_frames`` /
+  ``distinct_values`` / ``single``: assembler-side table algebra over
+  the shared ``selected`` columns.
+- ``group_extreme``: deterministic argmax/argmin over group row counts
+  ("most/least per group" answers; ties broken lexicographically).
 """
 
 from __future__ import annotations
@@ -87,3 +90,43 @@ def intersect_frames(frames: list[pd.DataFrame], selected: list[str]) -> pd.Data
 def single(branch: str):
     """Assembler returning one branch's table unchanged."""
     return lambda tables: tables[branch]
+
+
+def distinct_values(frame: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Sorted distinct projection of ``cols`` (set-style answers)."""
+    out = frame[cols].dropna().drop_duplicates()
+    return out.sort_values(cols, kind="stable").reset_index(drop=True)
+
+
+def difference_frames(
+    a: pd.DataFrame, b: pd.DataFrame, cols: list[str]
+) -> pd.DataFrame:
+    """Set difference ``a - b`` of two projected tables on ``cols``."""
+    left = a[cols].drop_duplicates()
+    right = b[cols].drop_duplicates()
+    merged = left.merge(right, on=cols, how="left", indicator=True)
+    out = merged[merged["_merge"] == "left_only"].drop(columns="_merge")
+    return out.sort_values(cols, kind="stable").reset_index(drop=True)
+
+
+def group_extreme(
+    frame: pd.DataFrame, by: list[str], mode: str = "max"
+) -> pd.DataFrame:
+    """Deterministic argmax/argmin over group row counts ("most/least
+    per group" answers).
+
+    Ties at the extreme are broken by construction: the
+    lexicographically first group wins, standing in for the NL queries'
+    "ties are broken arbitrarily" and satisfying SemBench's single-row
+    answer format. Returns a one-row frame with the ``by`` columns; an
+    empty ``frame`` yields an empty frame with those columns.
+    """
+    if mode not in ("max", "min"):
+        raise ValueError(f"mode must be 'max' or 'min', got {mode!r}")
+    if frame.empty:
+        return pd.DataFrame(columns=by)
+    counts = frame.groupby(by, sort=True).size()
+    keys = [k if isinstance(k, tuple) else (k,) for k in counts.index]
+    best = counts.max() if mode == "max" else counts.min()
+    winner = min(k for k, v in zip(keys, counts.to_numpy()) if v == best)
+    return pd.DataFrame({c: [v] for c, v in zip(by, winner)})

@@ -2,6 +2,7 @@
 
   eval_rowset         F1 core (set input, single-column engine GT file)
   eval_filter         F1 of an assembled answer table
+  eval_argmax_choice  SemBench "most/least" binary caliber (Q3-family)
   eval_rel_err        scalar relative error (vendored SemBench S2)
   eval_group_rel_err  group-count relative error (vendored SemBench S3)
 
@@ -72,6 +73,49 @@ def eval_filter(
     """F1 of an assembled answer table (engine GT file format)."""
     retrieved = {tuple(row) for row in answer[[selected_col]].values}
     return eval_rowset(retrieved, gt_path, selected_col)
+
+
+def eval_argmax_choice(
+    answer: pd.DataFrame, gt_path: Path, cols: list[str]
+) -> dict[str, Any]:
+    """SemBench "most/least" caliber: an exactly-one-row answer is fully
+    correct iff its value tuple is one of the GT's tied extremes.
+
+    Source: src/scenario/animals/evaluation/evaluate.py:75-93 (Q3/Q4)
+    and :135-173 (Q10 pair variant), generalized from positional columns
+    to named ``cols``; both sides str-coerced. Multi-row or empty
+    answers score 0 against non-empty GT -- the NL's "ties are broken
+    arbitrarily" prescribes a single-value answer format. Divergence vs
+    source: a both-empty answer scores 1.0 here (the eval_rowset
+    convention); SemBench leaves f1 at the dataclass default --
+    unreachable while GT files carry at least one extreme.
+    """
+    gt = {
+        tuple(str(v) for v in row)
+        for row in pd.read_csv(gt_path, dtype=str)[cols]
+        .dropna()
+        .itertuples(index=False, name=None)
+    }
+    if len(answer) == 0:
+        score = 1.0 if not gt else 0.0
+        return {
+            "kind": "argmax_choice",
+            "precision": score,
+            "recall": score,
+            "f1": score,
+            "choice": None,
+            "n_gt": len(gt),
+        }
+    choice = tuple(str(v) for v in answer.iloc[0][cols])
+    hit = len(answer) == 1 and choice in gt
+    return {
+        "kind": "argmax_choice",
+        "precision": 1.0 if hit else 0.0,
+        "recall": 1.0 if hit else 0.0,
+        "f1": 1.0 if hit else 0.0,
+        "choice": choice if len(answer) == 1 else None,
+        "n_gt": len(gt),
+    }
 
 
 def eval_rel_err(answer: pd.DataFrame, gt_path: Path) -> dict[str, Any]:
