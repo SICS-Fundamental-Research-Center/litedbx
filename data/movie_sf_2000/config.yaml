@@ -1,6 +1,13 @@
 base_features: [
   audienceScore,tomatoMeter,rating,ratingContents,releaseDateTheaters,releaseDateStreaming,runtimeMinutes,genre,originalLanguage,director,writer,boxOffice,distributor,soundMix,
-  creationDate,criticName,isTopCritic,originalScore,reviewState,publicatioName,scoreSentiment
+  creationDate,criticName,isTopCritic,originalScore,reviewState,publicatioName
 ]
+# 10-26 de-sentiment ablation: scoreSentiment (GT-defining leak column) removed
+# from base_features together with the column itself; universe aligned to
+# files/movie/data/sf_2000/Reviews.csv. Original table (archived 11-18):
+# ../../archived/data/movie_sf_2000/data_full.csv.bak
+# 11-21 rename: this dir was movie_sf2000_official until 2026-11-21 (the
+# name movie_sf_2000 was held by the retired 2,262-row custom sample, now
+# at ../../archived/data/movie_sf_2000/ together with its .bak)
 id_features: [id,reviewId,title,reviewUrl]
 foreign_keys: [reviewText]
