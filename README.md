@@ -22,7 +22,7 @@ A lightweight query engine for multi-modal data with LLM-based feature extractio
 
 ### Hardware
 
-Local models are hosted with vLLM on 4× NVIDIA GeForce RTX 3090 (24 GiB each); a 30B LLM and a 30B VLM run simultaneously in FP8.
+Local models are hosted with vLLM on 4× NVIDIA GeForce RTX 3090 (24 GiB each). Each modality has a dedicated front: text queries are served by `qwen3-30b-fp8` (:8004), image queries by `qwen3-vl-30b` (:8005), and audio queries by `qwen3-omni` (:8008 bf16 / :8009 AWQ).
 
 ### Installation
 
@@ -66,6 +66,8 @@ mv .env.example .env   # then fill in your keys
 | `qwen3-vl-8b` | Vision | 8002 | 2,3 | 32768 |
 | `llava-v1.6-7b` | Vision | 8003 | 2,3 | 32768 |
 | `qwen3-vl-30b` | Vision | 8005 | 2,3 | 32768 |
+| `qwen3-omni-30b` | Omni (T+V+A) | 8008 | 0-3 | 32768 |
+| `qwen3-omni-30b-awq` | Omni (T+V+A) | 8009 | 2,3 | 32768 |
 
 Tensor parallelism is enabled automatically for multi-GPU models; GPU memory utilization is configured per model and ports auto-increment if busy. To add models, edit the configuration arrays at the top of [`servem.sh`](servem.sh).
 
@@ -187,12 +189,16 @@ litedbx/
 
 ### Models
 
-| Regime | Text | Vision |
-|--------|------|--------|
-| Remote (gateway) | `Qwen3.6-Plus` | `Qwen3.6-Plus` |
-| Local (vLLM) | `Qwen3-30B-A3B-Instruct-2507-FP8` (:8004) | `Qwen3-VL-30B-A3B-Instruct-FP8` (:8005) |
+| Regime | Text | Vision | Audio |
+|--------|------|--------|-------|
+| Remote (gateway) | `Qwen3.6-Plus` | `Qwen3.6-Plus` | `Qwen3.8-Omni-Flash` |
+| Local (vLLM) | `Qwen3-30B-A3B-Instruct-2507-FP8` (:8004) | `Qwen3-VL-30B-A3B-Instruct-FP8` (:8005) | `Qwen3-Omni-30B-A3B` (:8008 bf16 / :8009 AWQ) |
 
-Routing is configured in [`llm/config.yaml`](llm/config.yaml).
+Routing is configured in [`llm/config.yaml`](llm/config.yaml): every modality
+is served by its dedicated front — text :8004, vision :8005, audio omni
+:8008/:8009. (Some Nov 21–22 experiment runs routed Text/Image through the
+omni @8009 to fit tri-modality queries on 4 GPUs; see those experiments'
+reports — `revision/exp/R1.D5.1/` — for the disclosed deviation.)
 
 ### Benchmark
 
