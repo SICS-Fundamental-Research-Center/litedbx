@@ -76,9 +76,11 @@ Download the [SemBench](https://sembench.ngrok.io/) `data/` directory into the r
 ```
 data/
 ├── medical/    
-├── movie/    
+├── movie/                  # full 1.54M sync; official-scale universe at movie_sf_2000/
+├── movie_sf_2000/          # SemBench official scale-2000 universe (data_full + GT)
 ├── ecomm_sf_2000/    
 ├── animals/    
+├── cars/                   # official scale sf_19672 (GT + per-branch rowsets via build_gt.py)
 └── mmqa/
 ```
 
@@ -171,7 +173,7 @@ litedbx/
 │   ├── core/                   # feature_pipeline, semantic_features, feature_selection,
 │   │                           # rewrite_candidates, coreset_maintainer,
 │   │                           # query_execution (rewrite, errors, incremental), preprocessing, reporting
-│   └── scenarios/              # medical, movie, ecomm, animals, mmqa
+│   └── scenarios/              # one package per dataset: movie, animals, ecomm, medical, mmqa, cars
 ├── data_structure/             # sem_query, ldb_data(_manager), coreset, data_stream,
 │                               # sigma_satisfied_data, annotation_sampling, llm_resp_templates
 ├── llm/                        # config.yaml (remote/local model routing), ldb_llm_client, prompts
@@ -198,23 +200,31 @@ Evaluated on [SemBench](https://sembench.ngrok.io/):
 
 | Dataset | Scale Factor | Note |
 |---------|--------------|------|
-| Movie | 2000 | |
+| Movie | 2000 | official universe at `data/movie_sf_2000/` |
 | Wildlife | 200 | |
 | E-Commerce | 2000 | SemBench uses 500; LiteDBX uses 2000 |
 | Medical | 11112 | |
-| MMQA | 200 | |
+| MMQA | 200 | two universes: `mmqa/movie`, `mmqa/airport` |
+| Cars | 19672 | SemBench default 20,000 (seed 42) yields 19,672 rows |
 
 ### Query Mapping
 
+41 queries in scope (domain expansion closed 2026-11-16; per-query rulings:
+`revision/exp/R1.D3.1/1-domain-expansion/domain.md`). SemBench numbering is authoritative; the
+paper's old per-dataset renumbering is retired.
+
 | SemBench | LiteDBX (repo qid) |
 |----------|---------|
-| Movie.Q1, Q2 | movie.Q1, Q2 |
-| Wildlife.Q1 | animals.Q7 |
+| Movie.Q1–Q4, Q8 | movie.Q1–Q4, Q8 (Q3 count, Q4 ratio, Q8 group-count added) |
+| Wildlife.Q1–Q10 | animals.Q1–Q10 (Q7 pre-existing; +9 new) |
 | E-Commerce.Q1, Q2, Q3 | ecomm.Q1, Q2, Q13 |
-| MMQA.Q1, Q2, Q3, Q4, Q5 | mmqa.Q3a, Q3f, Q6a, Q6b, Q6c |
-| Medical.Q1, Q2, Q3, Q4 | medical.Q1, Q3, Q8, Q9 |
+| MMQA.Q1–Q5 | mmqa.Q3a, Q3f, Q6a, Q6b, Q6c |
+| Medical.Q1–Q9 | medical.Q1–Q9 (+5 new: Q2 audio, Q4 AVG, Q5 count, Q6/Q7 multimodal) |
+| Cars.Q1–Q9 | cars.Q1–Q9 (new dataset) |
 
 ### Evaluation Notes
 
-1. **Aggregation queries** are excluded (require human-provided annotations, e.g. `SUM`, `COUNT`).
+1. **Aggregation queries are in scope** since the domain expansion: scalar/group aggregates are
+   evaluated by relative error and reported as `quality = 1/(1+rel_err) ∈ [0,1]` (non-F1); rowset
+   filters use F1, argmax queries binary correctness.
 2. **LIMIT clauses** are removed before execution (LIMIT optimization not supported).
