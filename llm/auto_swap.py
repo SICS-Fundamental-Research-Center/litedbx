@@ -112,29 +112,91 @@ class AutoSwapManager:
         self._swap(key)
         return True
 
+    # Swap-pick race (R1.D5.1 crash 2026-11-22): servem's evict phase
+    # waits only for tmux sessions to vanish, but the vLLM workers can
+    # hold VRAM a few seconds longer, so the immediate GPU pick can miss
+    # our own just-freed GPUs. With GPU_POOL_OVERRIDE pinning the pick,
+    # a lost race fails fast (rc=1) instead of landing on a foreign GPU;
+    # retry after waiting for the pool to drain.
+    _PICK_RETRIES = 3
+    _POOL_DRAIN_MB = 3000
+    _POOL_DRAIN_TIMEOUT_S = 240.0
+
+    def _pool_drained(self) -> bool:
+        """Pool GPUs below the drain threshold (no pool pin -> True)."""
+        pool = os.environ.get("GPU_POOL_OVERRIDE", "").strip()
+        if not pool or pool == "auto":
+            return True
+        ids = {p for p in re.split(r"[,\s]+", pool) if p}
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,memory.used",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+            used = {}
+            for line in out.strip().splitlines():
+                parts = [x.strip() for x in line.split(",")]
+                if len(parts) >= 2 and parts[1].isdigit():
+                    used[parts[0]] = int(parts[1])
+            return all(used.get(i, 1 << 30) <= self._POOL_DRAIN_MB
+                       for i in ids)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("pool-drain probe failed: %s", e)
+            return True
+
+    def _wait_pool_drain(self) -> None:
+        if self._pool_drained():
+            return
+        deadline = time.time() + self._POOL_DRAIN_TIMEOUT_S
+        while time.time() < deadline and not self._pool_drained():
+            time.sleep(3)
+
     def _swap(self, key: str) -> dict:
         """Run ``servem.sh swap <key>``; record the wall-clock interval.
 
         Blocks until servem returns (it waits for the model to answer
         HTTP on its port). The interval is recorded even on failure --
         the time was spent either way; the caller raises on rc != 0.
+        A failed attempt is retried (VRAM-release race; see
+        _PICK_RETRIES) before giving up.
         """
         env = {**os.environ, "SERVEM_EAGER": "1"}
+        # servem.sh line ~109 clobbers GPU_POOL_OVERRIDE from
+        # SERVEM_GPU_POOL (default auto), so the pin must ride the
+        # SERVEM_* name to reach select_gpu_slots (18:32 fp8-on-0,1
+        # incident: unpinned pick took the just-vacated foreign GPUs)
+        pool = env.get("GPU_POOL_OVERRIDE", "").strip()
+        if pool and pool != "auto":
+            env.setdefault("SERVEM_GPU_POOL", pool)
         t0 = time.time()
-        proc = subprocess.run(
-            ["bash", str(self.servem), "swap", key],
-            cwd=self.repo_root, env=env, capture_output=True, text=True,
-            timeout=1800,
-        )
+        for attempt in range(1, self._PICK_RETRIES + 1):
+            proc = subprocess.run(
+                ["bash", str(self.servem), "swap", key],
+                cwd=self.repo_root, env=env, capture_output=True, text=True,
+                timeout=1800,
+            )
+            if proc.returncode == 0:
+                break
+            t1 = time.time()
+            self.intervals.append(
+                {"key": key, "t_start": t0, "t_end": t1,
+                 "seconds": round(t1 - t0, 3), "attempt": attempt})
+            if attempt >= self._PICK_RETRIES:
+                tail = (proc.stdout + proc.stderr)[-2000:]
+                raise SwapFailed(
+                    f"servem.sh swap {key} rc={proc.returncode} "
+                    f"after {attempt} attempts: {tail}")
+            logger.warning(
+                "auto-swap %s attempt %d rc=%d; waiting for pool VRAM "
+                "release, then retrying", key, attempt, proc.returncode)
+            self._wait_pool_drain()
         t1 = time.time()
         interval = {"key": key, "t_start": t0, "t_end": t1,
-                    "seconds": round(t1 - t0, 3)}
+                    "seconds": round(t1 - t0, 3), "attempt": attempt}
         self.intervals.append(interval)
-        if proc.returncode != 0:
-            tail = (proc.stdout + proc.stderr)[-2000:]
-            raise SwapFailed(
-                f"servem.sh swap {key} rc={proc.returncode}: {tail}")
-        logger.info("auto-swap %s done in %.1fs", key, interval["seconds"])
+        logger.info("auto-swap %s done in %.1fs (attempt %d)",
+                    key, interval["seconds"], attempt)
         return interval
 
     def overlap_seconds(self, t0: float, t1: float) -> float:
