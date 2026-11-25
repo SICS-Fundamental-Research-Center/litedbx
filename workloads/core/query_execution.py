@@ -7,6 +7,7 @@
 
 import logging
 import math
+import os
 from time import perf_counter, time
 from typing import Any
 
@@ -196,6 +197,75 @@ class QueryExecution:
             raise ValueError("Required semantic features were not selected.")
         return max(required_positions, default=-1) + 1
 
+    def _pure_structural_passthrough_labels(
+        self, q_name: str, stream_indices: range
+    ) -> list[pd.Series]:
+        """All-True predicted labels for a Ps=[] branch (user order
+        2026-11-24): Sigma alone fully defines the branch's semantics,
+        so every Sigma-satisfied row passes -- annotation, label
+        propagation, and rewrite learning are meaningless (and the
+        0-column feature matrix they would train on is the historical
+        cars-Q6 face-branch crash). Empty streams keep the empty-series
+        convention of the apply_rules paths.
+        """
+        labels = []
+        for i in stream_indices:
+            stream_record = self.data_manager.sigma_satisfied_data[i][q_name]
+            df = stream_record["ldb_data"].df
+            if df.empty:
+                labels.append(pd.Series(dtype=int))
+            else:
+                labels.append(pd.Series(True, index=df.index))
+        return labels
+
+    def _pure_structural_candidate_result(
+        self, q_name: str, candidate: RewriteCandidate
+    ) -> dict[str, Any]:
+        """Passthrough candidate result for a Ps=[] branch: the
+        Sigma-satisfied rowset IS the branch answer (exact SQL
+        semantics -- zero approximation loss, no annotation or
+        propagation cost; all rewrite candidates are identical for
+        such a branch, so L_static=0 loses nothing in selection)."""
+        pred_Y = self._pure_structural_passthrough_labels(q_name, range(1))[0]
+        self.data_manager.sigma_satisfied_data[0][q_name][
+            "propagated_labels"
+        ] = pred_Y
+        eval_results = self.data_manager.eval_query_quality(
+            q_name=q_name,
+            selected_cols=self.queries[q_name].selected,
+            stream_idx=0,
+            pred_labels=[pred_Y],
+        )
+        stream_stat = (
+            self.data_manager.sigma_satisfied_data.compute_stream_stat(q_name)
+        )
+        logger.info(
+            "Pure-structural passthrough for query %s (Ps=[]): %s "
+            "Sigma-satisfied rows returned unrewritten.",
+            q_name,
+            len(pred_Y),
+        )
+        return {
+            "candidate": candidate.kind,
+            "candidate_feature_count": candidate.feature_count,
+            "rules": [],
+            "features": [],
+            "pred_eval": eval_results,
+            "trans_eval": eval_results,
+            "L_rew": 0.0,
+            "penalty_rew": 0.0,
+            "L_LOO": 0.0,
+            "penalty_LOO": 0.0,
+            "L_obj": 0.0,
+            "L_subj": 0.0,
+            "L_static": 0.0,
+            "memory_cost": 0.0,
+            "stream_selectivities": stream_stat["stream_selectivities"],
+            "overall_selectivity": stream_stat["overall_selectivity"],
+            "stream_sizes": stream_stat["stream_sizes"],
+            "total_size": stream_stat["total_size"],
+        }
+
     def _compose_best_per_query(
         self,
         execution_trace: dict,
@@ -251,6 +321,8 @@ class QueryExecution:
         rules_trace: dict[str, list],
         debug: bool,
     ) -> dict[str, Any]:
+        if not self.queries[q_name].Ps:
+            return self._pure_structural_candidate_result(q_name, candidate)
         active_external_features = self._active_external_features(
             q_name, candidate
         )
@@ -484,6 +556,23 @@ class QueryExecution:
 
     def _execute_without_enrichment(self, debug: bool = False) -> None:
         for q_name in self.queries:
+            if not self.queries[q_name].Ps:
+                trans_Y = self._pure_structural_passthrough_labels(
+                    q_name, range(1)
+                )[0]
+                self.data_manager.sigma_satisfied_data[0][q_name][
+                    "propagated_labels"
+                ] = trans_Y
+                trans_eval_results = self.data_manager.eval_query_quality(
+                    q_name=q_name,
+                    selected_cols=self.queries[q_name].selected,
+                    stream_idx=0,
+                    pred_labels=[trans_Y],
+                )
+                print("=" * 30)
+                print(trans_eval_results)
+                print("=" * 30)
+                continue
             active_external_features = []
             train_X = self.data_manager.coresets[q_name][
                 "ldb_data"
@@ -530,6 +619,22 @@ class QueryExecution:
         )
 
         for q_name in self.queries:
+            if not self.queries[q_name].Ps:
+                # Pure-structural branch: no conditions to ask the LLM
+                # about; every Sigma row passes by semantics.
+                pred_Y = self._pure_structural_passthrough_labels(
+                    q_name, range(1)
+                )[0]
+                pred_eval_results = self.data_manager.eval_query_quality(
+                    q_name=q_name,
+                    selected_cols=self.queries[q_name].selected,
+                    stream_idx=0,
+                    pred_labels=[pred_Y],
+                )
+                print("=" * 30)
+                print(pred_eval_results)
+                print("=" * 30)
+                continue
             active_external_features = [
                 spec.target_col
                 for spec in self.data_manager.enriched_features[q_name]
@@ -651,21 +756,26 @@ class QueryExecution:
         ]
         candidate_kind = self.data_manager.rewrite_rules[q_name]["candidate"]
         ucq = self.data_manager.rewrite_rules[q_name]["ucq"]
-        trans_Y_li = []
-        for i in range(inc_round + 1):
-            stream_ldb_data = ss_data_obj[i][q_name]["ldb_data"]
-            if stream_ldb_data.df.empty:
-                trans_Y_li.append(pd.Series(dtype=int))
-                continue
-            test_X = self._select_candidate_features(
-                ldb_data=stream_ldb_data,
-                active_external_features=active_external_features,
-                candidate_kind=candidate_kind,
-                eligible_base_features=(
-                    self.data_manager.relevant_base_features.get(q_name)
-                ),
+        if not self.queries[q_name].Ps:
+            trans_Y_li = self._pure_structural_passthrough_labels(
+                q_name, range(inc_round + 1)
             )
-            trans_Y_li.append(apply_rules(ucq, encode_features(test_X)))
+        else:
+            trans_Y_li = []
+            for i in range(inc_round + 1):
+                stream_ldb_data = ss_data_obj[i][q_name]["ldb_data"]
+                if stream_ldb_data.df.empty:
+                    trans_Y_li.append(pd.Series(dtype=int))
+                    continue
+                test_X = self._select_candidate_features(
+                    ldb_data=stream_ldb_data,
+                    active_external_features=active_external_features,
+                    candidate_kind=candidate_kind,
+                    eligible_base_features=(
+                        self.data_manager.relevant_base_features.get(q_name)
+                    ),
+                )
+                trans_Y_li.append(apply_rules(ucq, encode_features(test_X)))
         trans_eval = self.data_manager.eval_query_quality(
             q_name=q_name,
             selected_cols=self.queries[q_name].selected,
@@ -751,12 +861,27 @@ class QueryExecution:
             else pd.DataFrame(columns=train_X.columns)
             for i in range(inc_round + 1)
         ]
-        _, pred_Y_li = perform_label_propagation(
-            train_X,
-            train_Y,
-            test_X_li,
-            sample_weight=sample_weight,
-        )
+        # certificate-only timing (user order 2026-11-22): label
+        # propagation + error-bound/threshold math exist solely to compute
+        # the reoptimization certificate; the dynamic-evolving table runs
+        # direct reuse by default, so this time is marked for exclusion
+        # (rule application / trans_eval below are the reuse work itself).
+        t_cert0 = time()
+        if not self.queries[q_name].Ps:
+            # Pure-structural branch (user order 2026-11-24): no
+            # semantic features exist to propagate on; labels are
+            # all-True by Sigma semantics (the empty-X propagation
+            # below was the cars-Q6 face-branch crash site).
+            pred_Y_li = self._pure_structural_passthrough_labels(
+                q_name, range(inc_round + 1)
+            )
+        else:
+            _, pred_Y_li = perform_label_propagation(
+                train_X,
+                train_Y,
+                test_X_li,
+                sample_weight=sample_weight,
+            )
 
         self.data_manager.sigma_satisfied_data[inc_round][q_name][
             "propagated_labels"
@@ -820,19 +945,32 @@ class QueryExecution:
             err_certificate,
             reoptimization_threshold,
         )
+        logger.info(
+            "Inc-Round %s, Query %s: certificate computation (label "
+            "propagation + error bound) took %.3f s — excluded from the "
+            "dynamic-evolving reuse-table Time",
+            inc_round,
+            q_name,
+            time() - t_cert0,
+        )
 
         # Evaluate the UNCHANGED pre-update rewrite on the updated candidate
         # set BEFORE the refresh decision. trans_eval["Err"] is Err_new -- the
         # old rewrite's 0-1 error on the new data -- measured on every round
         # (including ones about to be refreshed) so the dynamic certificate's
         # pre-refresh slack is always observed.
-        trans_Y_li = [
-            apply_rules(
-                self.data_manager.rewrite_rules[q_name]["ucq"],
-                encode_features(test_X_li[i]),
+        if not self.queries[q_name].Ps:
+            trans_Y_li = self._pure_structural_passthrough_labels(
+                q_name, range(inc_round + 1)
             )
-            for i in range(inc_round + 1)
-        ]
+        else:
+            trans_Y_li = [
+                apply_rules(
+                    self.data_manager.rewrite_rules[q_name]["ucq"],
+                    encode_features(test_X_li[i]),
+                )
+                for i in range(inc_round + 1)
+            ]
         trans_eval = self.data_manager.eval_query_quality(
             q_name=q_name,
             selected_cols=self.queries[q_name].selected,
@@ -856,7 +994,23 @@ class QueryExecution:
         )
 
         if err_certificate >= reoptimization_threshold:
-            return None
+            if os.environ.get("LDB_FORCE_REUSE", "0") != "1":
+                return None
+            # User ruling 2026-11-22 (dynamic-evolving table): record the
+            # frozen-rule reuse outcome regardless of the reoptimization
+            # gate. The reuse evaluation (trans_eval / F1_reuse) is already
+            # computed above; fall through so the query reports it instead
+            # of discarding the whole incremental step. Default env-off
+            # keeps the gate's abort semantics for everyone else.
+            logger.info(
+                "Inc-Round %s, Query %s: certificate %.4f >= threshold %.4f "
+                "— gate crossed; LDB_FORCE_REUSE=1 records the reuse "
+                "outcome anyway.",
+                inc_round,
+                q_name,
+                err_certificate,
+                reoptimization_threshold,
+            )
 
         return {
             "error_certificate": err_certificate,
