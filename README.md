@@ -215,8 +215,7 @@ Evaluated on [SemBench](https://sembench.ngrok.io/):
 
 ### Query Mapping
 
-41 queries in scope (domain expansion closed 2026-11-16; per-query rulings:
-`revision/exp/R1.D3.1/1-domain-expansion/domain.md`). SemBench numbering is authoritative; the
+41 queries in scope. SemBench numbering is authoritative; the
 paper's old per-dataset renumbering is retired.
 
 | SemBench | LiteDBX (repo qid) |
