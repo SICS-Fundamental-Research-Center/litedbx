@@ -55,7 +55,7 @@ def main() -> int:
     )
     merged = movies.merge(reviews, on="id", how="left", suffixes=("", "_review"))
     # de-sentiment: leak column removed at build time (no post-hoc edits)
-    merged = merged.drop(columns=["scoreSentiment"])
+    merged = merged.drop(columns=["scoreSentiment", "originalScore", "reviewState"])
     assert len(merged) == 2000
 
     out = HERE / "data_full.csv"
@@ -64,6 +64,8 @@ def main() -> int:
     # purity + GT self-checks
     back = pd.read_csv(out)
     assert "scoreSentiment" not in back.columns, "leak column must be absent"
+    assert "originalScore" not in back.columns, "leak proxy column must be absent"
+    assert "reviewState" not in back.columns, "leak alias column must be absent"
     assert len(back) == 2000
     gt1 = set(pd.read_csv(HERE / "ground_truth/Q1.csv", dtype=str)["reviewId"])
     q2 = pd.read_csv(SRC / "Reviews.csv", dtype=str)
