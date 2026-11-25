@@ -1,7 +1,8 @@
 base_features: [
   audienceScore,tomatoMeter,rating,ratingContents,releaseDateTheaters,releaseDateStreaming,runtimeMinutes,genre,originalLanguage,director,writer,boxOffice,distributor,soundMix,
-  creationDate,criticName,isTopCritic,originalScore,reviewState,publicatioName
+  creationDate,criticName,isTopCritic,publicatioName
 ]
+# v2 2026-11-23: originalScore (strong proxy) + reviewState (1:1 label alias, 100% agreement) both removed, user order
 # 10-26 de-sentiment ablation: scoreSentiment (GT-defining leak column) removed
 # from base_features together with the column itself; universe aligned to
 # files/movie/data/sf_2000/Reviews.csv. Original table (archived 11-18):
